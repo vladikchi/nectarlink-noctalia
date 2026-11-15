@@ -170,9 +170,19 @@ mod imp {
 
     /// Stops PC-to-phone mirroring if `peer` matches the active viewer.
     pub fn stop_for(peer: &DeviceId) {
+        stop_matching(peer, false);
+    }
+
+    /// Stops only a watching session for this peer, checked under the same lock
+    /// as removal so a replacement ordinary screen-sharing session is not stopped.
+    pub fn stop_watching_for(peer: &DeviceId) {
+        stop_matching(peer, true);
+    }
+
+    fn stop_matching(peer: &DeviceId, watching_only: bool) {
         let stopped = {
             let mut guard = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.as_ref().is_some_and(|s| &s.peer == peer)
+            if guard.as_ref().is_some_and(|s| &s.peer == peer && (!watching_only || s.watching))
                 && let Some(s) = guard.take()
             {
                 s.stop.store(true, Ordering::SeqCst);
@@ -3028,6 +3038,7 @@ mod imp {
     pub fn start(_peer: DeviceId, _options: MirrorStart) {}
 
     pub fn stop_for(_peer: &DeviceId) {}
+    pub fn stop_watching_for(_peer: &DeviceId) {}
 
     pub fn stop_all() {}
 

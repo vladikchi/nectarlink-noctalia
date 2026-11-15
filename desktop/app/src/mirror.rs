@@ -966,15 +966,8 @@ pub fn keyboard_text(device: DeviceId, text: String) {
         return;
     }
     let window = Window::screen(device);
-    let mut piece = String::new();
-    for c in text.chars() {
-        if piece.len() + c.len_utf8() > nectarlink_core::MIRROR_MAX_TEXT_BYTES {
-            input(window, nectarlink_core::MirrorInput::Text { text: std::mem::take(&mut piece) });
-        }
-        piece.push(c);
-    }
-    if !piece.is_empty() {
-        input(window, nectarlink_core::MirrorInput::Text { text: piece });
+    for text in checked_text_chunks(&text) {
+        input(window, nectarlink_core::MirrorInput::Text { text });
     }
 }
 
@@ -1515,25 +1508,146 @@ pub fn palette_apps(device: DeviceId) -> Vec<(String, String)> {
 
 /// The PC's mouse, keyboard, and gamepad on a mirrored screen or app window,
 /// sent in order.
-pub fn input(window: Window, input: nectarlink_core::MirrorInput) {
-    static QUEUE: std::sync::OnceLock<
-        tokio::sync::mpsc::UnboundedSender<(Window, nectarlink_core::MirrorInput)>,
-    > = std::sync::OnceLock::new();
-    let queue = QUEUE.get_or_init(|| {
-        let (queue, mut inputs) =
-            tokio::sync::mpsc::unbounded_channel::<(Window, nectarlink_core::MirrorInput)>();
-        core_host::spawn(async move {
-            while let Some((window, input)) = inputs.recv().await {
-                if let Some(node) = core_host::node()
-                    && let Err(e) = node.mirror_input(window.device, window.session, input).await
-                {
-                    tracing::debug!(error = %e, "input didn't reach the phone");
+type InputAck = tokio::sync::oneshot::Sender<Result<(), String>>;
+type QueuedInput = (Window, nectarlink_core::MirrorInput, Option<InputAck>);
+fn input_queue() -> &'static tokio::sync::mpsc::UnboundedSender<QueuedInput> {
+    static QUEUE: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<QueuedInput>> =
+        std::sync::OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let (queue, inputs) = tokio::sync::mpsc::unbounded_channel::<QueuedInput>();
+        core_host::spawn(run_input_queue(inputs, |window, input| async move {
+            match core_host::node() {
+                Some(node) => {
+                    node.mirror_input(window.device, window.session, input).await.map_err(|e| describe(&e))
                 }
+                None => Err("core unavailable".to_owned()),
             }
-        });
+        }));
         queue
-    });
-    let _ = queue.send((window, input));
+    })
+}
+
+async fn run_input_queue<F, Fut>(mut inputs: tokio::sync::mpsc::UnboundedReceiver<QueuedInput>, mut send: F)
+where
+    F: FnMut(Window, nectarlink_core::MirrorInput) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    while let Some((window, input, ack)) = inputs.recv().await {
+        let result = send(window, input).await;
+        if let Err(e) = &result {
+            tracing::debug!(error = %e, "input didn't reach the phone");
+        }
+        if let Some(ack) = ack {
+            let _ = ack.send(result);
+        }
+    }
+}
+
+pub fn input(window: Window, input: nectarlink_core::MirrorInput) {
+    let _ = input_queue().send((window, input, None));
+}
+
+/// Explicit API text entry uses the same ordered queue as native keyboard_on,
+/// but waits for the transport send result. Mirror input has NO application
+/// acknowledgement, so successful send must not be called confirmed phone input.
+fn checked_text_chunks(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    for c in text.chars() {
+        if chunk.len() + c.len_utf8() > nectarlink_core::MIRROR_MAX_TEXT_BYTES {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// A dropped caller/HTTP timeout does not retract input already queued. Never
+/// automatically retry: some or all of the text may already have been sent.
+pub async fn keyboard_text_checked(device: DeviceId, text: &str) -> Result<(), String> {
+    send_checked_text(device, text, keyboard_device, input_queue()).await
+}
+
+async fn send_checked_text(
+    device: DeviceId,
+    text: &str,
+    active: impl Fn() -> Option<DeviceId>,
+    queue: &tokio::sync::mpsc::UnboundedSender<QueuedInput>,
+) -> Result<(), String> {
+    if active() != Some(device) {
+        return Err("keyboard is off".into());
+    }
+    for text in checked_text_chunks(text) {
+        if active() != Some(device) {
+            return Err("keyboard changed".into());
+        }
+        let (done, reply) = tokio::sync::oneshot::channel();
+        queue
+            .send((Window::screen(device), nectarlink_core::MirrorInput::Text { text }, Some(done)))
+            .map_err(|_| "input queue closed".to_owned())?;
+        reply.await.map_err(|_| "input acknowledgement lost".to_owned())??;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod checked_text_tests {
+    use super::*;
+    #[tokio::test]
+    async fn queue_preserves_order_and_reports_send_errors_even_if_caller_is_gone() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let a = DeviceId([1; 32]);
+        let b = DeviceId([2; 32]);
+        let (ack, gone) = tokio::sync::oneshot::channel();
+        drop(gone);
+        tx.send((Window::screen(a), nectarlink_core::MirrorInput::Text { text: "first".into() }, Some(ack)))
+            .unwrap();
+        let (ack, reply) = tokio::sync::oneshot::channel();
+        tx.send((Window::screen(b), nectarlink_core::MirrorInput::Text { text: "second".into() }, Some(ack)))
+            .unwrap();
+        drop(tx);
+        let mut seen = Vec::new();
+        run_input_queue(rx, |window, _| {
+            seen.push(window.device);
+            std::future::ready(Err("offline".into()))
+        })
+        .await;
+        assert_eq!(seen, vec![a, b]);
+        assert_eq!(reply.await.unwrap(), Err("offline".into()));
+    }
+    #[tokio::test]
+    async fn text_stops_after_device_change_or_transport_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let a = DeviceId([1; 32]);
+        let b = DeviceId([2; 32]);
+        let text = "x".repeat(nectarlink_core::MIRROR_MAX_TEXT_BYTES + 1);
+        for fail in [false, true] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<QueuedInput>();
+            let worker = tokio::spawn(async move {
+                let (_, _, ack) = rx.recv().await.unwrap();
+                ack.unwrap().send(if fail { Err("offline".into()) } else { Ok(()) }).unwrap();
+                assert!(rx.recv().await.is_none());
+            });
+            let checks = AtomicUsize::new(0);
+            let active = || Some(if checks.fetch_add(1, Ordering::SeqCst) < 2 { a } else { b });
+            let result = send_checked_text(a, &text, active, &tx).await;
+            assert_eq!(result.unwrap_err(), if fail { "offline" } else { "keyboard changed" });
+            drop(tx);
+            worker.await.unwrap();
+        }
+    }
+    #[test]
+    fn unicode_chunks_preserve_text_and_protocol_size() {
+        let text = "я🦀".repeat(nectarlink_core::MIRROR_MAX_TEXT_BYTES);
+        let chunks = super::checked_text_chunks(&text);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|s| !s.is_empty() && s.len() <= nectarlink_core::MIRROR_MAX_TEXT_BYTES));
+        assert_eq!(chunks.concat(), text);
+        assert!(super::checked_text_chunks("").is_empty());
+    }
 }
 
 /// Resolves the currently active or showing mirror window.

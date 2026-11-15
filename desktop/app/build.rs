@@ -382,6 +382,8 @@ fn main() {
         .include_dir("cpp")
         .cpp_files([
             "cpp/app_helpers.cpp",
+            "cpp/external_palette.h",
+            "cpp/external_palette.cpp",
             "cpp/native_window.h",
             "cpp/native_window.cpp",
             "cpp/video_view.h",

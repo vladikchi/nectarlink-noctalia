@@ -844,7 +844,19 @@ Item {
                         }
                         Divider { width: parent.width; visible: Theme.hive || appearanceBottomPair.visible }
 
-                        // Hive: the comb's motion instead of Mica (Hive keeps its own colors).
+                        ListRow {
+                            width: parent.width
+                            visible: Theme.hive
+                            iconPath: Icons.sparkle
+                            title: qsTr("Использовать цвета Noctalia")
+                            description: qsTr("Палитра и светлый/тёмный режим следуют Noctalia.")
+                            Toggle {
+                                label: qsTr("Использовать цвета Noctalia")
+                                checked: Preferences.noctaliaColors
+                                onToggled: (on) => Preferences.noctaliaColors = on
+                            }
+                        }
+                        // Hive: animation stays independent of the color source.
                         ListRow {
                             width: parent.width
                             visible: Theme.hive
