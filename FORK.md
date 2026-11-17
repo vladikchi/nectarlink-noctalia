@@ -91,3 +91,22 @@ public release. Public author/repository/update-channel names are not chosen.
 ## This source snapshot
 
 Application variant: **standard**. The companion Noctalia plugin is shared.
+
+### Wayland PC-to-phone capture backport (2026-11-17)
+
+Selected desktop capture changes from upstream v0.1.6-nightly.11 / PR #403
+(https://github.com/thtbee/nectarlink/pull/403) are backported, not the entire
+nightly release. The extended API, palette integration and standard Island
+behavior are retained. The application version remains 0.1.5+noctalia.1.
+
+Each capture attempt owns its portal session and PipeWire process. Portal setup
+has a 20-second deadline and cancellation closes pending requests. Missing frames,
+closed sessions and encoder stalls end the attempt with a logged error. Input,
+when the portal supports it and the phone's remote-input setting allows it, uses
+the same permission session. The `pc_capture_failed` notice is understood by
+upstream Android nightly.11; older Android clients may not display its retry UI.
+
+Two local safeguards supplement the backport: failed portal availability probes
+are not cached for the process lifetime, and desktop capture under Wayland does
+not silently substitute the Xwayland root window if the portal is unavailable.
+No compositor configuration, pairing identity or API authentication is changed.
