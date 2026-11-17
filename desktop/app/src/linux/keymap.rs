@@ -11,7 +11,7 @@
 use std::{
     collections::HashMap,
     ffi::{CString, c_char, c_int, c_void},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 /// What the virtual keyboard presses for one character.
@@ -49,21 +49,26 @@ impl Keymap {
     }
 }
 
-/// The keymap for the desktop's current layout, compiled once. `None` when
+/// The keymap for the desktop's current layout. `None` when
 /// the layout can't be found or compiled: callers then must not type through
 /// uinput, since guessing a layout types the wrong characters.
-pub fn current() -> Option<&'static Keymap> {
-    static KEYMAP: OnceLock<Option<Keymap>> = OnceLock::new();
-    KEYMAP
-        .get_or_init(|| {
-            let layout = detect_layout()?;
-            let keymap = compile(&layout);
-            if keymap.is_none() {
-                tracing::warn!(layout = %layout.layout, "can't compile the keyboard layout");
-            }
-            keymap
-        })
-        .as_ref()
+pub fn current() -> Option<Arc<Keymap>> {
+    // Keep only the last compiled layout, not a permanent startup snapshot.
+    static KEYMAP: Mutex<Option<(Layout, Arc<Keymap>)>> = Mutex::new(None);
+    let layout = detect_layout()?;
+    let mut cached = KEYMAP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((previous, keymap)) = cached.as_ref()
+        && previous == &layout
+    {
+        return Some(Arc::clone(keymap));
+    }
+    let Some(keymap) = compile(&layout) else {
+        tracing::warn!(layout = %layout.layout, "can't compile the keyboard layout");
+        return None;
+    };
+    let keymap = Arc::new(keymap);
+    *cached = Some((layout, Arc::clone(&keymap)));
+    Some(keymap)
 }
 
 const KEY_TAB: u16 = 15;
@@ -81,10 +86,31 @@ fn is_keypad(code: u16) -> bool {
 
 // ---- Finding the layout ----
 
-/// The layout the desktop types with, from (in order) the `XKB_DEFAULT_*`
+/// The layout the desktop types with, from Niri's active layout when present,
+/// otherwise (in order) the `XKB_DEFAULT_*`
 /// variables, GNOME's input sources, KDE's keyboard settings, and the
 /// system's keyboard configuration.
 pub fn detect_layout() -> Option<Layout> {
+    if std::env::var_os("NIRI_SOCKET").is_some() {
+        // Do not substitute GNOME's saved first layout for Niri's active one.
+        let output = super::run_cmd_timeout(
+            "niri",
+            &["msg", "-j", "keyboard-layouts"],
+            std::time::Duration::from_secs(1),
+        )?;
+        if !output.status.success() {
+            return None;
+        }
+        let name = active_niri_layout_name(&output.stdout)?;
+        static RULES: OnceLock<Option<String>> = OnceLock::new();
+        let rules = RULES.get_or_init(|| {
+            let root = std::env::var_os("XKB_CONFIG_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| "/usr/share/X11/xkb".into());
+            std::fs::read_to_string(root.join("rules/evdev.lst")).ok()
+        });
+        return layout_from_rules(rules.as_deref()?, &name);
+    }
     if let Some(layout) = from_env() {
         return Some(layout);
     }
@@ -113,6 +139,48 @@ pub fn detect_layout() -> Option<Layout> {
     std::fs::read_to_string("/etc/X11/xorg.conf.d/00-keyboard.conf")
         .ok()
         .and_then(|text| parse_xorg_keyboard(&text))
+}
+
+fn active_niri_layout_name(reply: &[u8]) -> Option<String> {
+    let reply: serde_json::Value = serde_json::from_slice(reply).ok()?;
+    let index = usize::try_from(reply.get("current_idx")?.as_u64()?).ok()?;
+    let name = reply.get("names")?.as_array()?.get(index)?.as_str()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Resolve XKB's display name without guessing a language from its spelling.
+/// The installed rules list includes both base layouts and named variants.
+fn layout_from_rules(rules: &str, name: &str) -> Option<Layout> {
+    let mut section = "";
+    let mut found = None;
+    for line in rules.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('!') {
+            section = header.trim();
+            continue;
+        }
+        if !matches!(section, "layout" | "variant") {
+            continue;
+        }
+        let Some((code, description)) = line.split_once(char::is_whitespace) else { continue };
+        let candidate = if section == "layout" {
+            (description.trim() == name).then(|| Layout { layout: code.into(), ..Layout::default() })
+        } else {
+            description.split_once(':').and_then(|(base, description)| {
+                (description.trim() == name).then(|| Layout {
+                    layout: base.trim().into(),
+                    variant: code.into(),
+                    ..Layout::default()
+                })
+            })
+        };
+        if let Some(candidate) = candidate {
+            if found.as_ref().is_some_and(|previous| previous != &candidate) {
+                return None; // An ambiguous name must not type the wrong keys.
+            }
+            found = Some(candidate);
+        }
+    }
+    found
 }
 
 fn from_env() -> Option<Layout> {
@@ -240,6 +308,16 @@ pub fn compile(layout: &Layout) -> Option<Keymap> {
         if lib.is_null() {
             return None;
         }
+        // Layout changes can compile another map; balance each dlopen even on
+        // an early return. Keymap stores only character/key-code values.
+        struct Library(*mut c_void);
+        impl Drop for Library {
+            fn drop(&mut self) {
+                // SAFETY: this handle came from the successful dlopen above.
+                unsafe { libc::dlclose(self.0) };
+            }
+        }
+        let _library = Library(lib);
         let sym = |name: &std::ffi::CStr| {
             let p = libc::dlsym(lib, name.as_ptr());
             (!p.is_null()).then_some(p)
@@ -309,6 +387,59 @@ pub fn compile(layout: &Layout) -> Option<Keymap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_active_niri_group_instead_of_the_first_layout() {
+        assert_eq!(
+            active_niri_layout_name(br#"{"names":["English (US)","Russian"],"current_idx":1}"#),
+            Some("Russian".into())
+        );
+        assert_eq!(
+            active_niri_layout_name(br#"{"names":["English (US)","Russian"],"current_idx":0}"#),
+            Some("English (US)".into())
+        );
+        for reply in [
+            br#"{"names":["Russian"],"current_idx":2}"#.as_slice(),
+            br#"{"names":["Russian"],"current_idx":-1}"#,
+            br#"{"names":[],"current_idx":0}"#,
+            br#"{"names":[null],"current_idx":0}"#,
+            b"invalid json",
+        ] {
+            assert_eq!(active_niri_layout_name(reply), None);
+        }
+    }
+
+    #[test]
+    fn resolves_niri_names_using_installed_xkb_layout_and_variant_descriptions() {
+        let rules = "! model\n pc105 Generic 105-key PC\n! layout\n us English (US)\n ru Russian\n! variant\n phonetic ru: Russian (phonetic)\n! option\n grp:toggle Switching layout\n";
+        assert_eq!(layout_from_rules(rules, "Russian").unwrap().layout, "ru");
+        assert_eq!(layout_from_rules(rules, "English (US)").unwrap().layout, "us");
+        let variant = layout_from_rules(rules, "Russian (phonetic)").unwrap();
+        assert_eq!((variant.layout.as_str(), variant.variant.as_str()), ("ru", "phonetic"));
+        assert_eq!(layout_from_rules(rules, "Unknown custom layout"), None);
+        assert_eq!(layout_from_rules("! layout\n us Same name\n ru Same name\n", "Same name"), None);
+    }
+
+    #[test]
+    fn russian_text_maps_to_keys_without_guessing_an_english_layout() {
+        let ru = layout("ru", "");
+        assert!("Тест 123".chars().all(|ch| ru.press_for(ch).is_some()));
+        assert_eq!(ru.press_for('т'), Some(KeyPress { code: 49, shift: false, altgr: false }));
+        assert_eq!(ru.press_for('Т'), Some(KeyPress { code: 49, shift: true, altgr: false }));
+        assert_eq!(layout("us", "").press_for('Т'), None);
+        assert!("Test 123".chars().all(|ch| layout("us", "").press_for(ch).is_some()));
+    }
+
+    #[test]
+    #[ignore = "requires a live Niri session; never injects keys"]
+    fn live_niri_layout_can_be_detected_and_compiled() {
+        assert!(std::env::var_os("NIRI_SOCKET").is_some());
+        let layout = detect_layout().expect("resolve the live Niri layout through installed XKB rules");
+        assert!(!layout.layout.is_empty());
+        let keymap = current().expect("compile the live layout");
+        assert!(keymap.press_for('1').is_some());
+        assert!(Arc::ptr_eq(&keymap, &current().expect("reuse the current compiled layout")));
+    }
 
     #[test]
     fn reads_the_layout_from_each_desktop() {

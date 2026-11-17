@@ -124,3 +124,14 @@ original CPU pipeline remains available. This addresses DRM-modifier negotiation
 failures on the tested Niri/NVIDIA desktop: an isolated live portal session
 reproduced zero frames with the CPU pipeline and received three complete 1280x720
 frames with the GL pipeline, without recording or transmitting desktop content.
+
+### Phone-to-PC typing on Niri
+
+The keyboard mapper reads Niri's current keyboard group through its read-only IPC
+and resolves its display name against the installed XKB rules list (including
+variants). It no longer permanently caches a missing layout or an obsolete first
+layout: only the last successfully compiled keymap is retained. Unknown or
+ambiguous layout names fail closed rather than injecting guessed keys. No layout
+switching, compositor changes or clipboard replacement is performed. Characters
+must be representable on the active layout; mixed-script/unsupported Unicode text
+is not automatically converted or pasted.
