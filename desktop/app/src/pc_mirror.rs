@@ -1993,7 +1993,8 @@ mod imp {
             cmd.args(pipeline_args(node_id, dst_w, dst_h))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                // Preserve PipeWire/GStreamer errors in the launcher's journal.
+                .stderr(Stdio::inherit());
             // SAFETY: runs in the child between fork and exec and only makes
             // async-signal-safe system calls.
             unsafe {
@@ -2218,6 +2219,10 @@ mod imp {
             return;
         };
         let runtime = &core_host::host().runtime;
+        // zbus also spawns tasks when portal subscriptions are dropped. Keep
+        // this thread entered until every capture/portal resource is released,
+        // not just while block_on negotiates the session.
+        let _runtime_context = runtime.enter();
         #[cfg(target_os = "linux")]
         let wayland_desktop = options.watch.is_none() && std::env::var_os("WAYLAND_DISPLAY").is_some();
         #[cfg(target_os = "linux")]
@@ -2574,6 +2579,9 @@ mod imp {
             if wayland.is_some() && sender.is_closed() && !stop.load(Ordering::Acquire) {
                 capture_failed.get_or_insert_with(|| anyhow::anyhow!("the video stream disconnected"));
             }
+            if let Some(error) = capture_failed.as_ref() {
+                tracing::warn!(%peer, error = %format_args!("{error:#}"), "PC screen capture failed");
+            }
             drop(wayland);
             if let Some(error) = capture_failed {
                 sender.close();
@@ -2739,6 +2747,56 @@ mod imp {
             );
             assert!(args.contains(&"video/x-raw,format=BGRx,width=1280,height=720".to_owned()));
             assert_eq!(args.last().map(String::as_str), Some("fd=1"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn portal_subscriptions_are_dropped_inside_the_capture_runtime() {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Child, Command, Stdio};
+
+            // A private bus: never change the user's session bus or open a
+            // real screen sharing permission request.
+            struct Bus(Child);
+            impl Drop for Bus {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let mut bus = Bus(Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("dbus-daemon for the isolated portal regression test"));
+            let mut address = String::new();
+            BufReader::new(bus.0.stdout.take().unwrap()).read_line(&mut address).unwrap();
+            let runtime =
+                tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+            let stream = runtime.block_on(async {
+                let conn = zbus::connection::Builder::address(address.trim()).unwrap().build().await.unwrap();
+                let rule = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.portal.Session")
+                    .unwrap()
+                    .member("Closed")
+                    .unwrap()
+                    .build();
+                zbus::MessageStream::for_match_rule(rule, &conn, None).await.unwrap()
+            });
+            std::thread::scope(|scope| {
+                let runtime = &runtime;
+                scope
+                    .spawn(move || {
+                        assert!(tokio::runtime::Handle::try_current().is_err());
+                        // Same lifetime as run_capture_loop: enter before the
+                        // portal objects and leave only after their teardown.
+                        let _runtime_context = runtime.enter();
+                        drop(stream);
+                    })
+                    .join()
+                    .expect("portal cleanup must not panic in the capture thread");
+            });
         }
 
         #[test]

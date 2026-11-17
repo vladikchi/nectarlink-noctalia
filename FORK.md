@@ -110,3 +110,9 @@ Two local safeguards supplement the backport: failed portal availability probes
 are not cached for the process lifetime, and desktop capture under Wayland does
 not silently substitute the Xwayland root window if the portal is unavailable.
 No compositor configuration, pairing identity or API authentication is changed.
+
+The capture thread also keeps Tokio entered for the complete portal lifetime,
+including teardown: zbus schedules subscription cleanup during `Drop`. Capture
+errors are logged before teardown and GStreamer stderr goes to the launcher's
+journal instead of being discarded. An isolated private-D-Bus regression test
+exercises subscription cleanup from an ordinary capture-style thread.
