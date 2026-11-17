@@ -1989,8 +1989,18 @@ mod imp {
             use std::process::{Command, Stdio};
 
             let raw = remote.as_raw_fd();
+            static GL_IMPORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let gl_import = *GL_IMPORT.get_or_init(|| {
+                win::run_cmd_timeout(
+                    "gst-inspect-1.0",
+                    &["--exists", "glupload", "glcolorconvert", "gldownload"],
+                    Duration::from_secs(2),
+                )
+                .is_some_and(|out| out.status.success())
+            });
+            tracing::info!(gl_import, width = dst_w, height = dst_h, "starting PipeWire screen capture");
             let mut cmd = Command::new("gst-launch-1.0");
-            cmd.args(pipeline_args(node_id, dst_w, dst_h))
+            cmd.args(pipeline_args(node_id, dst_w, dst_h, gl_import))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 // Preserve PipeWire/GStreamer errors in the launcher's journal.
@@ -2064,7 +2074,7 @@ mod imp {
     /// gst-launch arguments: read stream `node_id` through the portal's
     /// PipeWire connection (fd 3) and write raw BGRx frames to stdout.
     #[cfg(target_os = "linux")]
-    pub(crate) fn pipeline_args(node_id: u32, dst_w: u32, dst_h: u32) -> Vec<String> {
+    pub(crate) fn pipeline_args(node_id: u32, dst_w: u32, dst_h: u32, gl_import: bool) -> Vec<String> {
         static HAS_ON_DISCONNECT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let mut args = vec![
             "-q".to_owned(),
@@ -2081,6 +2091,20 @@ mod imp {
             )
         }) {
             args.push("on-disconnect=error".to_owned());
+        }
+        if gl_import {
+            // Compositors can offer only GPU buffers with DRM modifiers. Import
+            // them before CPU videoconvert, then explicitly download plain RGBA.
+            args.extend([
+                "!".to_owned(),
+                "glupload".to_owned(),
+                "!".to_owned(),
+                "glcolorconvert".to_owned(),
+                "!".to_owned(),
+                "gldownload".to_owned(),
+                "!".to_owned(),
+                "video/x-raw,format=RGBA".to_owned(),
+            ]);
         }
         args.extend([
             "!".to_owned(),
@@ -2737,7 +2761,7 @@ mod imp {
         #[cfg(target_os = "linux")]
         #[test]
         fn wayland_capture_reads_the_stream_through_the_portal_connection() {
-            let args = pipeline_args(57, 1280, 720);
+            let args = pipeline_args(57, 1280, 720, false);
             assert_eq!(args[1], "pipewiresrc");
             assert!(args.contains(&"fd=3".to_owned()), "the portal's PipeWire connection, as fd 3");
             assert!(args.contains(&"path=57".to_owned()));
@@ -2745,6 +2769,23 @@ mod imp {
                 args.contains(&"keepalive-time=1000".to_owned()),
                 "static screens must keep frames flowing"
             );
+            assert!(args.contains(&"video/x-raw,format=BGRx,width=1280,height=720".to_owned()));
+            assert_eq!(args.last().map(String::as_str), Some("fd=1"));
+            assert!(!args.iter().any(|arg| arg.starts_with("gl")));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn gpu_capture_downloads_frames_before_cpu_conversion() {
+            let args = pipeline_args(57, 1280, 720, true);
+            let upload = args.iter().position(|arg| arg == "glupload").unwrap();
+            let convert = args.iter().position(|arg| arg == "glcolorconvert").unwrap();
+            let download = args.iter().position(|arg| arg == "gldownload").unwrap();
+            let plain = args.iter().position(|arg| arg == "video/x-raw,format=RGBA").unwrap();
+            let cpu = args.iter().position(|arg| arg == "videoconvert").unwrap();
+            assert!(upload < convert && convert < download && download < plain && plain < cpu);
+            assert!(args.contains(&"fd=3".to_owned()));
+            assert!(args.contains(&"path=57".to_owned()));
             assert!(args.contains(&"video/x-raw,format=BGRx,width=1280,height=720".to_owned()));
             assert_eq!(args.last().map(String::as_str), Some("fd=1"));
         }

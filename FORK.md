@@ -116,3 +116,11 @@ including teardown: zbus schedules subscription cleanup during `Drop`. Capture
 errors are logged before teardown and GStreamer stderr goes to the launcher's
 journal instead of being discarded. An isolated private-D-Bus regression test
 exercises subscription cleanup from an ordinary capture-style thread.
+
+On systems with GStreamer's `glupload`, `glcolorconvert` and `gldownload`, the
+PipeWire capture pipeline imports GPU/DMABuf frames through OpenGL and downloads
+plain RGBA before CPU conversion/scaling. Without these optional elements the
+original CPU pipeline remains available. This addresses DRM-modifier negotiation
+failures on the tested Niri/NVIDIA desktop: an isolated live portal session
+reproduced zero frames with the CPU pipeline and received three complete 1280x720
+frames with the GL pipeline, without recording or transmitting desktop content.
