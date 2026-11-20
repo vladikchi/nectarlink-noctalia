@@ -61,8 +61,25 @@ for qm in "$(dirname "${BIN_PATH}")"/nectarlink_*.qm; do
         install -m 0644 "${qm}" "${APPDIR}/usr/share/nectarlink/$(basename "${qm}")"
     fi
 done
+# Cargo's intermediate build directory can be separate from BIN_PATH.
+# Generate any missing catalog directly into the image instead of silently
+# depending on the build script having copied it next to the binary.
+lrelease="${LRELEASE:-}"
+if [[ -z "${lrelease}" && -n "${QMAKE:-}" ]]; then
+    qt_bins="$("${QMAKE}" -query QT_INSTALL_BINS)"
+    [[ ! -x "${qt_bins}/lrelease" ]] || lrelease="${qt_bins}/lrelease"
+fi
+if [[ -z "${lrelease}" ]]; then
+    lrelease="$(command -v lrelease-qt6 || command -v lrelease || true)"
+fi
+if [[ -n "${lrelease}" ]]; then
+    for ts in "${DESKTOP_DIR}"/i18n/nectarlink_*.ts; do
+        qm="${APPDIR}/usr/share/nectarlink/$(basename "${ts}" .ts).qm"
+        [[ -s "${qm}" ]] || "${lrelease}" -silent "${ts}" -qm "${qm}"
+    done
+fi
 if [[ ! -s "${APPDIR}/usr/share/nectarlink/nectarlink_ru.qm" ]]; then
-    echo "error: Russian translation missing; rebuild with Qt lrelease available" >&2
+    echo "error: Russian translation missing; set LRELEASE to Qt 6 lrelease" >&2
     exit 1
 fi
 
