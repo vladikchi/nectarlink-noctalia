@@ -220,7 +220,8 @@ pub fn set_auto_install(on: bool) {
 /// Whether this copy updates itself (an installed one, not a build run
 /// from its folder).
 pub fn can_update() -> bool {
-    std::env::current_exe().is_ok_and(|exe| autostart::is_installed(&exe))
+    // The upstream channel does not carry this fork's Noctalia integration.
+    !cfg!(target_os = "linux") && std::env::current_exe().is_ok_and(|exe| autostart::is_installed(&exe))
 }
 
 /// Checks soon after startup, then on the channel's schedule ([`check_every`])
@@ -271,6 +272,9 @@ pub fn start() {
 /// Checks now (blocking). `told`: the user asked, so say "up to date" too.
 /// Returns what to tell the user.
 pub fn check_now(told: bool) -> Option<String> {
+    if cfg!(target_os = "linux") {
+        return None;
+    }
     if CHECKING.swap(true, Ordering::AcqRel) {
         return None;
     }
@@ -620,6 +624,9 @@ fn task_registered() -> bool {
 /// Blocking. Returns what went wrong, in words for the user. On success the
 /// app is about to quit for the installer.
 pub fn install(progress: impl FnMut(u64, u64)) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        return Err("Download updates for this build from the NectarLink for Noctalia repository.".into());
+    }
     let update = available().ok_or("There's no update to install.")?;
     let staged = stage(&update, progress).map_err(|e| {
         tracing::warn!(error = %e, "update download failed");
@@ -888,6 +895,9 @@ fn relauncher_script(exe: &str, version: &str, arguments: &str) -> String {
 /// release if it's newer than this copy. Writes what it did to `update.log`
 /// beside the program, where only administrators can write.
 pub fn run_service() -> ExitCode {
+    if cfg!(target_os = "linux") {
+        return ExitCode::FAILURE;
+    }
     let log_path =
         std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("update.log")));
     let log = |message: &str| {

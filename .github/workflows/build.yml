@@ -7,6 +7,8 @@
 name: Build
 
 on:
+  # Build Linux artifacts for local review without tagging or publishing.
+  workflow_dispatch:
   workflow_call:
     inputs:
       version:
@@ -29,6 +31,7 @@ env:
 
 jobs:
   windows:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows installer (x64)
     runs-on: windows-latest
     steps:
@@ -73,6 +76,7 @@ jobs:
           path: target/package/*-setup.exe
 
   windows-arm64:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows installer (ARM64)
     runs-on: windows-latest
     steps:
@@ -114,6 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set the version
+        if: env.VERSION != ''
         run: bash .github/scripts/set-version.sh "$VERSION"
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -169,7 +174,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           FFMPEG_SOURCE_CACHE: ${{ runner.temp }}/ffmpeg-sources
         run: |
-          cargo build --release -p nectarlink-desktop
+          cargo build --release --locked -p nectarlink-desktop
           bash ./desktop/packaging/linux/build-ffmpeg-backends.sh
           ./desktop/packaging/linux/build-deb.sh
           ./desktop/packaging/linux/build-rpm.sh
@@ -253,6 +258,7 @@ jobs:
             dist/install.sh
 
   android:
+    if: github.event_name != 'workflow_dispatch'
     name: Android app (signed)
     runs-on: ubuntu-latest
     steps:

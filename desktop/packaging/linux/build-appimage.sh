@@ -61,6 +61,10 @@ for qm in "$(dirname "${BIN_PATH}")"/nectarlink_*.qm; do
         install -m 0644 "${qm}" "${APPDIR}/usr/share/nectarlink/$(basename "${qm}")"
     fi
 done
+if [[ ! -s "${APPDIR}/usr/share/nectarlink/nectarlink_ru.qm" ]]; then
+    echo "error: Russian translation missing; rebuild with Qt lrelease available" >&2
+    exit 1
+fi
 
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${APPDIR}/usr/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${APPDIR}/nectarlink.desktop"

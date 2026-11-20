@@ -28,11 +28,8 @@ does not change v1 URLs, JSON, command confirmation or retry policy.
 
 Only Linux is the target of these changes. Other upstream platform sources
 remain for provenance; they have not been validated for this fork.
-The upstream update mechanism has not yet been replaced with a fork channel.
-Disable automatic upstream updates in the app's settings for this candidate:
-an official update can replace the extended API with an incompatible build.
-A safe fork updater policy is still a public-release blocker; updates should
-be installed manually until that policy/channel is implemented.
+Upstream update checks and installation are disabled for Linux. Update by
+replacing the AppImage with a newer build of this fork while NectarLink is closed.
 
 ## Build
 
@@ -60,9 +57,11 @@ cargo build --release --locked --package nectarlink-desktop
 ```
 
 Qt tool names/locations vary by distribution; set QMAKE/LRELEASE and PATH when
-required. No distribution-independent binary package is provided by this source
-candidate. Install the resulting `nectarlink-desktop` in PATH, or select its
-absolute path in the plugin settings.
+required. For a distributable x86-64 AppImage, run the **Build** workflow manually
+on the fork branch and download the `linux` artifact. This builds against Ubuntu
+24.04, includes Qt and Russian translations, and does not publish a release.
+A build produced on a newer Linux host is suitable for local testing, not a
+substitute for the compatibility build and clean-system tests.
 
 ## Connect the plugin
 
