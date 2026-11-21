@@ -3,6 +3,10 @@
 Неофициальная сборка NectarLink для Linux с русским интерфейсом, цветами
 Noctalia и расширенным локальным API для [плагина](https://github.com/vladikchi/nectarlink-plugins).
 
+Этот вариант сохраняет штатный Island и не включает определение активной
+раскладки через Niri. Для сочетания этих исправлений с плагином используйте
+локальный проект `nectarlink_common`.
+
 ## Установка на ПК
 
 1. Скачайте **AppImage для Linux x86‑64** из [релизов этого форка](https://github.com/vladikchi/nectarlink-noctalia/releases).
