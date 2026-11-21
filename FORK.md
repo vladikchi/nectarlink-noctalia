@@ -33,20 +33,10 @@ replacing the AppImage with a newer build of this fork while NectarLink is close
 
 ## Build
 
-Two Linux source variants are provided with the same API, profile identity and
-Noctalia plugin. Install only one at a time:
-
-- **standard**: IslandWindow.qml is byte-for-byte the supplied upstream version.
-  No Niri workaround is applied. Hyprland behavior has not been validated here.
-  On stock Niri 26.04, the retained idle window can block clicks underneath.
-- **niri**: the Island window is unmapped immediately when idle. This avoids
-  blocked clicks without a custom compositor, but loses idle window retention
-  and may lose a manually chosen position on the next appearance. Optional Niri
-  placement rules can restore a fixed position; the application cannot guarantee it.
-
-The experimental compositor patch is separate, optional and not installed.
-Neither application variant requires a modified Niri. No automatic compositor
-detection or runtime switching is introduced.
+This variant provides the Noctalia palette and extended API, but keeps the
+upstream Island and keyboard layout detection. On stock Niri 26.04, the
+retained idle window can block clicks underneath. Use the separate local
+`nectarlink_common` project if you need both the plugin and the Niri fixes.
 
 Follow the upstream Linux dependency instructions in this source tree (Rust,
 Qt 6 development tools, CMake, Ninja, C++ compiler and platform libraries).
@@ -123,14 +113,3 @@ original CPU pipeline remains available. This addresses DRM-modifier negotiation
 failures on the tested Niri/NVIDIA desktop: an isolated live portal session
 reproduced zero frames with the CPU pipeline and received three complete 1280x720
 frames with the GL pipeline, without recording or transmitting desktop content.
-
-### Phone-to-PC typing on Niri
-
-The keyboard mapper reads Niri's current keyboard group through its read-only IPC
-and resolves its display name against the installed XKB rules list (including
-variants). It no longer permanently caches a missing layout or an obsolete first
-layout: only the last successfully compiled keymap is retained. Unknown or
-ambiguous layout names fail closed rather than injecting guessed keys. No layout
-switching, compositor changes or clipboard replacement is performed. Characters
-must be representable on the active layout; mixed-script/unsupported Unicode text
-is not automatically converted or pasted.
