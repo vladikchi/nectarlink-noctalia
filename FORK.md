@@ -34,7 +34,9 @@ replacing the AppImage with a newer build of this fork while NectarLink is close
 ## Build
 
 This variant provides the Noctalia palette and extended API, but keeps the
-upstream Island and keyboard layout detection. On stock Niri 26.04, the
+upstream Island, keyboard layout detection, and Wayland capture implementation.
+Niri-targeted capture, keyboard-layout, and Island fixes belong to
+`nectarlink_niri` and `nectarlink_common`, not this variant. On stock Niri 26.04, the
 retained idle window can block clicks underneath. Use the separate local
 `nectarlink_common` project if you need both the plugin and the Niri fixes.
 
