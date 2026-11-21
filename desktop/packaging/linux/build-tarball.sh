@@ -45,11 +45,11 @@ for adapter in "$(dirname "${BIN_PATH}")"/libnectarlink-video-ffmpeg*.so; do
     [[ ! -f "${adapter}" ]] || install -m 0755 "${adapter}" "${BUNDLE_DIR}/"
 done
 printf '%s\n' "${VERSION}" > "${BUNDLE_DIR}/VERSION"
-for qm in "$(dirname "${BIN_PATH}")"/nectarlink_*.qm; do
-    if [[ -f "${qm}" ]]; then
-        install -m 0644 "${qm}" "${BUNDLE_DIR}/$(basename "${qm}")"
-        install -m 0644 "${qm}" "${BUNDLE_DIR}/share/nectarlink/$(basename "${qm}")"
-    fi
+# shellcheck source=stage-translations.sh
+source "${SCRIPT_DIR}/stage-translations.sh"
+stage_translations "$(dirname "${BIN_PATH}")" "${REPO_ROOT}/desktop/app/i18n" "${BUNDLE_DIR}"
+for qm in "${BUNDLE_DIR}"/nectarlink_*.qm; do
+    install -m 0644 "${qm}" "${BUNDLE_DIR}/share/nectarlink/$(basename "${qm}")"
 done
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${BUNDLE_DIR}/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/org.nectarlink.desktop.metainfo.xml" "${BUNDLE_DIR}/share/metainfo/org.nectarlink.desktop.metainfo.xml"

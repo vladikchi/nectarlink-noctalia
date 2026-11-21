@@ -72,11 +72,9 @@ exec /usr/lib/nectarlink/nectarlink-desktop "$@"
 EOF
 chmod 0755 "${PKG_ROOT}/usr/bin/nectarlink-desktop"
 
-for qm in "$(dirname "${BIN_PATH}")"/nectarlink_*.qm; do
-    if [[ -f "${qm}" ]]; then
-        install -m 0644 "${qm}" "${PKG_ROOT}/usr/share/nectarlink/$(basename "${qm}")"
-    fi
-done
+# shellcheck source=stage-translations.sh
+source "${SCRIPT_DIR}/stage-translations.sh"
+stage_translations "$(dirname "${BIN_PATH}")" "${REPO_ROOT}/desktop/app/i18n" "${PKG_ROOT}/usr/share/nectarlink"
 
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${PKG_ROOT}/usr/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/org.nectarlink.desktop.metainfo.xml" "${PKG_ROOT}/usr/share/metainfo/org.nectarlink.desktop.metainfo.xml"

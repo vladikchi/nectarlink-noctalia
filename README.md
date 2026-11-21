@@ -20,11 +20,11 @@ curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/down
 
 ### AppImage
 
-[Скачайте AppImage для Linux x86‑64](https://github.com/vladikchi/nectarlink-noctalia/releases/download/v0.1.5%2Bnoctalia.1/Nectarlink-0.1.5-noctalia.1-x86_64.AppImage), разрешите выполнение и запустите. Системная установка не нужна:
+[Скачайте AppImage для Linux x86‑64](https://github.com/vladikchi/nectarlink-noctalia/releases/latest), разрешите выполнение и запустите. Системная установка не нужна. Пример для `0.1.5+noctalia.2`:
 
 ```sh
-chmod +x ./Nectarlink-0.1.5-noctalia.1-x86_64.AppImage
-./Nectarlink-0.1.5-noctalia.1-x86_64.AppImage
+chmod +x ./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
+./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
 ```
 
 ### Сборка из исходников

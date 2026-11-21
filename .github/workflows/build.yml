@@ -184,7 +184,7 @@ jobs:
           ./desktop/packaging/linux/build-appimage.sh
           ./desktop/packaging/linux/build-tarball.sh
           cp desktop/packaging/linux/install.sh dist/install.sh
-      - name: Check video adapters in each package
+      - name: Check video adapters and Russian translations in each package
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
@@ -192,6 +192,11 @@ jobs:
           rpm -qlp dist/*.rpm > /tmp/nectarlink-rpm-files
           tar -tzf dist/*.tar.gz > /tmp/nectarlink-tar-files
           (cd /tmp && "$GITHUB_WORKSPACE"/dist/*.AppImage --appimage-extract 'usr/bin/libnectarlink-video-ffmpeg*.so')
+          (cd /tmp && "$GITHUB_WORKSPACE"/dist/*.AppImage --appimage-extract 'usr/share/nectarlink/nectarlink_ru.qm')
+          test -s /tmp/squashfs-root/usr/share/nectarlink/nectarlink_ru.qm
+          grep -F 'usr/share/nectarlink/nectarlink_ru.qm' /tmp/nectarlink-deb-files
+          grep -F '/usr/share/nectarlink/nectarlink_ru.qm' /tmp/nectarlink-rpm-files
+          grep -E '^[^/]+/nectarlink_ru\.qm$' /tmp/nectarlink-tar-files
           for major in 7 8 9; do
             adapter="libnectarlink-video-ffmpeg${major}.so"
             grep -F "$adapter" /tmp/nectarlink-deb-files

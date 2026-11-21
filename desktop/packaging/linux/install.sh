@@ -233,14 +233,22 @@ check_system() {
     fi
 }
 
-# Fetches $1 to file $2.
+# Fetches $1 to file $2. Pass "progress" for the package download.
 fetch() {
     if [ -n "${NECTARLINK_ASSETS_DIR:-}" ]; then
         cp "$NECTARLINK_ASSETS_DIR/${1##*/}" "$2"
     elif has curl; then
-        curl -fsSL --retry 3 -o "$2" "$1"
+        if [ "${3:-}" = progress ] && [ -t 2 ]; then
+            curl -fL --progress-bar --retry 3 -o "$2" "$1"
+        else
+            curl -fsSL --retry 3 -o "$2" "$1"
+        fi
     elif has wget; then
-        wget -q -O "$2" "$1"
+        if [ "${3:-}" = progress ] && [ -t 2 ]; then
+            wget --progress=bar:force:noscroll -O "$2" "$1"
+        else
+            wget -q -O "$2" "$1"
+        fi
     else
         fail "this needs curl or wget to download NectarLink." "Install one of them and run this again."
     fi
@@ -281,7 +289,7 @@ find_release() {
 download() {
     step "Downloading $ASSET"
     say "From $BASE_URL"
-    fetch "$BASE_URL/$ASSET" "$WORK/$ASSET" || fail "couldn't download $ASSET." \
+    fetch "$BASE_URL/$ASSET" "$WORK/$ASSET" progress || fail "couldn't download $ASSET." \
         "If this release has no such file yet, try --package tarball."
     fetch "$BASE_URL/SHA256SUMS.txt" "$WORK/SHA256SUMS.txt" || fail "couldn't download SHA256SUMS.txt to check the download."
     size="$(du -h "$WORK/$ASSET" | cut -f1)"

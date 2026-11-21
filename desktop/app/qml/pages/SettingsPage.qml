@@ -848,10 +848,10 @@ Item {
                             width: parent.width
                             visible: Theme.hive
                             iconPath: Icons.sparkle
-                            title: qsTr("Использовать цвета Noctalia")
-                            description: qsTr("Палитра и светлый/тёмный режим следуют Noctalia.")
+                            title: qsTr("Use Noctalia colors")
+                            description: qsTr("Follow Noctalia's palette and light or dark mode.")
                             Toggle {
-                                label: qsTr("Использовать цвета Noctalia")
+                                label: qsTr("Use Noctalia colors")
                                 checked: Preferences.noctaliaColors
                                 onToggled: (on) => Preferences.noctaliaColors = on
                             }
