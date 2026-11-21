@@ -1,14 +1,16 @@
 # NectarLink для Noctalia
 
-Форк NectarLink с расширенным локальным API для [плагина Noctalia](https://github.com/vladikchi/nectarlink-plugins) и поддержкой внешней палитры Noctalia в теме Hive. Плагин использует этот API для уведомлений, сообщений, звонков, фотографий и управления телефоном из панели Noctalia. В оригинальном NectarLink нужных плагину маршрутов нет.
+[NectarLink](https://github.com/thtbee/nectarlink) связывает Android-телефон с компьютером: передаёт файлы, синхронизирует буфер обмена и выводит экран телефона на ПК. Эта сборка расширяет локальный API, через который [плагин NectarLink](https://github.com/vladikchi/nectarlink-plugins) может читать уведомления, отправлять SMS, управлять звонками и запускать трансляцию экрана или веб-камеру из панели Noctalia.
+
+**Для плагина установите эту сборку:** в оригинальном NectarLink нет нужных ему маршрутов API. Кроме того, в этом форке тема Hive может использовать палитру Noctalia.
 
 ## Установка на Linux
 
-Готовые пакеты для Linux x86‑64 ищите в [релизах форка](https://github.com/vladikchi/nectarlink-noctalia/releases). Если релиз ещё недоступен, можно собрать приложение из исходников.
+В [последнем релизе](https://github.com/vladikchi/nectarlink-noctalia/releases/latest) доступны `.deb`, `.rpm`, архив и AppImage для Linux x86‑64.
 
 ### Установщик (`.deb`, `.rpm`, архив)
 
-Если в последнем релизе есть `install.sh`, установите приложение одной командой:
+Установка одной командой:
 
 ```sh
 curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
@@ -18,7 +20,7 @@ curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/down
 
 ### AppImage
 
-AppImage запускается без системной установки. Скачайте `.AppImage` из релиза и запустите его. Например, для `0.1.5+noctalia.1`:
+[Скачайте AppImage для Linux x86‑64](https://github.com/vladikchi/nectarlink-noctalia/releases/download/v0.1.5%2Bnoctalia.1/Nectarlink-0.1.5-noctalia.1-x86_64.AppImage), разрешите выполнение и запустите. Системная установка не нужна:
 
 ```sh
 chmod +x ./Nectarlink-0.1.5-noctalia.1-x86_64.AppImage
@@ -36,7 +38,7 @@ cargo build --release --locked --package nectarlink-desktop
 
 **Android:** [скачать официальный APK NectarLink](https://github.com/thtbee/nectarlink/releases/download/v0.1.5/Nectarlink-0.1.5-android.apk). На телефоне используется оригинальный клиент, форк нужен только на ПК.
 
-Подключение описано в [руководстве плагина](https://github.com/vladikchi/nectarlink-plugins/blob/main/nectarlink/README.md).
+Сопряжение, включение API и установка виджета описаны в [руководстве по установке плагина](https://github.com/vladikchi/nectarlink-plugins#установка).
 
 ## Что изменено относительно оригинала
 
