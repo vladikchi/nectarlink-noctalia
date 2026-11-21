@@ -1,57 +1,57 @@
-# NectarLink для Noctalia
+# NectarLink for Noctalia
 
-[NectarLink](https://github.com/thtbee/nectarlink) связывает Android-телефон с компьютером: передаёт файлы, синхронизирует буфер обмена и выводит экран телефона на ПК. Эта сборка расширяет локальный API, через который [плагин NectarLink](https://github.com/vladikchi/nectarlink-plugins) может читать уведомления, отправлять SMS, управлять звонками и запускать трансляцию экрана или веб-камеру из панели Noctalia.
+[NectarLink](https://github.com/thtbee/nectarlink) connects your Android phone to your computer to transfer files, sync the clipboard, and mirror the phone's screen. This build extends the local API so the [NectarLink plugin](https://github.com/vladikchi/nectarlink-plugins) can read notifications, send SMS, manage calls, and start screen mirroring or webcam sessions from Noctalia.
 
-**Для плагина установите эту сборку:** в оригинальном NectarLink нет нужных ему маршрутов API. Кроме того, в этом форке тема Hive может использовать палитру Noctalia.
+**Use this build with the plugin.** Upstream NectarLink does not provide the API routes the plugin needs. This fork also lets the Hive theme use Noctalia's color palette.
 
-## Установка на Linux
+## Installation on Linux
 
-В [последнем релизе](https://github.com/vladikchi/nectarlink-noctalia/releases/latest) доступны `.deb`, `.rpm`, архив и AppImage для Linux x86‑64.
+The [latest release](https://github.com/vladikchi/nectarlink-noctalia/releases/latest) includes `.deb`, `.rpm`, tarball, and AppImage packages for Linux x86-64.
 
-### Установщик (`.deb`, `.rpm`, архив)
+### Installer (`.deb`, `.rpm`, or tarball)
 
-Установка одной командой:
+Install with one command:
 
 ```sh
 curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
 ```
 
-Установщик выбирает `.deb` для APT, `.rpm` для DNF или Zypper либо архив и проверяет SHA-256 пакета перед установкой. Пакеты скачиваются из этого форка, не из оригинального NectarLink.
+The installer selects a `.deb` for APT, an `.rpm` for DNF or Zypper, or a tarball otherwise. It verifies the package's SHA-256 checksum before installation. Packages are downloaded from this fork, not from upstream NectarLink.
 
 ### AppImage
 
-[Скачайте AppImage для Linux x86‑64](https://github.com/vladikchi/nectarlink-noctalia/releases/latest), разрешите выполнение и запустите. Системная установка не нужна. Пример для `0.1.5+noctalia.2`:
+[Download the Linux x86-64 AppImage](https://github.com/vladikchi/nectarlink-noctalia/releases/latest), make it executable, and run it. No system installation is required. For example, for `0.1.5+noctalia.2`:
 
 ```sh
 chmod +x ./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
 ./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
 ```
 
-### Сборка из исходников
+### Build from source
 
-Нужны Rust, инструменты разработки Qt 6, C++-компилятор, CMake, Ninja и системные библиотеки. Из корня репозитория:
+You need Rust, Qt 6 development tools, a C++ compiler, CMake, Ninja, and the system libraries. From the repository root:
 
 ```sh
 cargo build --release --locked --package nectarlink-desktop
 ./target/release/nectarlink-desktop
 ```
 
-**Android:** [скачать официальный APK NectarLink](https://github.com/thtbee/nectarlink/releases/download/v0.1.5/Nectarlink-0.1.5-android.apk). На телефоне используется оригинальный клиент, форк нужен только на ПК.
+**Android:** [download the official NectarLink APK](https://github.com/thtbee/nectarlink/releases/download/v0.1.5/Nectarlink-0.1.5-android.apk). Use the upstream Android app on the phone; the fork is only needed on the PC.
 
-Сопряжение, включение API и установка виджета описаны в [руководстве по установке плагина](https://github.com/vladikchi/nectarlink-plugins#установка).
+The [plugin installation guide](https://github.com/vladikchi/nectarlink-plugins#installation) covers pairing, enabling the API, and adding the widget.
 
-## Что изменено относительно оригинала
+## What's changed from upstream
 
-- **Локальный API:** добавлены чтение уведомлений и разделов панели, команды для телефона и управление сессиями. Для камеры и отправки данных неверная явно указанная цель больше не подменяется другим телефоном.
-- **Палитра Noctalia:** тема Hive может читать готовый `~/.config/nectarlink/noctalia-colors.json`. Приложение не создаёт этот файл. Без подходящей палитры Hive использует встроенные цвета.
-- **Обновление и упаковка:** обновление из оригинального проекта отключено на Linux. Перед ручным обновлением закройте NectarLink, затем замените AppImage или установите новый пакет форка. Профиль хранится отдельно. При упаковке AppImage проверяется наличие русского перевода.
+- **Local API:** adds notification and panel-section reads, phone commands, and session controls. For camera and data-transfer requests, an invalid explicit target is rejected rather than replaced with another phone.
+- **Noctalia palette:** the Hive theme can read an existing `~/.config/nectarlink/noctalia-colors.json`. NectarLink does not create this file. Hive falls back to its built-in colors if no valid palette is available.
+- **Updates and packaging:** upstream updates are disabled on Linux. Before updating manually, quit NectarLink, then replace the AppImage or install a newer package from this fork. Your profile is stored separately. Linux packaging checks that the Russian translation is included.
 
-Исправления Island, ввода с телефона и захвата экрана вынесены в [NectarLink для Niri](https://github.com/vladikchi/nectarlink-niri) и не входят в сборку для Noctalia.
+The Island, phone-to-PC typing, and screen capture fixes for Niri are in [NectarLink for Niri](https://github.com/vladikchi/nectarlink-niri). They are not part of this build.
 
-[Все изменения, маршруты API и файлы реализации →](CHANGES.md)
+[Full changes, API routes, and source files](CHANGES.md)
 
-## Проверки и лицензии
+## Verification and licensing
 
-Локальный AppImage на Arch прошёл `--version` и `--ui-check`; русский перевод загрузился. Это не проверка с реальным телефоном, порталом Wayland или другим дистрибутивом.
+The local AppImage passed `--version` and `--ui-check` on Arch Linux, and the Russian translation loaded. That AppImage check did not cover a real phone, the Wayland portal, or other distributions.
 
-Основа форка — NectarLink `v0.1.6-nightly.10`. [Оригинальный проект](https://github.com/thtbee/nectarlink) · [Лицензии компонентов](LICENSE)
+Based on NectarLink `v0.1.6-nightly.10`. [Upstream project](https://github.com/thtbee/nectarlink) · [Component licenses](LICENSE)
