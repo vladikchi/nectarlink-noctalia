@@ -34,6 +34,8 @@ cargo build --release --locked --package nectarlink-desktop
 ./target/release/nectarlink-desktop
 ```
 
+**Android:** [скачать официальный APK NectarLink](https://github.com/thtbee/nectarlink/releases/download/v0.1.5/Nectarlink-0.1.5-android.apk). На телефоне используется оригинальный клиент, форк нужен только на ПК.
+
 Подключение описано в [руководстве плагина](https://github.com/vladikchi/nectarlink-plugins/blob/main/nectarlink/README.md).
 
 ## Что изменено относительно оригинала
@@ -42,7 +44,7 @@ cargo build --release --locked --package nectarlink-desktop
 - **Палитра Noctalia:** тема Hive может читать готовый `~/.config/nectarlink/noctalia-colors.json`. Приложение не создаёт этот файл. Без подходящей палитры Hive использует встроенные цвета.
 - **Обновление и упаковка:** обновление из оригинального проекта отключено на Linux. Перед ручным обновлением закройте NectarLink, затем замените AppImage или установите новый пакет форка. Профиль хранится отдельно. При упаковке AppImage проверяется наличие русского перевода.
 
-Исправления Island, ввода с телефона и захвата экрана для Niri вынесены в `nectarlink_niri` и не входят в эту сборку.
+Исправления Island, ввода с телефона и захвата экрана вынесены в [NectarLink для Niri](https://github.com/vladikchi/nectarlink-niri) и не входят в сборку для Noctalia.
 
 [Все изменения, маршруты API и файлы реализации →](CHANGES.md)
 
