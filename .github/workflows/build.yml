@@ -13,13 +13,16 @@ on:
     inputs:
       version:
         description: "The version to build: 1.2.3, or a nightly's 1.2.3-nightly.N"
-        required: true
         type: string
+      linux_only:
+        description: "Build only the Noctalia fork's Linux packages"
+        type: boolean
+        default: false
     secrets:
       ANDROID_KEYSTORE:
-        required: true
+        required: false
       ANDROID_KEYSTORE_PASSWORD:
-        required: true
+        required: false
 
 permissions:
   contents: read
@@ -31,7 +34,7 @@ env:
 
 jobs:
   windows:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && !inputs.linux_only
     name: Windows installer (x64)
     runs-on: windows-latest
     steps:
@@ -76,7 +79,7 @@ jobs:
           path: target/package/*-setup.exe
 
   windows-arm64:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && !inputs.linux_only
     name: Windows installer (ARM64)
     runs-on: windows-latest
     steps:
@@ -216,7 +219,7 @@ jobs:
               LD_LIBRARY_PATH=/usr/lib/nectarlink/lib ldd "$f" | grep "not found" | sed "s|^|$f:|"
             done | sort -u)
             if [ -n "$missing" ]; then echo "$missing"; exit 1; fi'
-          docker run --rm -v "$PWD/dist:/dist:ro" fedora:40 bash -euc '
+          docker run --rm -v "$PWD/dist:/dist:ro" fedora:43 bash -euc '
             dnf install -y -q --nogpgcheck /dist/*.rpm >/dev/null
             nectarlink-desktop --version'
           APPIMAGE_EXTRACT_AND_RUN=1 ./dist/*.AppImage --version
@@ -227,7 +230,7 @@ jobs:
         # Ubuntu, the .rpm on Fedora, and the tarball in a home folder.
         run: |
           (cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS.txt)
-          for image in ubuntu:24.04 fedora:40; do
+          for image in ubuntu:24.04 fedora:43; do
             docker run --rm -v "$PWD/dist:/dist:ro" -e NECTARLINK_ASSETS_DIR=/dist "$image" sh -euc '
               sh /dist/install.sh
               nectarlink-desktop --version
@@ -245,7 +248,9 @@ jobs:
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends /dist/*.deb >/dev/null
             apt-get remove -y -qq nectarlink >/dev/null
             useradd -m user
-            su user -c "NECTARLINK_ASSETS_DIR=/dist sh /dist/install.sh && ~/.local/bin/nectarlink-desktop --version"'
+             su user -c "NECTARLINK_ASSETS_DIR=/dist sh /dist/install.sh && ~/.local/bin/nectarlink-desktop --version"
+             su user -c "sh /dist/install.sh --uninstall"
+             test ! -e /home/user/.local/bin/nectarlink-desktop'
           rm dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v7
         with:
@@ -258,7 +263,7 @@ jobs:
             dist/install.sh
 
   android:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && !inputs.linux_only
     name: Android app (signed)
     runs-on: ubuntu-latest
     steps:

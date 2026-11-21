@@ -1,10 +1,10 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Installs NectarLink on Linux, with everything it needs, and shows each step
+# Installs NectarLink for Noctalia on Linux and shows each step
 # as it goes:
 #
-#   curl -fsSL https://github.com/thtbee/nectarlink/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
 #
 # It picks the package that fits this system (.deb with apt, .rpm with dnf
 # or zypper, the tarball elsewhere), checks it against the release's
@@ -26,7 +26,7 @@
 # Everything is in functions, called on the last line: piped into sh, the
 # whole script has arrived before anything runs.
 
-REPO="thtbee/nectarlink"
+REPO="vladikchi/nectarlink-noctalia"
 DATA_PORT=7718
 MDNS_PORT=5353
 LOCALSEND_PORT=53317
@@ -103,7 +103,7 @@ admin() {
 
 usage() {
     cat <<EOF
-Installs NectarLink on Linux, with everything it needs.
+Installs NectarLink for Noctalia on Linux.
 
   curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sh
   curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sh -s -- [options]
@@ -177,7 +177,7 @@ find_user() {
 
 check_system() {
     step "Checking this computer"
-    [ "$(uname -s)" = "Linux" ] || fail "this installer is for Linux." "On Windows, download the installer from https://github.com/$REPO/releases/latest"
+    [ "$(uname -s)" = "Linux" ] || fail "NectarLink for Noctalia is only packaged for Linux."
 
     ARCH="$(uname -m)"
     case "$ARCH" in
@@ -258,15 +258,22 @@ find_release() {
         done
     else
         fetch "https://api.github.com/repos/$REPO/releases/latest" "$WORK/release.json" \
-            || fail "couldn't reach GitHub to find the latest release." "Check the internet connection and try again."
+            || fail "couldn't find the latest NectarLink for Noctalia release." \
+                "Check your internet connection and https://github.com/$REPO/releases."
         VERSION="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' "$WORK/release.json" | head -n 1)"
     fi
     [ -n "$VERSION" ] || fail "couldn't tell which version is the latest."
     BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
+    # Releases publish URL-safe filenames. Local test bundles retain the
+    # filenames emitted by the package builders.
+    asset_version="$VERSION"
+    if [ -z "${NECTARLINK_ASSETS_DIR:-}" ]; then
+        asset_version="$(printf '%s' "$VERSION" | tr '+' '-')"
+    fi
     case "$PACKAGE" in
-        deb) ASSET="nectarlink_${VERSION}_${DEB_ARCH}.deb" ;;
-        rpm) ASSET="nectarlink-${VERSION}-1.${ARCH}.rpm" ;;
-        tarball) ASSET="Nectarlink-${VERSION}-linux-${ARCH}.tar.gz" ;;
+        deb) ASSET="nectarlink_${asset_version}_${DEB_ARCH}.deb" ;;
+        rpm) ASSET="nectarlink-${asset_version}-1.${ARCH}.rpm" ;;
+        tarball) ASSET="Nectarlink-${asset_version}-linux-${ARCH}.tar.gz" ;;
     esac
     good "NectarLink $VERSION"
 }
@@ -487,7 +494,7 @@ setup_firewall() {
 finish() {
     printf '\n%sNectarLink %s is ready.%s\n' "$BOLD" "$VERSION" "$RESET"
     echo "Open it from your app menu, or run nectarlink-desktop. Then install the"
-    echo "Android app and pair: https://github.com/$REPO#get-started"
+    echo "Android app and pairing (upstream): https://github.com/thtbee/nectarlink#get-started"
     echo "It updates itself from now on. If it was already open, quit and open it again."
 }
 
