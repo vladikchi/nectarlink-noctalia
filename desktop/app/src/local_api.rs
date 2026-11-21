@@ -346,8 +346,24 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(code, 200);
-        assert_eq!(body["mode"], "scan");
+        assert_eq!(code, 409);
+        assert_eq!(body["error"], "no_device");
+
+        for (path, payload) in [
+            ("ring", r#"{"device":"not-a-phone"}"#),
+            ("camera", r#"{"device":"not-a-phone"}"#),
+            ("notify", r#"{"device":"not-a-phone","title":"Test"}"#),
+            ("send", r#"{"device":"not-a-phone","url":"https://nectarlink.dev"}"#),
+            ("clipboard", r#"{"device":"not-a-phone","text":"Test"}"#),
+        ] {
+            let request = format!(
+                "POST /v1/{path} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            );
+            let (status, body) = raw_http_call(addr, &request).await;
+            assert_eq!(status, 409, "{path}");
+            assert_eq!(body["error"], "no_device", "{path}");
+        }
 
         let notify_body = r#"{"title":"Build finished","body":"0 errors"}"#;
         let (code, _) = raw_http_call(

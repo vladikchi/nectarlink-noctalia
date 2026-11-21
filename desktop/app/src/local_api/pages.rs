@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 type Reply = (u16, &'static str, Value);
+pub(super) const PAGE_TIMEOUT: Duration = Duration::from_secs(20);
 fn fail(key: &str) -> Reply {
     (409, "Conflict", json!({"ok":false,"error":key}))
 }
@@ -31,7 +32,7 @@ pub(super) async fn read(body: &[u8]) -> Reply {
     if !valid_query(&p) {
         return fail("invalid_page");
     }
-    match tokio::time::timeout(Duration::from_secs(20), read_inner(p)).await {
+    match tokio::time::timeout(PAGE_TIMEOUT, read_inner(p)).await {
         Ok(Ok(data)) => success(data),
         Ok(Err(_)) => fail("unavailable"),
         Err(_) => fail("timeout"),
@@ -86,7 +87,7 @@ pub(super) async fn act(body: &[u8]) -> Reply {
     if !valid_action(&p) {
         return fail("invalid_action");
     }
-    {
+    let _guard = {
         let mut seen = REQUESTS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
         if seen.contains(&p.request_id) {
             return fail("duplicate_request");
@@ -94,12 +95,13 @@ pub(super) async fn act(body: &[u8]) -> Reply {
         if seen.len() >= 10000 {
             return fail("request_limit_restart_required");
         }
+        let Ok(command) = COMMAND.try_lock() else {
+            return fail("busy");
+        };
         seen.insert(p.request_id.clone());
-    }
-    let Ok(_guard) = COMMAND.try_lock() else {
-        return fail("busy");
+        command
     };
-    match tokio::time::timeout(Duration::from_secs(20), act_inner(p)).await {
+    match tokio::time::timeout(PAGE_TIMEOUT, act_inner(p)).await {
         Ok(Ok(data)) => success(data),
         Ok(Err(_)) => fail("action_failed_check_phone"),
         Err(_) => fail("uncertain_check_phone"),
@@ -223,7 +225,12 @@ mod tests {
         let mut p: Value = serde_json::from_slice(&body).unwrap();
         p["confirm"] = json!(true);
         let body = serde_json::to_vec(&p).unwrap();
-        assert_eq!(act(&body).await.2["ok"], false);
+        {
+            let command = COMMAND.lock().await;
+            assert_eq!(act(&body).await.2["error"], "busy");
+            drop(command);
+        }
+        assert_eq!(act(&body).await.2["error"], "action_failed_check_phone");
         assert_eq!(act(&body).await.2["error"], "duplicate_request");
     }
 }

@@ -22,20 +22,10 @@ pub(super) fn try_node() -> Option<nectarlink_core::Node> {
 }
 
 pub(super) fn resolve_target_device(requested: Option<&str>) -> Option<DeviceId> {
-    let query = requested.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(q) = query
-        && let Ok(id) = q.parse::<DeviceId>()
-    {
-        return Some(id);
-    }
+    let query = requested.map(str::trim);
     with_state(|s| {
         if let Some(q) = query {
-            let lower = q.to_ascii_lowercase();
-            if let Some(found) = s.devices.iter().find(|d| {
-                d.id.to_string().starts_with(&lower) || d.info.name.to_ascii_lowercase().contains(&lower)
-            }) {
-                return Some(found.id);
-            }
+            return match_device(q, s.devices.iter().map(|d| (d.id, d.info.name.as_str())));
         }
         s.devices
             .iter()
@@ -44,6 +34,40 @@ pub(super) fn resolve_target_device(requested: Option<&str>) -> Option<DeviceId>
             .map(|d| d.id)
     })
     .flatten()
+}
+
+fn match_device<'a>(query: &str, devices: impl Iterator<Item = (DeviceId, &'a str)>) -> Option<DeviceId> {
+    if query.is_empty() {
+        return None;
+    }
+    let mut devices = devices;
+    if let Ok(id) = query.parse::<DeviceId>() {
+        return devices.find(|(candidate, _)| *candidate == id).map(|(id, _)| id);
+    }
+    let query = query.to_ascii_lowercase();
+    let mut matches = devices.filter(|(id, name)| {
+        id.to_string().starts_with(&query) || name.to_ascii_lowercase().contains(&query)
+    });
+    let (id, _) = matches.next()?;
+    matches.next().is_none().then_some(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_device_never_falls_back() {
+        let first = DeviceId([1; 32]);
+        let second = DeviceId([2; 32]);
+        let resolve = |query: &str| match_device(query, [(first, "Work Phone"), (second, "Home Phone")].into_iter());
+        assert_eq!(resolve(&second.to_string()), Some(second));
+        assert_eq!(resolve("home"), Some(second));
+        assert_eq!(resolve("phone"), None);
+        assert_eq!(resolve("unknown"), None);
+        assert_eq!(resolve(&DeviceId([3; 32]).to_string()), None);
+        assert_eq!(resolve(""), None);
+    }
 }
 
 // DeviceId's protocol serde uses 32 binary bytes. The HTTP interface uses the

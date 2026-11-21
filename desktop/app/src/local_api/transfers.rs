@@ -28,6 +28,9 @@ pub(super) async fn handle_post_send(body: &[u8]) -> (u16, &'static str, Value) 
     }
 
     let target = resolve_target_device(payload.device.as_deref());
+    if payload.device.is_some() && target.is_none() {
+        return (409, "Conflict", json!({ "ok": false, "error": "no_device" }));
+    }
     if let (Some(device), Some(node)) = (target, try_node()) {
         if !payload.paths.is_empty() {
             let paths: Vec<PathBuf> = payload.paths.iter().map(PathBuf::from).collect();

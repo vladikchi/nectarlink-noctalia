@@ -9,6 +9,7 @@ use tokio::{
 };
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const HANDLER_TIMEOUT: Duration = super::pages::PAGE_TIMEOUT.saturating_add(Duration::from_secs(1));
 /// Starts the localhost HTTP/JSON server on `127.0.0.1:<port>` (pass `0` in
 /// tests for an OS-assigned ephemeral port).
 pub async fn start_on_port(port: u16, token: String) -> std::io::Result<(SocketAddr, ServerHandle)> {
@@ -25,11 +26,7 @@ pub async fn start_on_port(port: u16, token: String) -> std::io::Result<(SocketA
                     let Ok((stream, _peer)) = accepted else { continue };
                     let expected_token = token.clone();
                     tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            IO_TIMEOUT,
-                            handle_connection(stream, &expected_token),
-                        )
-                        .await;
+                        let _ = handle_connection(stream, &expected_token).await;
                     });
                 }
             }
@@ -163,6 +160,15 @@ async fn write_json_response(
     status_text: &str,
     body: &Value,
 ) -> std::io::Result<()> {
+    tokio::time::timeout(IO_TIMEOUT, write_response(stream, status_code, status_text, body)).await?
+}
+
+async fn write_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    status_text: &str,
+    body: &Value,
+) -> std::io::Result<()> {
     let payload = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let header = format!(
         "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -174,7 +180,7 @@ async fn write_json_response(
 }
 
 async fn handle_connection(mut stream: TcpStream, expected_token: &str) -> std::io::Result<()> {
-    let Some(req) = read_http_request(&mut stream).await? else {
+    let Some(req) = tokio::time::timeout(IO_TIMEOUT, read_http_request(&mut stream)).await?? else {
         return Ok(());
     };
 
@@ -212,7 +218,9 @@ async fn handle_connection(mut stream: TcpStream, expected_token: &str) -> std::
         .await;
     }
 
-    let (status, reason, payload) = route_request(req).await;
+    let (status, reason, payload) = tokio::time::timeout(HANDLER_TIMEOUT, route_request(req))
+        .await
+        .unwrap_or_else(|_| (504, "Gateway Timeout", json!({ "ok": false, "error": "timeout" })));
     write_json_response(&mut stream, status, reason, &payload).await
 }
 

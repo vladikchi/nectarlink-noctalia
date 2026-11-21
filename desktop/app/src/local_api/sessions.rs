@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Typed, device-scoped session control. Start acknowledgements are NOT claims
 //! that capture started or Android accepted its permission prompt.
-#[cfg(not(test))]
 use super::context::resolve_target_device;
 use super::context::{display_device_id, try_node, with_state};
 use nectarlink_core::{DeviceId, FeatureState, LinkState};
@@ -311,16 +310,15 @@ pub(super) fn handle_post_camera(body: &[u8]) -> (u16, &'static str, Value) {
         Some("photo") | None | Some("") => "photo",
         Some(_) => return (400, "Bad Request", json!({ "ok": false, "error": "invalid_mode" })),
     };
+    let Some(device) = resolve_target_device(payload.device.as_deref()) else {
+        return error(409, "Conflict", "no_device");
+    };
     #[cfg(not(test))]
-    {
-        let target = resolve_target_device(payload.device.as_deref());
-        let index = target
-            .and_then(|id| with_state(|s| s.devices.iter().position(|d| d.id == id)).flatten())
-            .unwrap_or(0);
-        crate::continuity_camera::start_for_index(index, mode);
+    if !crate::continuity_camera::start_for_device(device, mode) {
+        return error(409, "Conflict", "camera_unavailable");
     }
     #[cfg(test)]
-    let _ = &payload.device;
+    let _ = device;
     (200, "OK", json!({ "ok": true, "mode": mode }))
 }
 

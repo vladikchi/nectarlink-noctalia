@@ -160,25 +160,42 @@ pub fn start(mode_raw: &str) {
 /// `preferred_index` if it is online, or the first online phone, or the
 /// preferred offline paired phone (queueing a 2-minute expiring request).
 pub fn start_for_index(preferred_index: usize, mode_raw: &str) {
+    start_capture(preferred_index, None, mode_raw);
+}
+
+#[cfg(not(test))]
+pub(crate) fn start_for_device(device: DeviceId, mode_raw: &str) -> bool {
+    start_capture(0, Some(device), mode_raw)
+}
+
+fn start_capture(preferred_index: usize, device: Option<DeviceId>, mode_raw: &str) -> bool {
     let mode = CameraCaptureMode::parse(mode_raw).unwrap_or(CameraCaptureMode::Photo);
     let target = crate::win::tray::snapshot_target_window();
 
     let chosen = core_host::host().hub.read(|s| {
-        s.devices
-            .get(preferred_index)
-            .filter(|d| matches!(d.link, LinkState::Online { .. }))
-            .or_else(|| s.devices.iter().find(|d| matches!(d.link, LinkState::Online { .. })))
-            .or_else(|| s.devices.get(preferred_index))
-            .or_else(|| s.devices.first())
-            .map(|d| (d.id, d.info.name.clone(), matches!(d.link, LinkState::Online { .. })))
+        let selected = if let Some(id) = device {
+            s.devices.iter().find(|d| d.id == id)
+        } else {
+            s.devices
+                .get(preferred_index)
+                .filter(|d| matches!(d.link, LinkState::Online { .. }))
+                .or_else(|| s.devices.iter().find(|d| matches!(d.link, LinkState::Online { .. })))
+                .or_else(|| s.devices.get(preferred_index))
+                .or_else(|| s.devices.first())
+        };
+        selected.map(|d| (d.id, d.info.name.clone(), matches!(d.link, LinkState::Online { .. })))
     });
     let Some((device_id, device_name, online)) = chosen else {
+        if device.is_some() {
+            return false;
+        }
         crate::bridge::app::show_message(tr!(
             "ContinuityCamera",
             "Pair your phone first to take a photo or scan a document."
         ));
-        return;
+        return false;
     };
+    let Some(node) = core_host::node() else { return false };
 
     let request_id = next_request_id();
     let (target_hwnd, target_title) = match target {
@@ -211,7 +228,6 @@ pub fn start_for_index(preferred_index: usize, mode_raw: &str) {
         crate::bridge::app::show_message(open_msg);
     }
 
-    let Some(node) = core_host::node() else { return };
     core_host::spawn(async move {
         if let Some(prev) = previous {
             let _ = node.cancel_camera_capture(prev.device, prev.request_id, Some("replaced".into())).await;
@@ -251,6 +267,7 @@ pub fn start_for_index(preferred_index: usize, mode_raw: &str) {
             }
         }
     });
+    true
 }
 
 /// Cancels an in-flight Continuity Camera request from the PC side.

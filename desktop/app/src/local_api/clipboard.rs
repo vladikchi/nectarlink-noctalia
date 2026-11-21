@@ -74,10 +74,14 @@ pub(super) async fn handle_post_clipboard(body: &[u8]) -> (u16, &'static str, Va
         Ok(p) => p,
         Err(_) => return (400, "Bad Request", json!({ "ok": false, "error": "invalid_json" })),
     };
+    let target = resolve_target_device(payload.device.as_deref());
+    if payload.device.is_some() && target.is_none() {
+        return (409, "Conflict", json!({ "ok": false, "error": "no_device" }));
+    }
     if let Err(e) = write_pc_clipboard(&payload.text) {
         return (500, "Internal Server Error", json!({ "ok": false, "error": e }));
     }
-    if let (Some(device), Some(node)) = (resolve_target_device(payload.device.as_deref()), try_node()) {
+    if let (Some(device), Some(node)) = (target, try_node()) {
         let _ = node.send_clipboard(device, payload.text).await;
     }
     (200, "OK", json!({ "ok": true }))

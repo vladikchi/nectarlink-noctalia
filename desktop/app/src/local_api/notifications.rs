@@ -35,8 +35,11 @@ pub(super) async fn handle_post_notify(body: &[u8]) -> (u16, &'static str, Value
         elapsed_ms: 0,
         exit_code: Some(0),
     };
+    let target = resolve_target_device(payload.device.as_deref());
+    if payload.device.is_some() && target.is_none() {
+        return (409, "Conflict", json!({ "ok": false, "error": "no_device" }));
+    }
     if let Some(node) = try_node() {
-        let target = resolve_target_device(payload.device.as_deref());
         let _ = node.task_notify(target, task).await;
     }
     (200, "OK", json!({ "ok": true }))
