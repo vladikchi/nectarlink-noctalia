@@ -8952,6 +8952,17 @@ What it needs
 <context>
     <name>SettingsPage</name>
     <message>
+        <location filename="../qml/pages/SettingsPage.qml" line="851"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="854"/>
+        <source>Use Noctalia colors</source>
+        <translation>Использовать цвета Noctalia</translation>
+    </message>
+    <message>
+        <location filename="../qml/pages/SettingsPage.qml" line="852"/>
+        <source>Follow Noctalia&apos;s palette and light or dark mode.</source>
+        <translation>Палитра и светлый или тёмный режим следуют настройкам Noctalia.</translation>
+    </message>
+    <message>
         <location filename="../qml/pages/SettingsPage.qml" line="19"/>
         <source>Appearance</source>
         <translation>Оформление</translation>

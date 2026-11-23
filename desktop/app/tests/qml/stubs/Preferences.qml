@@ -17,6 +17,7 @@ QtObject {
     property bool quietWhenLocked: false
     property int uiScale: 100
     property bool combMotion: false
+    property bool noctaliaColors: false
     property string seed: ""
     property string commandPaletteHotkey: ""
     property bool streamPcAudioToPhone: false

@@ -12,6 +12,24 @@ use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "desktop-settings.json";
 
+pub(crate) fn effective_noctalia_colors(value: Option<bool>) -> bool {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")));
+    noctalia_colors_enabled(value, config.as_deref())
+}
+
+/// Compatibility with the old palette sidecar; explicit Preferences always wins.
+pub(crate) fn noctalia_colors_enabled(value: Option<bool>, config: Option<&Path>) -> bool {
+    value.unwrap_or_else(|| {
+        config.is_some_and(|p| {
+            p.join("nectarlink/noctalia-colors.json").is_file()
+                && !p.join("nectarlink/noctalia-colors.json.disabled").exists()
+        })
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -587,6 +605,10 @@ pub struct Settings {
     /// reduced motion or battery saver whatever this says).
     #[serde(default = "default_true", alias = "comb_motion")]
     pub comb_motion: bool,
+    /// None derives the initial value from legacy palette state; Preferences
+    /// persists the explicit value on its next ordinary save, not during load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noctalia_colors: Option<bool>,
     /// Closing the window keeps NectarLink running in the tray.
     #[serde(default = "default_close_to_tray", alias = "close_to_tray")]
     pub close_to_tray: bool,
@@ -937,6 +959,7 @@ impl Default for Settings {
             amoled: false,
             backdrop: true,
             comb_motion: true,
+            noctalia_colors: None,
             close_to_tray: default_close_to_tray(),
             tray_one_colour: false,
             auto_clipboard: true,
@@ -1229,6 +1252,30 @@ mod tests {
     }
 
     #[test]
+    fn noctalia_preference_migrates_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Some(dir.path());
+        assert!(!noctalia_colors_enabled(None, config));
+        fs::create_dir(dir.path().join("nectarlink")).unwrap();
+        fs::write(dir.path().join("nectarlink/noctalia-colors.json"), "{}").unwrap();
+        assert!(noctalia_colors_enabled(None, config));
+        assert!(!noctalia_colors_enabled(Some(false), config));
+        fs::write(dir.path().join("nectarlink/noctalia-colors.json.disabled"), "").unwrap();
+        assert!(!noctalia_colors_enabled(None, config));
+        assert!(noctalia_colors_enabled(Some(true), config));
+        assert!(!noctalia_colors_enabled(None, None));
+        assert!(noctalia_colors_enabled(Some(true), None));
+        assert!(!noctalia_colors_enabled(Some(false), None));
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.noctalia_colors, None);
+        for value in [true, false] {
+            let settings = Settings { noctalia_colors: Some(value), ..Settings::default() };
+            settings.save(dir.path()).unwrap();
+            assert_eq!(Settings::load(dir.path()).noctalia_colors, Some(value));
+        }
+    }
+
+    #[test]
     fn an_update_asks_for_a_star_unless_it_was_answered() {
         let mut new = Settings::default();
         assert!(new.ask_for_star_after_update());
@@ -1294,6 +1341,7 @@ mod tests {
             amoled: false,
             backdrop: false,
             comb_motion: false,
+            noctalia_colors: Some(false),
             close_to_tray: false,
             tray_one_colour: true,
             auto_clipboard: false,

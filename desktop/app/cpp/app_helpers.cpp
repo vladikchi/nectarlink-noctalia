@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app_helpers.h"
+#include "external_palette.h"
 #include "video_view.h"
 
 #include <QtCore/QCoreApplication>
@@ -99,6 +100,7 @@ void register_qml_engine(QQmlEngine *engine)
 
 void register_qml_app_engine(QQmlApplicationEngine &engine)
 {
+    register_external_palette();
     qmlEngineRef() = &engine;
     remember(&engine);
 }
