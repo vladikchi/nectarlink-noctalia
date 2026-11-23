@@ -16,7 +16,9 @@ use std::{
     time::Duration,
 };
 
-use nectarlink_vcam::{DEFAULT_MAPPING_NAME, LOCAL_MAPPING_NAME, SharedFrameMapping};
+use nectarlink_vcam::{
+    DEFAULT_MAPPING_NAME, LOCAL_MAPPING_NAME, SharedFrameMapping, render_placeholder_bgrx,
+};
 
 pub const CLSID_STR: &str = "{8E6C3B74-5D4A-4B9E-9A12-7C8F1E2D3A40}";
 pub const FRIENDLY_NAME: &str = "NectarLink Webcam";
@@ -350,6 +352,63 @@ fn configure_v4l2_yuyv(fd: i32, width: u32, height: u32) -> bool {
     unsafe { libc::ioctl(fd, VIDIOC_S_FMT, &raw mut fmt) == 0 }
 }
 
+struct OutputFrames {
+    // V4L2 output dimensions are fixed for the lifetime of this feeder.
+    width: u32,
+    height: u32,
+    bgrx: Vec<u8>,
+    live_yuyv: Vec<u8>,
+    idle_yuyv: Vec<u8>,
+    idle_name: Option<String>,
+    last_live_ts: Option<u64>,
+}
+
+impl OutputFrames {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            bgrx: Vec::new(),
+            live_yuyv: Vec::new(),
+            idle_yuyv: Vec::new(),
+            idle_name: None,
+            last_live_ts: None,
+        }
+    }
+
+    fn device_opened(&mut self) {
+        // Deliver the first live frame even if its timestamp hasn't changed.
+        self.last_live_ts = None;
+    }
+
+    /// Returns the bytes to write and whether they come from a live frame.
+    /// Idle frames are repeated to keep the capture device behaving as before.
+    fn prepare(&mut self, map: &SharedFrameMapping) -> Option<(&[u8], bool)> {
+        let (width, height) = (self.width, self.height);
+        self.bgrx.resize(width as usize * height as usize * 4, 0);
+        if let Some(timestamp_us) = map.read_live_bgrx(width, height, &mut self.bgrx) {
+            if self.last_live_ts == Some(timestamp_us) {
+                return None;
+            }
+            self.last_live_ts = Some(timestamp_us);
+            bgrx_to_yuyv(&self.bgrx, width, height, &mut self.live_yuyv);
+            Some((&self.live_yuyv, true))
+        } else {
+            self.last_live_ts = None;
+            // On contention, keep the last complete label (or the generic card
+            // before the first complete read). Never use live YUYV bytes here.
+            let name = map.try_load_phone_name();
+            let label = name.as_deref().map(str::trim).or(self.idle_name.as_deref()).unwrap_or_default();
+            if self.idle_name.as_deref() != Some(label) {
+                render_placeholder_bgrx(&mut self.bgrx, width, height, label);
+                bgrx_to_yuyv(&self.bgrx, width, height, &mut self.idle_yuyv);
+                self.idle_name = Some(label.to_owned());
+            }
+            Some((&self.idle_yuyv, false))
+        }
+    }
+}
+
 fn v4l2_worker_loop(stop: &AtomicBool) {
     const OUT_W: u32 = 1280;
     const OUT_H: u32 = 720;
@@ -357,9 +416,7 @@ fn v4l2_worker_loop(stop: &AtomicBool) {
     let mut mapping: Option<SharedFrameMapping> = None;
     let mut v4l2_file: Option<fs::File> = None;
     let mut configured_dims: Option<(u32, u32)> = None;
-    let mut bgrx = Vec::new();
-    let mut yuyv = Vec::new();
-    let mut last_ts: Option<(bool, u64)> = None;
+    let mut frames = OutputFrames::new(OUT_W, OUT_H);
 
     while !stop.load(Ordering::Acquire) {
         if mapping.is_none() {
@@ -374,7 +431,7 @@ fn v4l2_worker_loop(stop: &AtomicBool) {
         {
             v4l2_file = Some(file);
             configured_dims = None;
-            last_ts = None;
+            frames.device_opened();
         }
 
         let (Some(map), Some(dev)) = (mapping.as_ref(), v4l2_file.as_mut()) else {
@@ -382,28 +439,21 @@ fn v4l2_worker_loop(stop: &AtomicBool) {
             continue;
         };
 
-        if bgrx.len() != (OUT_W * OUT_H * 4) as usize {
-            bgrx.resize((OUT_W * OUT_H * 4) as usize, 0);
-        }
-
-        let state = map.read_bgrx(OUT_W, OUT_H, &mut bgrx);
-        if state.0 && last_ts == Some(state) {
+        let Some((yuyv, live)) = frames.prepare(map) else {
             thread::sleep(Duration::from_millis(8));
             continue;
-        }
-        last_ts = Some(state);
+        };
 
         if configured_dims != Some((OUT_W, OUT_H)) {
             let _ = configure_v4l2_yuyv(dev.as_raw_fd(), OUT_W, OUT_H);
             configured_dims = Some((OUT_W, OUT_H));
         }
 
-        bgrx_to_yuyv(&bgrx, OUT_W, OUT_H, &mut yuyv);
-        if dev.write_all(&yuyv).is_err() {
+        if dev.write_all(yuyv).is_err() {
             v4l2_file = None;
             configured_dims = None;
             thread::sleep(Duration::from_millis(50));
-        } else if !state.0 {
+        } else if !live {
             thread::sleep(Duration::from_millis(33));
         }
     }
@@ -437,6 +487,81 @@ mod tests {
         let odd_bgrx = vec![0x80u8; 3 * 2 * 4];
         bgrx_to_yuyv(&odd_bgrx, 3, 2, &mut yuyv);
         assert_eq!(yuyv.len(), 4 * 2 * 2);
+    }
+
+    #[test]
+    fn idle_frames_reuse_the_converted_image_until_the_label_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = SharedFrameMapping::open_or_create_at(&dir.path().join("frames")).unwrap();
+        let (width, height) = (320, 180);
+        let mut frames = OutputFrames::new(width, height);
+        let mut bgrx = vec![0; width as usize * height as usize * 4];
+        let mut expected = Vec::new();
+
+        map.set_idle("Phone A");
+        assert_eq!(map.read_bgrx(width, height, &mut bgrx), (false, 0));
+        bgrx_to_yuyv(&bgrx, width, height, &mut expected);
+        assert_eq!(frames.prepare(&map), Some((expected.as_slice(), false)));
+
+        // Overwrite scratch data to catch accidental rendering or conversion.
+        frames.bgrx.fill(0);
+        map.set_idle(" Phone A ");
+        assert_eq!(frames.prepare(&map), Some((expected.as_slice(), false)));
+        assert!(frames.bgrx.iter().all(|&byte| byte == 0));
+
+        map.set_idle("Phone B");
+        let (renamed, live) = frames.prepare(&map).unwrap();
+        assert!(!live);
+        assert_ne!(renamed, expected);
+        assert_eq!(map.read_bgrx(width, height, &mut bgrx), (false, 0));
+        bgrx_to_yuyv(&bgrx, width, height, &mut expected);
+        assert_eq!(renamed, expected);
+    }
+
+    #[test]
+    fn idle_frames_use_the_feeders_output_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = SharedFrameMapping::open_or_create_at(&dir.path().join("frames")).unwrap();
+        map.set_idle("Phone A");
+        for (width, height) in [(320, 180), (180, 320)] {
+            let mut frames = OutputFrames::new(width, height);
+            let mut bgrx = vec![0; (width * height * 4) as usize];
+            let mut expected = Vec::new();
+            assert_eq!(map.read_bgrx(width, height, &mut bgrx), (false, 0));
+            bgrx_to_yuyv(&bgrx, width, height, &mut expected);
+            assert_eq!(frames.prepare(&map), Some((expected.as_slice(), false)));
+        }
+    }
+
+    #[test]
+    fn live_video_replaces_idle_and_idle_never_repeats_the_last_live_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = SharedFrameMapping::open_or_create_at(&dir.path().join("frames")).unwrap();
+        let (width, height) = (320, 180);
+        let mut frames = OutputFrames::new(width, height);
+
+        map.set_idle("Phone A");
+        let idle = frames.prepare(&map).unwrap().0.to_vec();
+        let live_bgrx = vec![0x80; width as usize * height as usize * 4];
+        let mut live_yuyv = Vec::new();
+        bgrx_to_yuyv(&live_bgrx, width, height, &mut live_yuyv);
+        assert_ne!(idle, live_yuyv);
+        map.write_frame("Phone A", width, height, 0, &live_bgrx, false);
+        assert_eq!(frames.prepare(&map), Some((live_yuyv.as_slice(), true)));
+        assert_eq!(frames.prepare(&map), None, "don't resend an unchanged live frame");
+
+        frames.device_opened();
+        assert_eq!(frames.prepare(&map), Some((live_yuyv.as_slice(), true)));
+
+        map.set_idle("Phone A");
+        assert_eq!(frames.prepare(&map), Some((idle.as_slice(), false)));
+        assert_eq!(frames.bgrx, live_bgrx, "the cached idle frame survives the live session");
+        map.write_frame("Phone A", width, height, 0, &live_bgrx, false);
+        assert_eq!(
+            frames.prepare(&map),
+            Some((live_yuyv.as_slice(), true)),
+            "a new session can start at the same timestamp"
+        );
     }
 
     #[test]
