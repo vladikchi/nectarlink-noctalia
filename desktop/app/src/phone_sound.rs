@@ -132,6 +132,11 @@ pub fn state(device: &DeviceId) -> &'static str {
     state_for(active(), device)
 }
 
+/// Device of the pending (asking) or playing sound session, not only audible playback.
+pub fn target() -> Option<DeviceId> {
+    active().map(|session| session.device)
+}
+
 /// Starts or stops playing the selected phone's sound here.
 pub fn set_on(device: DeviceId, on: bool) {
     if !on {

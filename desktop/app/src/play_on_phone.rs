@@ -5,6 +5,15 @@
 //! streamed from the PC, which keeps playing it.
 
 #[cfg(any(windows, target_os = "linux"))]
+mod request;
+
+#[derive(Debug)]
+pub enum StartError {
+    NoDevice,
+    Spawn(std::io::Error),
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 mod imp {
 
     #![allow(unsafe_code)]
@@ -15,7 +24,7 @@ mod imp {
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use nectarlink_core::{DeviceId, Error, FeatureState, LinkState, MediaAction, PlayOnPhone};
@@ -89,26 +98,53 @@ mod imp {
             .map(|p| p.id)
     }
 
-    /// When a phone was last asked to watch (its notification is up).
-    static ASKED: Mutex<Option<Instant>> = Mutex::new(None);
-    /// How long a phone has to accept before the toggle gives up waiting.
-    const ASK_FOR: Duration = Duration::from_secs(60);
-
-    /// Where Play on phone is: `"off"`, `"asking"` (the phone's notification
+    use super::{StartError, request};
+    use request::ASK_FOR;
+    static OFFER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    fn current(request: u64) -> bool {
+        self::request::state().current(request)
+    }
+    struct Preparing(u64);
+    impl Drop for Preparing {
+        fn drop(&mut self) {
+            let changed = request::state().finish_preparing(self.0);
+            if changed {
+                core_host::host().hub.changed(crate::state::Changes::MEDIA);
+            }
+        }
+    }
+    /// Where Play on phone is: `"off"`, `"preparing"`, `"asking"` (the phone's notification
     /// is up) or `"watching"`.
     pub fn state() -> &'static str {
         if crate::pc_mirror::is_watching() {
-            *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            if let Some(device) = crate::pc_mirror::active_peer() {
+                request::state().observed_watching(device);
+            }
             return "watching";
         }
-        match *ASKED.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(at) if at.elapsed() < ASK_FOR => "asking",
-            _ => "off",
-        }
+        request::state().snapshot().map_or("off", |(_, phase)| phase)
     }
 
-    fn asked() {
-        *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    /// Device-scoped state for external controllers; never claim another
+    /// phone's watch session belongs to the selected phone.
+    pub fn state_for(device: DeviceId) -> &'static str {
+        if crate::pc_mirror::is_watching() && crate::pc_mirror::active_peer() == Some(device) {
+            return "watching";
+        }
+        request::state().snapshot().filter(|(id, _)| *id == device).map_or("off", |(_, phase)| phase)
+    }
+
+    pub fn target() -> Option<DeviceId> {
+        if crate::pc_mirror::is_watching() {
+            return crate::pc_mirror::active_peer();
+        }
+        request::state().snapshot().map(|(device, _)| device)
+    }
+
+    fn asked(request: u64) {
+        if !self::request::state().asking(request) {
+            return;
+        }
         core_host::host().hub.changed(crate::state::Changes::MEDIA);
         // The toggle stops waiting when the phone doesn't answer.
         core_host::spawn(async {
@@ -127,7 +163,7 @@ mod imp {
             }
             return;
         }
-        *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        request::state().cancel(None);
         crate::pc_mirror::stop_watching();
         core_host::host().hub.changed(crate::state::Changes::MEDIA);
     }
@@ -152,86 +188,159 @@ mod imp {
         let Some((phone, name)) = phone() else {
             return show_message(tr!("PlayOnPhone", "Connect your phone to play on it."));
         };
+        let _ = play_to(phone, name, player);
+    }
+
+    pub fn stop_for(device: DeviceId) -> Result<(), &'static str> {
+        if crate::pc_mirror::is_watching() && crate::pc_mirror::active_peer().is_some_and(|id| id != device) {
+            return Err("another_device");
+        }
+        if !request::state().cancel(Some(device)) {
+            return Err("another_device");
+        }
+        crate::pc_mirror::stop_watching_for(&device);
+        core_host::host().hub.changed(crate::state::Changes::MEDIA);
+        Ok(())
+    }
+
+    pub fn play_for(phone: DeviceId, player: String) -> Result<(), StartError> {
+        let name = core_host::host().hub.read(|s| {
+            s.devices
+                .iter()
+                .find(|d| d.id == phone && matches!(d.link, LinkState::Online { .. }))
+                .map(|d| d.info.name.clone())
+        });
+        let name = name.ok_or(StartError::NoDevice)?;
+        play_to(phone, name, player)
+    }
+
+    fn play_to(phone: DeviceId, name: String, player: String) -> Result<(), StartError> {
+        let request = self::request::state().begin(phone);
+        core_host::host().hub.changed(crate::state::Changes::MEDIA);
+        let preparing = Preparing(request);
         let spawned = std::thread::Builder::new().name("play-on-phone".into()).spawn(move || {
             #[cfg(windows)]
             // SAFETY: COM for this short-lived thread (UI Automation).
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            let (title, position) = now_playing(&player);
-            let window = browser::window_for(&player, &title);
-            // A video file in a desktop player: the phone plays the file itself.
-            let file = crate::media_file::file_for(&player, &title);
-            let url = window
-                .as_ref()
-                .filter(|w| browser::is_browser(&w.program))
-                .and_then(|w| Automation::new().ok()?.page_url(w));
-            let plan = nectarlink_core::play_on_phone::plan(url.as_deref(), position);
+            let prepared = prepare(&player);
             let Some(node) = core_host::node() else { return };
-            core_host::spawn(async move {
-                if let Some(file) = file {
-                    let shown = (!title.is_empty()).then_some(title);
-                    let at = u64::from(position.unwrap_or(0)) * 1000;
-                    match node.offer_watch_file(phone, player, shown, file, at).await {
-                        Ok(()) => {
-                            asked();
-                            show_message(tr!("PlayOnPhone", "Tap the notification on %1 to watch.", name));
-                        }
-                        Err(e) => show_message(failed(&e, &name)),
+            core_host::spawn(execute(node, request, preparing, phone, name, player, prepared));
+        });
+        match spawned {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "can't start Play on phone");
+                Err(StartError::Spawn(e))
+            }
+        }
+    }
+
+    async fn execute(
+        node: nectarlink_core::Node,
+        request: u64,
+        preparing: Preparing,
+        phone: DeviceId,
+        name: String,
+        player: String,
+        prepared: Prepared,
+    ) {
+        let Prepared { title, position, file, plan } = prepared;
+        let _preparing = preparing;
+        let _offer = OFFER.lock().await;
+        if !current(request) {
+            return;
+        }
+        if let Some(file) = file {
+            let shown = (!title.is_empty()).then_some(title);
+            let at = u64::from(position.unwrap_or(0)) * 1000;
+            let result = node.offer_watch_file(phone, player, shown, file, at).await;
+            if !current(request) {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    asked(request);
+                    show_message(tr!("PlayOnPhone", "Tap the notification on %1 to watch.", name));
+                }
+                Err(e) if current(request) => show_message(failed(&e, &name)),
+                Err(_) => {}
+            }
+            return;
+        }
+        match plan {
+            PlayOnPhone::Open { url, service } => match node.open_link(phone, url).await {
+                Ok(()) => {
+                    if !current(request) {
+                        return;
                     }
+                    crate::media::command(crate::media::LOCAL_DEVICE, player, MediaAction::Pause, None);
+                    show_message(tr!(
+                        "PlayOnPhone",
+                        "Opening in %1 on %2. Tap the notification there.",
+                        service,
+                        name
+                    ));
+                }
+                Err(e) if current(request) => show_message(failed(&e, &name)),
+                Err(_) => {}
+            },
+            PlayOnPhone::Stream { open_instead } => {
+                let shown = (!title.is_empty()).then_some(title);
+                let result = node.offer_watch(phone, player.clone(), shown).await;
+                if !current(request) {
                     return;
                 }
-                match plan {
-                    PlayOnPhone::Open { url, service } => match node.open_link(phone, url).await {
-                        Ok(()) => {
-                            crate::media::command(
-                                crate::media::LOCAL_DEVICE,
-                                player,
-                                MediaAction::Pause,
-                                None,
-                            );
-                            show_message(tr!(
-                                "PlayOnPhone",
-                                "Opening in %1 on %2. Tap the notification there.",
-                                service,
-                                name
-                            ));
-                        }
-                        Err(e) => show_message(failed(&e, &name)),
-                    },
-                    PlayOnPhone::Stream { open_instead } => {
-                        let shown = (!title.is_empty()).then_some(title);
-                        match node.offer_watch(phone, player.clone(), shown).await {
+                match result {
+                    Ok(()) => {
+                        asked(request);
+                        show_message(tr!("PlayOnPhone", "Tap the notification on %1 to watch.", name))
+                    }
+                    // A phone that can't watch yet: the page opens there instead.
+                    Err(Error::Unsupported) if let Some(url) = open_instead => {
+                        match node.open_link(phone, url).await {
                             Ok(()) => {
-                                asked();
-                                show_message(tr!("PlayOnPhone", "Tap the notification on %1 to watch.", name))
-                            }
-                            // A phone that can't watch yet: the page opens there instead.
-                            Err(Error::Unsupported) if let Some(url) = open_instead => {
-                                match node.open_link(phone, url).await {
-                                    Ok(()) => {
-                                        crate::media::command(
-                                            crate::media::LOCAL_DEVICE,
-                                            player,
-                                            MediaAction::Pause,
-                                            None,
-                                        );
-                                        show_message(tr!(
-                                            "PlayOnPhone",
-                                            "Sent to %1. Tap the notification there.",
-                                            name
-                                        ));
-                                    }
-                                    Err(e) => show_message(failed(&e, &name)),
+                                if !current(request) {
+                                    return;
                                 }
+                                crate::media::command(
+                                    crate::media::LOCAL_DEVICE,
+                                    player,
+                                    MediaAction::Pause,
+                                    None,
+                                );
+                                show_message(tr!(
+                                    "PlayOnPhone",
+                                    "Sent to %1. Tap the notification there.",
+                                    name
+                                ));
                             }
-                            Err(e) => show_message(failed(&e, &name)),
+                            Err(e) if current(request) => show_message(failed(&e, &name)),
+                            Err(_) => {}
                         }
                     }
+                    Err(e) => show_message(failed(&e, &name)),
                 }
-            });
-        });
-        if let Err(e) = spawned {
-            tracing::warn!(error = %e, "can't start Play on phone");
+            }
         }
+    }
+
+    struct Prepared {
+        title: String,
+        position: Option<u32>,
+        file: Option<std::path::PathBuf>,
+        plan: PlayOnPhone,
+    }
+
+    fn prepare(player: &str) -> Prepared {
+        let (title, position) = now_playing(player);
+        let window = browser::window_for(player, &title);
+        let file = crate::media_file::file_for(player, &title);
+        let url = window
+            .as_ref()
+            .filter(|w| browser::is_browser(&w.program))
+            .and_then(|w| Automation::new().ok()?.page_url(w));
+        let plan = nectarlink_core::play_on_phone::plan(url.as_deref(), position);
+        Prepared { title, position, file, plan }
     }
 
     fn failed(error: &Error, phone: &str) -> String {
@@ -392,6 +501,19 @@ mod imp {
 
     pub fn state() -> &'static str {
         "idle"
+    }
+
+    pub fn state_for(_device: DeviceId) -> &'static str {
+        "off"
+    }
+    pub fn target() -> Option<DeviceId> {
+        None
+    }
+    pub fn play_for(_device: DeviceId, _player: String) -> Result<(), super::StartError> {
+        Err(super::StartError::NoDevice)
+    }
+    pub fn stop_for(_device: DeviceId) -> Result<(), &'static str> {
+        Ok(())
     }
 
     pub fn set_on(_on: bool) {}
