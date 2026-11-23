@@ -2,6 +2,7 @@
 pragma Singleton
 import QtQuick
 import app.nectarlink
+import app.nectarlink.theme 1.0
 
 // The active theme: Bloom (Material You, seed presets, the default), Hive
 // (honey on charcoal or wax), Glass, Graphite (paper and slate), or Fluent
@@ -19,9 +20,12 @@ QtObject {
     // Windows' accent ({ light, dark }), or null elsewhere: Fluent then uses its own blue.
     readonly property var systemAccent: AppController.systemAccent !== ""
         ? JSON.parse(AppController.systemAccent) : null
-    readonly property bool dark: Preferences.colorMode === "dark"
-                                 || (Preferences.colorMode === "system" && AppController.systemDark)
-    readonly property bool amoled: dark && Preferences.amoled && (graphite || Preferences.seed === "black")
+    // Opt-in external colors affect Hive only. Other themes are unchanged.
+    readonly property bool externalHive: hive && Preferences.noctaliaColors && ExternalPalette.valid === true
+    readonly property bool dark: externalHive ? ExternalPalette.dark
+        : (Preferences.colorMode === "dark"
+           || (Preferences.colorMode === "system" && AppController.systemDark))
+    readonly property bool amoled: !externalHive && dark && Preferences.amoled && (graphite || Preferences.seed === "black")
     readonly property bool reduceMotion: AppController.reduceMotion
 
     // ---- Hive's comb ----
@@ -35,8 +39,10 @@ QtObject {
     property bool softwareRendering: false
     readonly property color combLine: Qt.rgba(primary.r, primary.g, primary.b,
                                               dark ? comb.lineAlphaDark : comb.lineAlphaLight)
-    readonly property color combGlow: dark ? Qt.rgba(1.0, 0.62, 0.18, comb.glowAlphaDark)
-                                           : Qt.rgba(1.0, 0.72, 0.37, comb.glowAlphaLight)
+    readonly property color combGlow: externalHive
+        ? Qt.rgba(primary.r, primary.g, primary.b, dark ? comb.glowAlphaDark : comb.glowAlphaLight)
+        : (dark ? Qt.rgba(1.0, 0.62, 0.18, comb.glowAlphaDark)
+                : Qt.rgba(1.0, 0.72, 0.37, comb.glowAlphaLight))
     // One clock for every comb in the app (seconds), so two combs never draw
     // twice as often. The main window runs it while it's in front.
     property real combTime: 0
@@ -121,7 +127,7 @@ QtObject {
           ? activePhoneSeed
           : (seed === "wallpaper" ? wallpaperSeed : bloomSeeds[seed])
     readonly property var palette: hive
-        ? Tokens.data.themes.hive.variants[dark ? "comb" : "wax"]
+        ? (externalHive ? ExternalPalette.colors : Tokens.data.themes.hive.variants[dark ? "comb" : "wax"])
         : (graphite
             ? Tokens.data.themes.graphite.variants[dark ? "slate" : "paper"]
             : (fluent

@@ -48,6 +48,7 @@ pub mod qobject {
         #[qproperty(bool, backdrop)]
         /// Hive's comb breathes and pulses.
         #[qproperty(bool, comb_motion)]
+        #[qproperty(bool, noctalia_colors)]
         #[qproperty(bool, close_to_tray)]
         /// The tray icon in one colour, matching the taskbar.
         #[qproperty(bool, tray_one_colour, cxx_name = "trayOneColour")]
@@ -386,6 +387,7 @@ pub struct PreferencesRust {
     amoled: bool,
     backdrop: bool,
     comb_motion: bool,
+    noctalia_colors: bool,
     close_to_tray: bool,
     tray_one_colour: bool,
     auto_clipboard: bool,
@@ -495,6 +497,8 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().set_amoled(settings.amoled);
         self.as_mut().set_backdrop(settings.backdrop);
         self.as_mut().set_comb_motion(settings.comb_motion);
+        let colors = crate::settings::effective_noctalia_colors(settings.noctalia_colors);
+        self.as_mut().set_noctalia_colors(colors);
         self.as_mut().set_close_to_tray(settings.close_to_tray);
         self.as_mut().set_tray_one_colour(settings.tray_one_colour);
         self.as_mut().set_auto_clipboard(settings.auto_clipboard);
@@ -621,6 +625,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().on_amoled_changed(|p| p.save()).release();
         self.as_mut().on_backdrop_changed(|p| p.save()).release();
         self.as_mut().on_comb_motion_changed(|p| p.save()).release();
+        self.as_mut().on_noctalia_colors_changed(|p| p.save()).release();
         self.as_mut().on_close_to_tray_changed(|p| p.save()).release();
         self.as_mut()
             .on_tray_one_colour_changed(|p| {
@@ -1340,6 +1345,7 @@ impl qobject::Preferences {
             amoled: p.amoled,
             backdrop: p.backdrop,
             comb_motion: p.comb_motion,
+            noctalia_colors: Some(p.noctalia_colors),
             close_to_tray: p.close_to_tray,
             tray_one_colour: p.tray_one_colour,
             auto_clipboard: p.auto_clipboard,
