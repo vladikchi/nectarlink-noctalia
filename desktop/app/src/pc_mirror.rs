@@ -1983,10 +1983,6 @@ mod imp {
         started: Instant,
         child: std::process::Child,
         latest_frame: LatestFrame,
-        /// The frame size the pipeline scales to.
-        size: (u32, u32),
-        /// Frames go through OpenGL.
-        gl: bool,
     }
 
     #[cfg(target_os = "linux")]
@@ -2021,7 +2017,7 @@ mod imp {
             cmd.args(pipeline_args(node_id, dst_w, dst_h, gl))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::inherit());
             // SAFETY: runs in the child between fork and exec and only makes
             // async-signal-safe system calls.
             unsafe {
@@ -2065,43 +2061,22 @@ mod imp {
         }
 
         fn start(portal: win::screen_portal::ScreenPortal, dst_w: u32, dst_h: u32) -> anyhow::Result<Self> {
-            let gl = USE_GL.load(std::sync::atomic::Ordering::Relaxed);
+            // Use GL before CPU conversion: a DMA-BUF-only source can reject
+            // the CPU pipeline immediately, before a no-frame timeout.
+            let gl = gl_elements_installed();
+            tracing::info!(gl_import = gl, width = dst_w, height = dst_h, "starting PipeWire screen capture");
             let (child, latest_frame) =
                 Self::spawn_pipeline(&portal.remote, portal.node_id, dst_w, dst_h, gl)?;
-            Ok(Self { portal, started: Instant::now(), child, latest_frame, size: (dst_w, dst_h), gl })
-        }
-
-        /// No frame yet through the CPU pipeline: GPU buffers (NVIDIA's
-        /// DMABuf) only come through OpenGL, so try that, once, and keep
-        /// using it for later captures (D511).
-        fn switch_to_gl(&mut self) -> anyhow::Result<()> {
-            let (dst_w, dst_h) = self.size;
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            let (child, latest_frame) =
-                Self::spawn_pipeline(&self.portal.remote, self.portal.node_id, dst_w, dst_h, true)?;
-            tracing::info!("no frames from PipeWire on the CPU; capturing through OpenGL");
-            USE_GL.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.child = child;
-            self.latest_frame = latest_frame;
-            self.started = Instant::now();
-            self.gl = true;
-            Ok(())
+            Ok(Self { portal, started: Instant::now(), child, latest_frame })
         }
 
         fn capture(&mut self, bgra: &mut Vec<u8>) -> anyhow::Result<bool> {
             const FRAME_TIMEOUT: Duration = Duration::from_secs(8);
-            const TRY_GL_AFTER: Duration = Duration::from_secs(3);
             if self.portal.is_closed() {
                 anyhow::bail!("the Wayland portal closed the screen sharing session");
             }
             if let Some(status) = self.child.try_wait()? {
                 anyhow::bail!("the PipeWire capture process exited ({status})");
-            }
-            let nothing_yet = self.latest_frame.lock().unwrap_or_else(|e| e.into_inner()).is_none();
-            if nothing_yet && !self.gl && self.started.elapsed() >= TRY_GL_AFTER && gl_elements_installed() {
-                self.switch_to_gl()?;
-                return Ok(false);
             }
             let latest = self.latest_frame.lock().unwrap_or_else(|e| e.into_inner());
             if latest.as_ref().map_or(self.started, |(at, _)| *at).elapsed() >= FRAME_TIMEOUT {
@@ -2113,10 +2088,6 @@ mod imp {
             Ok(true)
         }
     }
-
-    /// Capture through OpenGL from the start: an earlier CPU capture got no frames.
-    #[cfg(target_os = "linux")]
-    static USE_GL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     /// Whether GStreamer's OpenGL elements are installed (gst-plugins-base's gl).
     #[cfg(target_os = "linux")]
@@ -2295,6 +2266,10 @@ mod imp {
             return;
         };
         let runtime = &core_host::host().runtime;
+        // zbus schedules cleanup when the portal subscription is dropped.
+        // Stay in Tokio until the capture resources have been released.
+        #[cfg(target_os = "linux")]
+        let _runtime_context = runtime.enter();
         #[cfg(target_os = "linux")]
         let (mut wayland, wayland_dims) = if options.watch.is_none() && is_wayland_screencast_available() {
             let portal = runtime.block_on(win::screen_portal::ScreenPortal::open(
@@ -2856,6 +2831,53 @@ mod imp {
             assert!(at("glupload") < at("glcolorconvert") && at("glcolorconvert") < at("gldownload"));
             assert!(at("gldownload") < at("videoconvert"));
             assert!(gl.contains(&"video/x-raw,format=BGRx,width=1280,height=720".to_owned()));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn portal_subscriptions_are_dropped_inside_the_capture_runtime() {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Child, Command, Stdio};
+
+            // Keep the regression test off the user's session bus.
+            struct Bus(Child);
+            impl Drop for Bus {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let mut bus = Bus(Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("dbus-daemon for the isolated portal regression test"));
+            let mut address = String::new();
+            BufReader::new(bus.0.stdout.take().unwrap()).read_line(&mut address).unwrap();
+            let runtime =
+                tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+            let stream = runtime.block_on(async {
+                let conn = zbus::connection::Builder::address(address.trim()).unwrap().build().await.unwrap();
+                let rule = zbus::MatchRule::builder()
+                    .msg_type(zbus::message::Type::Signal)
+                    .interface("org.freedesktop.portal.Session")
+                    .unwrap()
+                    .member("Closed")
+                    .unwrap()
+                    .build();
+                zbus::MessageStream::for_match_rule(rule, &conn, None).await.unwrap()
+            });
+            std::thread::scope(|scope| {
+                let runtime = &runtime;
+                scope
+                    .spawn(move || {
+                        assert!(tokio::runtime::Handle::try_current().is_err());
+                        let _runtime_context = runtime.enter();
+                        drop(stream);
+                    })
+                    .join()
+                    .expect("portal cleanup must not panic in the capture thread");
+            });
         }
 
         #[test]
