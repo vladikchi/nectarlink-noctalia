@@ -124,7 +124,7 @@ NativeWindow {
 
     width: normalWidth
     height: normalHeight
-    title: "NectarLink"
+    title: "NectarLink — Noctalia Integration"
 
     function screenKey(s) {
         if (!s) return ""
