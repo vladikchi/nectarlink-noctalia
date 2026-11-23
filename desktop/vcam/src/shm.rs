@@ -551,31 +551,21 @@ impl SharedFrameMapping {
     /// placeholder frame). While the writer is busy, repeats the last complete
     /// live frame at the same output dimensions instead of flashing the idle card.
     pub fn read_bgrx(&self, out_width: u32, out_height: u32, out_bgrx: &mut [u8]) -> (bool, u64) {
-        self.read_bgrx_with_idle(out_width, out_height, out_bgrx, |out| {
-            render_placeholder_bgrx(out, out_width, out_height, &self.load_phone_name());
-        })
+        if let Some(timestamp_us) = self.read_live_bgrx(out_width, out_height, out_bgrx) {
+            return (true, timestamp_us);
+        }
+        render_placeholder_bgrx(out_bgrx, out_width, out_height, &self.load_phone_name());
+        (false, 0)
     }
 
     /// Returns a live frame's timestamp, including the last complete frame on
     /// writer contention. On `None`, the caller supplies its own idle frame
     /// and must not use the contents of `out_bgrx`.
-    #[cfg(target_os = "linux")]
-    pub fn read_live_bgrx(&self, out_width: u32, out_height: u32, out_bgrx: &mut [u8]) -> Option<u64> {
-        let (live, timestamp_us) = self.read_bgrx_with_idle(out_width, out_height, out_bgrx, |_| {});
-        live.then_some(timestamp_us)
-    }
-
     #[allow(unsafe_code)]
-    fn read_bgrx_with_idle(
-        &self,
-        out_width: u32,
-        out_height: u32,
-        out_bgrx: &mut [u8],
-        idle: impl FnOnce(&mut [u8]),
-    ) -> (bool, u64) {
+    pub fn read_live_bgrx(&self, out_width: u32, out_height: u32, out_bgrx: &mut [u8]) -> Option<u64> {
         let needed = (out_width as usize) * (out_height as usize) * 4;
         if out_bgrx.len() < needed || out_width == 0 || out_height == 0 {
-            return (false, 0);
+            return None;
         }
         let mut last_read = self.last_read.lock().unwrap_or_else(|e| e.into_inner());
         let h = self.header();
@@ -617,7 +607,7 @@ impl SharedFrameMapping {
                         cached.timestamp_us = ts;
                         cached.bgrx.resize(needed, 0);
                         cached.bgrx.copy_from_slice(&out_bgrx[..needed]);
-                        return (true, ts);
+                        return Some(ts);
                     }
                     contended = true;
                 }
@@ -629,12 +619,11 @@ impl SharedFrameMapping {
                 && cached.height == out_height
             {
                 out_bgrx[..needed].copy_from_slice(&cached.bgrx);
-                return (true, cached.timestamp_us);
+                return Some(cached.timestamp_us);
             }
         }
         *last_read = None;
-        idle(&mut out_bgrx[..needed]);
-        (false, 0)
+        None
     }
 }
 
