@@ -280,6 +280,8 @@ pub const MAX_NOTIFICATIONS: usize = 200;
 #[derive(Debug, Default)]
 pub struct AppState {
     pub status: Option<CoreStatus>,
+    /// The core successfully loaded its initial paired-device list.
+    pub paired_devices_ready: bool,
     /// Paired devices, in pairing order.
     pub devices: Vec<DeviceView>,
     pub discovered: Vec<DiscoveredDevice>,
@@ -385,6 +387,7 @@ impl AppState {
 
     /// Replaces the device list (at startup, from the core's store).
     pub fn set_devices(&mut self, devices: Vec<PairedDevice>) -> Changes {
+        self.paired_devices_ready = true;
         self.devices = devices.into_iter().map(DeviceView::from).collect();
         self.sort_devices();
         Changes::DEVICES

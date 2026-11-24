@@ -300,24 +300,23 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     node.set_wake_info(wake.info.clone()).await;
     // Subscribe before reading the initial state so no event is missed.
     let mut events = node.events();
-    let devices = node.paired_devices().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "can't list paired devices");
-        Vec::new()
-    });
+    let devices = paired_snapshot(&node);
+    let initial_devices = devices.as_deref().unwrap_or_default();
     // A device that never connected hasn't told us what it can do; its
     // features stay "unknown" (not "locked") until its first hello.
-    let matrices: Vec<_> = devices
+    let matrices: Vec<_> = initial_devices
         .iter()
         .filter(|d| !matches!(d.link, LinkState::Offline { last_seen: None }))
         .filter_map(|d| node.capabilities(d.id).ok())
         .collect();
     let toggles: Vec<_> =
-        devices.iter().filter_map(|d| node.phone_toggles(d.id).map(|t| (d.id, t))).collect();
+        initial_devices.iter().filter_map(|d| node.phone_toggles(d.id).map(|t| (d.id, t))).collect();
     let send_queue = node.send_queue(None).unwrap_or_default();
     let status = CoreStatus::Ready { device_id: node.device_id(), name: this_device().name };
     crate::clipboard::apply_history_setting(&node);
     let mut saved_settings = crate::settings::Settings::load(&data_dir);
-    let walkthrough_reconciled = saved_settings.reconcile_walkthrough_for_paired_devices(devices.len());
+    let walkthrough_reconciled =
+        devices.as_ref().is_some_and(|d| saved_settings.reconcile_walkthrough_for_paired_devices(d.len()));
     if walkthrough_reconciled {
         let _ = saved_settings.save(&data_dir);
     }
@@ -327,7 +326,7 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     });
     let _ = host.node.set(node);
     host.hub.update(|s| {
-        let mut changes = s.set_devices(devices);
+        let mut changes = devices.map_or(Changes::NONE, |devices| s.set_devices(devices));
         for m in matrices {
             changes |= s.set_matrix(m);
         }
@@ -398,19 +397,23 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
             Err(RecvError::Lagged(missed)) => {
                 // Resynchronize what can be re-read; transient events are lost.
                 tracing::warn!(missed, "UI fell behind core events; resyncing");
-                let devices =
-                    host.node.get().map(|n| n.paired_devices().unwrap_or_default()).unwrap_or_default();
+                let devices = host.node.get().and_then(paired_snapshot);
                 let toggles: Vec<_> = host
                     .node
                     .get()
                     .map(|n| {
-                        devices.iter().filter_map(|d| n.phone_toggles(d.id).map(|t| (d.id, t))).collect()
+                        devices
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|d| n.phone_toggles(d.id).map(|t| (d.id, t)))
+                            .collect()
                     })
                     .unwrap_or_default();
                 let send_queue =
                     host.node.get().map(|n| n.send_queue(None).unwrap_or_default()).unwrap_or_default();
                 host.hub.update(|s| {
-                    let mut changes = s.set_devices(devices);
+                    let mut changes = devices.map_or(Changes::NONE, |devices| s.set_devices(devices));
                     for (id, t) in toggles {
                         changes |= s.set_toggles(id, Some(t));
                     }
@@ -427,6 +430,10 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
             Err(RecvError::Closed) => return,
         }
     }
+}
+
+fn paired_snapshot(node: &Node) -> Option<Vec<nectarlink_core::PairedDevice>> {
+    node.paired_devices().inspect_err(|e| tracing::warn!(error = %e, "can't list paired devices")).ok()
 }
 
 /// Hands one core event to everything in the app that follows it.

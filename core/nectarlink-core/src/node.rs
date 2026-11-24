@@ -3780,7 +3780,16 @@ impl Node {
         peer: impl std::borrow::Borrow<DeviceId>,
         thread_id: &str,
     ) -> Option<crate::ChatThreadRecord> {
-        self.shared.store.chat_thread(peer.borrow(), thread_id).ok().flatten()
+        self.try_chat_thread(peer, thread_id).ok().flatten()
+    }
+
+    /// Like `chat_thread`, but keeps storage failures distinct from a missing chat.
+    pub fn try_chat_thread(
+        &self,
+        peer: impl std::borrow::Borrow<DeviceId>,
+        thread_id: &str,
+    ) -> Result<Option<crate::ChatThreadRecord>> {
+        Ok(self.shared.store.chat_thread(peer.borrow(), thread_id)?)
     }
 
     /// Lists up to `limit` messages in a locally stored `MessagingStyle` chat
@@ -3791,7 +3800,17 @@ impl Node {
         thread_id: &str,
         limit: u32,
     ) -> Vec<crate::ChatMessageRecord> {
-        self.shared.store.chat_messages(peer.borrow(), thread_id, limit as usize).unwrap_or_default()
+        self.try_chat_messages(peer, thread_id, limit).unwrap_or_default()
+    }
+
+    /// Like `chat_messages`, but does not turn a failed read into an empty history.
+    pub fn try_chat_messages(
+        &self,
+        peer: impl std::borrow::Borrow<DeviceId>,
+        thread_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::ChatMessageRecord>> {
+        Ok(self.shared.store.chat_messages(peer.borrow(), thread_id, limit as usize)?)
     }
 
     /// Marks a locally stored `MessagingStyle` chat thread as read (`unread = 0`).

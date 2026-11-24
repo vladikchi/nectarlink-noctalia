@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use super::context::{resolve_target_device, try_node, with_state};
-use nectarlink_core::{DeviceId, LinkState};
+use super::context::{feature_access, resolve_target_device, try_node, with_state};
+use nectarlink_core::{Battery, DeviceId, LinkState};
 use serde::Deserialize;
 use serde_json::{Value, json};
 pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
-    let devices = with_state(|s| {
-        s.devices
+    let (ready, devices) = with_state(|s| {
+        let devices = s
+            .devices
             .iter()
             .map(|d| {
                 let (online, link_kind) = match &d.link {
@@ -20,12 +21,7 @@ pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
                     LinkState::Connecting => (false, "connecting"),
                     LinkState::Offline { .. } => (false, "offline"),
                 };
-                let battery = d.battery.as_ref().map(|b| {
-                    json!({
-                        "level": b.level,
-                        "charging": b.charging,
-                    })
-                });
+                let battery = d.battery.as_ref().map(battery_json);
                 json!({
                     "id": d.id.to_string(),
                     "name": d.info.name,
@@ -33,15 +29,33 @@ pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
                     "online": online,
                     "link": link_kind,
                     "battery": battery,
+                    "smsAllowed": feature_access(s, d.id, "messages.sms"),
                     "ringing": s.ringing_devices.contains(&d.id),
                     "controls": phone_controls_json(s, d.id),
                 })
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (s.paired_devices_ready, devices)
     })
     .unwrap_or_default();
 
-    (200, "OK", json!({ "ok": true, "devices": devices }))
+    (
+        200,
+        "OK",
+        json!({
+            "ok": true, "devices": devices, "devicesReady": ready,
+            "localMessageThreads": true, "pageCacheV2": true,
+            "privateMessages": super::PRIVATE_ALLOWED.load(std::sync::atomic::Ordering::Acquire),
+        }),
+    )
+}
+
+fn battery_json(battery: &Battery) -> Value {
+    json!({
+        "level": battery.level,
+        "charging": battery.charging,
+        "fullInMinutes": battery.full_in.filter(|&minutes| battery.charging && minutes > 0),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +191,34 @@ pub(super) async fn handle_post_phone_toggle(body: &[u8]) -> (u16, &'static str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_list_is_not_ready_until_the_first_successful_load() {
+        let mut state = crate::state::AppState::default();
+        assert!(!state.paired_devices_ready);
+        state.set_devices(Vec::new());
+        assert!(state.paired_devices_ready && state.devices.is_empty());
+    }
+
+    #[test]
+    fn reports_only_a_positive_charge_estimate_while_charging() {
+        let mut battery = Battery {
+            level: 42,
+            charging: true,
+            full_in: Some(75),
+            plugged: None,
+            cell_bars: None,
+            cell_type: None,
+            wifi_bars: None,
+        };
+        assert_eq!(battery_json(&battery), json!({"level":42,"charging":true,"fullInMinutes":75}));
+        for (charging, full_in) in [(false, Some(75)), (true, None), (true, Some(0))] {
+            battery.charging = charging;
+            battery.full_in = full_in;
+            assert_eq!(battery_json(&battery), json!({"level":42,"charging":charging,"fullInMinutes":null}));
+        }
+    }
+
     #[test]
     fn phone_controls_have_no_permissions_without_a_feature_matrix() {
         let id = DeviceId([0; 32]);

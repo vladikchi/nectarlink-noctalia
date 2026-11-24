@@ -9,6 +9,16 @@ pub(super) struct CachedList<T> {
     at: Instant,
     items: Vec<T>,
 }
+pub(super) fn lookup<T, R>(
+    slot: &OnceLock<tokio::sync::Mutex<Vec<CachedList<T>>>>,
+    device: DeviceId,
+    ttl: Duration,
+    select: impl FnOnce(&[T]) -> Option<R>,
+) -> Option<R> {
+    let entries = slot.get()?.try_lock().ok()?;
+    let entry = entries.iter().find(|entry| entry.device == device && entry.at.elapsed() < ttl)?;
+    select(&entry.items)
+}
 // Cache only bounded read-only lists, never commands or call/session state.
 // Permission/online guards run before lookup, and force bypasses old entries.
 pub(super) async fn cached_list<T: Clone>(

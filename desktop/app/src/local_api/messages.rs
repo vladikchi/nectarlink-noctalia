@@ -13,11 +13,14 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
     let device = p.device;
     let sms = allowed(device, "messages.sms");
     let chat = allowed(device, "notifications.mirror");
+    if !sms && !chat {
+        return Err(Error::Denied);
+    }
     if p.thread.is_empty() {
         let mut items = Vec::new();
         // Keep chat conversations usable when SMS permission is denied.
         let mut sms_failed = false;
-        if sms {
+        if sms && !p.local_only {
             match cached_list(
                 &SMS_LIST,
                 device,
@@ -28,7 +31,7 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
             .await
             {
                 Ok(threads) => {
-                    for t in threads {
+                    for t in threads.into_iter().take(100) {
                         items.push(json!({"id":t.id,"title":t.names.iter().filter(|s|!s.is_empty()).cloned().collect::<Vec<_>>().join(", "),
                     "addresses":t.addresses,"subtitle":t.snippet,"date":t.date,"kind":"sms","reply":true}));
                     }
@@ -43,8 +46,19 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
             }
         }
         items.sort_by_key(|i| std::cmp::Reverse(i["date"].as_i64().unwrap_or(0)));
-        let mut result = sized_window(items, p.offset, limit);
-        result["notice"] = json!(if sms_failed {
+        let mut result = if p.thread_index {
+            // One bounded index for every page of the same conversation list.
+            // The caller never turns an incomplete response into a new index.
+            json!({"ok":true,"items":items,"more":false})
+        } else {
+            sized_window(items, p.offset, limit)
+        };
+        if sms_failed {
+            result["smsIncomplete"] = json!(true);
+        }
+        result["notice"] = json!(if p.local_only {
+            ""
+        } else if sms_failed {
             "SMS не загружены; доступны сохранённые чаты"
         } else if !sms {
             "SMS недоступны: проверьте разрешение на телефоне"
@@ -53,9 +67,12 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
         });
         Ok(result)
     } else if p.thread.starts_with("chat:") {
+        if !chat {
+            return Err(Error::Denied);
+        }
         let t =
-            node.chat_thread(device, &p.thread).filter(|t| chat && visible(&t.app)).ok_or(Error::Denied)?;
-        let items = node.chat_messages(device, &p.thread, 100).into_iter().map(|m|
+            node.try_chat_thread(device, &p.thread)?.filter(|t| visible(&t.app)).ok_or(Error::NotFound)?;
+        let items = node.try_chat_messages(device, &p.thread, 100)?.into_iter().map(|m|
             json!({"id":m.id.to_string(),"title":m.sender.unwrap_or_default(),"subtitle":m.text,"outgoing":m.self_sent,"date":m.time_ms})).collect();
         let mut result = sized_window(items, p.offset, limit);
         result["reply"] =

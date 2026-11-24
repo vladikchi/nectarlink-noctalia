@@ -27,6 +27,13 @@ pub(super) struct Query {
     pub(super) limit: Option<usize>,
     #[serde(default)]
     pub(super) force: bool,
+    #[serde(default)]
+    pub(super) local_only: bool,
+    #[serde(default)]
+    pub(super) thread_index: bool,
+    #[serde(default)]
+    pub(super) photo_rows_only: bool,
+    pub(super) photo_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
