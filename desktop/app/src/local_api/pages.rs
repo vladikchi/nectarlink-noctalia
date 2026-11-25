@@ -259,7 +259,7 @@ mod tests {
     }
     use nectarlink_core::DeviceId;
     fn window(items: Vec<Value>, offset: usize) -> Value {
-        sized_window(items, offset, 5)
+        sized_window(items.into_iter(), offset, 5, std::convert::identity)
     }
     #[tokio::test]
     async fn readonly_lists_reuse_results_and_force_refresh_without_phone_actions() {
@@ -299,7 +299,7 @@ mod tests {
                 serde_json::from_value(json!({"device":device.to_string(),"page":"apps","limit":limit}))
                     .unwrap();
             assert!(valid_query(&q));
-            let window = sized_window((0..200).map(|i| json!({"id":i})).collect(), limit, limit);
+            let window = sized_window(0..200, limit, limit, |i| json!({"id":i}));
             assert_eq!(window["items"].as_array().unwrap().len(), limit);
             assert_eq!(window["items"][0]["id"], limit);
             assert_eq!(window["more"], true);
@@ -313,14 +313,14 @@ mod tests {
     }
     #[test]
     fn gallery_apps_and_complete_deck_have_explicit_bounds() {
-        let rows = || (0..40).map(|i| json!({"id":i})).collect::<Vec<_>>();
-        let gallery = sized_window(rows(), 0, 8);
+        let row = |i| json!({"id":i});
+        let gallery = sized_window(0..40, 0, 8, row);
         assert_eq!(gallery["items"].as_array().unwrap().len(), 8);
         assert_eq!(gallery["more"], true);
-        let apps = sized_window(rows(), 12, 12);
+        let apps = sized_window(0..40, 12, 12, row);
         assert_eq!(apps["items"][0]["id"], 12);
         assert_eq!(apps["items"].as_array().unwrap().len(), 12);
-        let dense_apps = sized_window(rows(), 15, 15);
+        let dense_apps = sized_window(0..40, 15, 15, row);
         assert_eq!(dense_apps["items"][0]["id"], 15);
         assert_eq!(dense_apps["items"].as_array().unwrap().len(), 15);
         let deck = deck_view((0..192).map(|i| json!({"id":i})).collect());
