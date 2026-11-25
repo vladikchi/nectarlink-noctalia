@@ -4,7 +4,35 @@ NectarLink pairs your Android phone with your Linux desktop. This fork extends t
 
 ## Installation on Linux
 
-Get a Linux build from [GitHub Releases](https://github.com/vladikchi/nectarlink-noctalia/releases). For the source version in this branch, look for `0.1.6-nightly.12+noctalia`. The older `0.1.5+noctalia.2` release does not include the newer API features described below.
+The [latest published release](https://github.com/vladikchi/nectarlink-noctalia/releases/latest) includes `.deb`, `.rpm`, tarball, and AppImage packages for Linux x86-64. The source on this branch may be newer than the published packages.
+
+### Installer (`.deb`, `.rpm`, or tarball)
+
+```sh
+curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
+```
+
+The installer selects a `.deb` for APT, an `.rpm` for DNF or Zypper, or a tarball otherwise. It downloads packages from this fork and verifies the SHA-256 checksum before installing.
+
+### AppImage
+
+Download the Linux x86-64 AppImage from the [latest published release](https://github.com/vladikchi/nectarlink-noctalia/releases/latest), make it executable, and run it. No system installation is required. For example, if you save it as `NectarLink.AppImage`:
+
+```sh
+chmod +x ./NectarLink.AppImage
+./NectarLink.AppImage
+```
+
+### Build from source
+
+Install Rust, the Qt 6 development tools, a C++ compiler, CMake, Ninja, and the system libraries. From the repository root:
+
+```sh
+cargo build --release --locked --package nectarlink-desktop
+./target/release/nectarlink-desktop
+```
+
+## Phone and plugin setup
 
 On your phone, install the [official NectarLink Nightly 12 APK](https://github.com/thtbee/nectarlink/releases/tag/v0.1.6-nightly.12). This fork does not ship a modified Android app.
 
