@@ -3771,7 +3771,15 @@ impl Node {
     /// Lists locally stored `MessagingStyle` chat threads for a paired phone,
     /// newest first.
     pub fn chat_threads(&self, peer: impl std::borrow::Borrow<DeviceId>) -> Vec<crate::ChatThreadRecord> {
-        self.shared.store.chat_threads(peer.borrow()).unwrap_or_default()
+        self.try_chat_threads(peer).unwrap_or_default()
+    }
+
+    /// Like `chat_threads`, but distinguishes storage failure from an empty list.
+    pub fn try_chat_threads(
+        &self,
+        peer: impl std::borrow::Borrow<DeviceId>,
+    ) -> Result<Vec<crate::ChatThreadRecord>> {
+        Ok(self.shared.store.chat_threads(peer.borrow())?)
     }
 
     /// Looks up a single `MessagingStyle` chat thread by ID (`chat:<app>:<title>`).

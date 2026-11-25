@@ -39,10 +39,28 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
                 Err(_) => sms_failed = true,
             }
         }
+        let mut chat_failed = false;
         if chat {
-            for t in node.chat_threads(device).into_iter().filter(|t| visible(&t.app)).take(100) {
-                items.push(json!({"id":t.thread_id,"title":t.title,"subtitle":t.snippet,"date":t.updated_ms,"kind":"chat",
-                    "reply":t.active && t.reply_action_id.is_some() && allowed(device,"notifications.reply")}));
+            use super::context::{feature_access, with_state};
+            let current = with_state(|s| feature_access(s, device, "notifications.mirror")).flatten();
+            if current == Some(true) {
+                match node.try_chat_threads(device) {
+                    Ok(chats) => {
+                        let can_reply = allowed(device, "notifications.reply");
+                        for t in chats.into_iter().filter(|t| visible(&t.app)).take(100) {
+                            items.push(json!({"id":t.thread_id,"title":t.title,"subtitle":t.snippet,"date":t.updated_ms,"kind":"chat",
+                            "appScope":super::privacy::app_scope(&t.app),
+                            "reply":t.active && t.reply_action_id.is_some() && can_reply}));
+                        }
+                    }
+                    Err(e) if p.local_only => return Err(e),
+                    Err(_) => chat_failed = true,
+                }
+            } else if current.is_none() {
+                if p.local_only {
+                    return Err(Error::Offline);
+                }
+                chat_failed = true;
             }
         }
         items.sort_by_key(|i| std::cmp::Reverse(i["date"].as_i64().unwrap_or(0)));
@@ -55,6 +73,9 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
         };
         if sms_failed {
             result["smsIncomplete"] = json!(true);
+        }
+        if chat_failed {
+            result["localChatsIncomplete"] = json!(true);
         }
         result["notice"] = json!(if p.local_only {
             ""
@@ -77,6 +98,7 @@ pub(super) async fn read(p: Query, node: Node, limit: usize) -> Result<Value, Er
         let mut result = sized_window(items, p.offset, limit);
         result["reply"] =
             json!(t.active && t.reply_action_id.is_some() && allowed(device, "notifications.reply"));
+        result["appScope"] = json!(super::privacy::app_scope(&t.app));
         result["notice"] = json!("Последние 100 сообщений из уведомлений; это не полная история мессенджера");
         Ok(result)
     } else {

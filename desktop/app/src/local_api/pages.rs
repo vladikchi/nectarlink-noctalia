@@ -43,14 +43,16 @@ pub(super) async fn read(body: &[u8]) -> Reply {
         return fail("invalid_page");
     }
     let private = p.page == "messages";
-    let private_allowed = || super::PRIVATE_ALLOWED.load(std::sync::atomic::Ordering::Acquire);
-    if private && !private_allowed() {
+    let private_epoch = super::private_epoch();
+    if private && private_epoch.is_none() {
         return super::not_allowed();
     }
     let device = p.device;
     let sms_history = private && !p.thread.is_empty() && !p.thread.starts_with("chat:");
     let chat_history = private && p.thread.starts_with("chat:");
     let sms_list = private && p.thread.is_empty() && !p.local_only;
+    let reads_chats = private && !sms_history;
+    let notification_revision = reads_chats.then(super::privacy::revision).flatten();
     let sms_before = (sms_history || sms_list).then(|| sms_access(device)).flatten();
     if sms_history && sms_before == Some(false) {
         return sms_denied();
@@ -62,8 +64,13 @@ pub(super) async fn read(body: &[u8]) -> Reply {
         _ => None,
     };
     let result = tokio::time::timeout(PAGE_TIMEOUT, read_inner(p)).await;
-    if private && !private_allowed() {
+    if private && private_epoch != super::private_epoch() {
         return super::not_allowed();
+    }
+    if reads_chats && notification_revision != super::privacy::revision() {
+        // The next read uses the new rule set. Don't report a permission loss
+        // for the entire Messages section while a rule is changing.
+        return fail("notification_rules_changed");
     }
     if sms_history || sms_list {
         let rows = result.as_ref().ok().and_then(|result| result.as_ref().ok());

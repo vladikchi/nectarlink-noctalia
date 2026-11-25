@@ -840,7 +840,7 @@ fn main() -> ExitCode {
     webcam::init(&settings);
     phone_mic::init(&settings);
     call_audio::init(&settings);
-    local_api::init(&settings);
+    local_api::apply_settings(&settings);
     agents::init(&settings);
     win::widget::write_state_snapshot(&data_dir);
     win::tray::update_hotkeys(

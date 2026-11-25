@@ -90,7 +90,7 @@ pub fn load(dir: &Path, state: &mut AppState) {
             state.expanded_apps.insert(app.clone());
         }
         if entry.rule != AppRule::Show {
-            state.app_rules.insert(app, entry.rule);
+            state.set_app_rule(&app, entry.rule);
         }
     }
     if state.history_enabled {

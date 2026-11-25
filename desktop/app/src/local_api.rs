@@ -19,13 +19,12 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::oneshot;
 mod apps;
 mod auth;
 mod cache;
@@ -40,6 +39,7 @@ mod notifications;
 mod pages;
 mod photos;
 mod previews;
+mod privacy;
 mod protocol;
 mod sessions;
 mod transfers;
@@ -51,110 +51,127 @@ pub use auth::{
 };
 pub(crate) use clipboard::{read_pc_clipboard, write_pc_clipboard};
 use context::{try_node, with_state};
-pub use http::start_on_port;
 pub(crate) use http::{HttpRequest, bearer_token, read_http_request, write_json_response};
-use nectarlink_core::{DeviceId, LinkState};
+use nectarlink_core::DeviceId;
 /// Default loopback TCP port (`127.0.0.1:53320`).
 pub const DEFAULT_PORT: u16 = DEFAULT_LOCAL_API_PORT;
 
 /// File name inside `<data_dir>` storing the active port and 256-bit bearer token.
 pub const TOKEN_FILE_NAME: &str = "api-token.json";
 
-/// Handle to a running loopback API server instance.
-#[derive(Debug)]
-pub struct ServerHandle {
-    addr: SocketAddr,
-    port: u16,
-    shutdown: Option<oneshot::Sender<()>>,
+struct Running {
+    server: http::ServerHandle,
+    data_dir: PathBuf,
+    token: Arc<str>,
 }
 
-impl ServerHandle {
-    /// Returns the bound loopback socket address (`127.0.0.1:<port>`).
-    pub fn local_addr(&self) -> SocketAddr {
-        self.addr
-    }
-
-    /// Stops the server loop.
-    pub fn stop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-impl Drop for ServerHandle {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-static RUNNING: OnceLock<Mutex<Option<ServerHandle>>> = OnceLock::new();
-
-fn running_slot() -> &'static Mutex<Option<ServerHandle>> {
-    RUNNING.get_or_init(|| Mutex::new(None))
-}
-
-/// Synchronizes the running localhost API server with `desktop-settings.json`.
-pub fn sync_from_settings() {
-    let data_dir = crate::core_host::host().data_dir.clone();
-    let settings = Settings::load(&data_dir);
-    apply_settings(&data_dir, &settings);
-}
-
-/// Initializes the localhost API server from `settings` on startup.
-pub fn init(settings: &Settings) {
-    let data_dir = crate::core_host::host().data_dir.clone();
-    apply_settings(&data_dir, settings);
-}
+static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
 /// Stops the running localhost API server, if any.
 pub fn stop() {
-    if let Ok(mut guard) = running_slot().lock() {
-        *guard = None;
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    set_private_access(false);
+    stop_listener(&mut running);
+}
+
+// The low bit is the current switch; every transition changes the epoch.
+// A disable/re-enable while a read is waiting must not revive that read.
+static PRIVATE_ACCESS: AtomicU64 = AtomicU64::new(0);
+
+fn set_private_access(allowed: bool) {
+    let bit = u64::from(allowed);
+    let mut old = PRIVATE_ACCESS.load(Ordering::Acquire);
+    while old & 1 != bit {
+        match PRIVATE_ACCESS.compare_exchange_weak(
+            old,
+            old.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(current) => old = current,
+        }
     }
 }
 
-/// Whether `GET /v1/notifications` and `GET /v1/messages` answer
-/// (`localApiPrivate`, its own switch, off by default).
-static PRIVATE_ALLOWED: AtomicBool = AtomicBool::new(false);
+fn private_epoch() -> Option<u64> {
+    let state = PRIVATE_ACCESS.load(Ordering::Acquire);
+    (state & 1 != 0).then_some(state)
+}
 
-fn apply_settings(data_dir: &Path, settings: &Settings) {
-    PRIVATE_ALLOWED.store(settings.local_api_enabled && settings.local_api_private, Ordering::Release);
-    let port = if settings.local_api_port == 0 { DEFAULT_PORT } else { settings.local_api_port };
-    if !settings.local_api_enabled {
-        stop();
-        remove_token_file(data_dir);
-        return;
+fn stop_listener(running: &mut Option<Running>) {
+    if let Some(active) = running.take() {
+        active.server.cancel();
+        // Withdraw the credentials before releasing the port.
+        remove_token_file(&active.data_dir);
+        drop(active);
     }
-    if let Ok(guard) = running_slot().lock()
-        && let Some(active) = guard.as_ref()
-        && active.port == port
-        && read_token_file(data_dir).is_some()
+}
+
+fn sync_listener(
+    running: &mut Option<Running>,
+    data_dir: &Path,
+    port: Option<u16>,
+) -> std::io::Result<Option<SocketAddr>> {
+    let previous = port.and_then(|_| read_token_file(data_dir));
+    if let (Some(port), Some(active), Some(previous)) = (port, running.as_ref(), previous.as_ref())
+        && active.data_dir == data_dir
+        && active.server.addr.port() == port
+        && previous.port == port
+        && active.token.as_ref() == previous.token
     {
-        return;
+        return Ok(None);
     }
-    let token_file = match ensure_token_file(data_dir, port) {
-        Ok(tf) => tf,
-        Err(e) => {
-            tracing::warn!(error = %e, "can't write api-token.json");
-            return;
-        }
-    };
-    let dir = data_dir.to_path_buf();
-    crate::core_host::spawn(async move {
-        match start_on_port(port, token_file.token.clone()).await {
-            Ok((addr, handle)) => {
-                let _ = write_token_file(&dir, addr.port(), &token_file.token);
-                if let Ok(mut guard) = running_slot().lock() {
-                    *guard = Some(handle);
-                }
+    // Fail closed on an invalid transition, rather than leaving credentials
+    // for an unbound port or leaving the old listener active.
+    stop_listener(running);
+    auth::clear_token_file(data_dir)?;
+    let Some(port) = port else { return Ok(None) };
+    if !privacy::ready() {
+        return Err(std::io::Error::other("no secure random source for notification scopes"));
+    }
+    let token: Arc<str> = previous
+        .map(|cfg| cfg.token)
+        .or_else(generate_token)
+        .ok_or_else(|| std::io::Error::other("no secure random source for the API token"))?
+        .into();
+    let socket = http::bind(port)?;
+    let addr = socket.local_addr()?;
+    write_token_file(data_dir, addr.port(), &token)?;
+    *running =
+        Some(Running { server: http::serve(socket, addr, token.clone()), data_dir: data_dir.into(), token });
+    Ok(Some(addr))
+}
+
+/// Applies the current preferences at startup or on the UI thread. The
+/// background settings writer must not reapply an older snapshot to the API.
+pub fn apply_settings(settings: &Settings) {
+    let host = crate::core_host::host();
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let port = settings.local_api_enabled.then_some(if settings.local_api_port == 0 {
+        DEFAULT_PORT
+    } else {
+        settings.local_api_port
+    });
+    let private = port.is_some() && settings.local_api_private;
+    if !private {
+        set_private_access(false);
+    }
+    // A numeric bind and token publication run under the same controller lock.
+    // There is no detached startup that could commit after a later disable.
+    let _runtime = host.runtime.enter();
+    match sync_listener(&mut running, &host.data_dir, port) {
+        Ok(addr) => {
+            set_private_access(private);
+            if let Some(addr) = addr {
                 tracing::info!(%addr, "started local automation API");
             }
-            Err(e) => {
-                tracing::warn!(port, error = %e, "can't bind local automation API");
-            }
         }
-    });
+        Err(e) => {
+            set_private_access(false);
+            tracing::warn!(?port, error = %e, "can't start local automation API");
+        }
+    }
 }
 
 const SMS_THREADS: u32 = 60;
@@ -193,9 +210,7 @@ fn unknown_device() -> (u16, &'static str, Value) {
 /// and MMS from each connected phone, and chats from notifications (WhatsApp,
 /// Signal...) kept on this PC.
 async fn handle_get_messages(query: &HashMap<String, String>) -> (u16, &'static str, Value) {
-    if !PRIVATE_ALLOWED.load(Ordering::Acquire) {
-        return not_allowed();
-    }
+    let Some(epoch) = private_epoch() else { return not_allowed() };
     let Ok(device) = device_filter(query) else { return unknown_device() };
     let devices = with_state(|s| {
         s.devices
@@ -204,42 +219,46 @@ async fn handle_get_messages(query: &HashMap<String, String>) -> (u16, &'static 
             .map(|d| {
                 (
                     d.id,
-                    matches!(d.link, LinkState::Online { .. }) && d.info.os.eq_ignore_ascii_case("android"),
+                    d.info.os.eq_ignore_ascii_case("android")
+                        && context::feature_access(s, d.id, "messages.sms") == Some(true),
                 )
             })
             .collect::<Vec<_>>()
     })
     .unwrap_or_default();
-    let mut threads: Vec<(i64, Value)> = Vec::new();
-    let mut unread_total: u64 = 0;
+    let mut batches = Vec::new();
     if let Some(node) = try_node() {
         for (id, ask_phone) in devices {
-            for t in node.chat_threads(id) {
-                unread_total += u64::from(t.unread);
-                threads.push((
-                    t.updated_ms,
-                    json!({
-                        "id": t.thread_id,
-                        "deviceId": id.to_string(),
-                        "kind": "chat",
-                        "app": t.app,
-                        "appName": if t.app_name.trim().is_empty() { &t.app } else { &t.app_name },
-                        "title": t.title,
-                        "group": t.is_group,
-                        "lastMessage": t.snippet,
-                        "unread": t.unread,
-                        "timestamp": t.updated_ms / 1000,
-                    }),
-                ));
+            let sms = if ask_phone {
+                // Preserve the legacy partial-list behavior for unavailable SMS.
+                tokio::time::timeout(SMS_WAIT, node.sms_threads(id, SMS_THREADS))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if private_epoch() != Some(epoch) {
+                return not_allowed();
             }
-            if !ask_phone {
+            batches.push((id, node.chat_threads(id), sms));
+        }
+    }
+    // Apply the current visibility rules after all phone I/O, and count only
+    // rows that may actually be shown. Removed phones cannot return late rows.
+    let (revision, mut threads, unread_total) = with_state(|state| {
+        let mut rows = Vec::new();
+        let mut unread_total = 0u64;
+        for (id, chats, sms) in batches {
+            if state.device(&id).is_none() {
                 continue;
             }
-            // A phone that doesn't answer in time leaves its SMS out.
-            if let Ok(Ok(list)) = tokio::time::timeout(SMS_WAIT, node.sms_threads(id, SMS_THREADS)).await {
-                for t in list {
+            append_legacy_chats(state, id, chats, &mut rows, &mut unread_total);
+            if context::feature_access(state, id, "messages.sms") == Some(true) {
+                for t in sms {
                     unread_total += u64::from(t.unread);
-                    threads.push((
+                    rows.push((
                         t.date,
                         json!({
                             "id": t.id,
@@ -257,17 +276,49 @@ async fn handle_get_messages(query: &HashMap<String, String>) -> (u16, &'static 
                 }
             }
         }
-    }
+        (Some(state.notification_visibility_revision), rows, unread_total)
+    })
+    .unwrap_or_default();
     threads.sort_by_key(|t| std::cmp::Reverse(t.0));
     let threads = threads.into_iter().map(|(_, t)| t).collect::<Vec<_>>();
+    if private_epoch() != Some(epoch) {
+        return not_allowed();
+    }
+    if revision != privacy::revision() {
+        return (409, "Conflict", json!({"ok":false,"error":"notification_rules_changed"}));
+    }
     (200, "OK", json!({ "ok": true, "unreadTotal": unread_total, "threads": threads }))
+}
+
+fn append_legacy_chats(
+    state: &crate::state::AppState,
+    device: DeviceId,
+    chats: Vec<nectarlink_core::ChatThreadRecord>,
+    rows: &mut Vec<(i64, Value)>,
+    unread_total: &mut u64,
+) {
+    for t in chats.into_iter().filter(|t| privacy::visible(state, &t.app)) {
+        *unread_total += u64::from(t.unread);
+        rows.push((
+            t.updated_ms,
+            json!({
+                "id":t.thread_id,"deviceId":device.to_string(),"kind":"chat","app":t.app,
+                "appName":if t.app_name.trim().is_empty() { &t.app } else { &t.app_name },
+                "title":t.title,"group":t.is_group,"lastMessage":t.snippet,
+                "unread":t.unread,"timestamp":t.updated_ms / 1000,
+            }),
+        ));
+    }
 }
 
 async fn route_request(req: HttpRequest) -> (u16, &'static str, Value) {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/v1/devices") => devices::handle_get_devices(),
-        ("GET", "/v1/notifications") if !PRIVATE_ALLOWED.load(Ordering::Acquire) => not_allowed(),
-        ("GET", "/v1/notifications") => notifications::handle_get_notifications(&req.query),
+        ("GET", "/v1/notifications") => {
+            let Some(epoch) = private_epoch() else { return not_allowed() };
+            let reply = notifications::handle_get_notifications(&req.query);
+            if private_epoch() == Some(epoch) { reply } else { not_allowed() }
+        }
         ("GET", "/v1/messages") => handle_get_messages(&req.query).await,
         ("GET", "/v1/sessions") => sessions::get(),
         ("POST", "/v1/page") => pages::read(&req.body).await,
@@ -289,6 +340,7 @@ async fn route_request(req: HttpRequest) -> (u16, &'static str, Value) {
 
 #[cfg(test)]
 mod tests {
+    use super::http::start_on_port;
     use super::*;
     use nectarlink_core::DeviceId;
     use serde_json::json;
@@ -296,6 +348,70 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
     };
+
+    #[tokio::test]
+    async fn listener_publication_and_shutdown_follow_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let mut running = None;
+        let addr = sync_listener(&mut running, dir, Some(0)).unwrap().unwrap();
+        assert!(addr.ip().is_loopback());
+        assert_eq!(read_token_file(dir).unwrap().port, addr.port());
+        assert!(sync_listener(&mut running, dir, Some(addr.port())).unwrap().is_none());
+        let mut pending = TcpStream::connect(addr).await.unwrap();
+        sync_listener(&mut running, dir, None).unwrap();
+        assert!(running.is_none() && read_token_file(dir).is_none());
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(1), pending.read_u8()).await;
+        assert!(matches!(closed, Ok(Err(ref e)) if matches!(
+            e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof
+        )));
+
+        let occupied = http::bind(addr.port()).unwrap(); // Immediate rebind after stop.
+        assert!(sync_listener(&mut running, dir, Some(addr.port())).is_err());
+        assert!(running.is_none() && read_token_file(dir).is_none());
+        drop(occupied);
+        sync_listener(&mut running, dir, Some(addr.port())).unwrap();
+        stop_listener(&mut running);
+        assert!(read_token_file(dir).is_none());
+    }
+
+    #[test]
+    fn legacy_messages_count_only_visible_chats() {
+        use crate::state::{AppRule, AppState};
+        let device = DeviceId([7; 32]);
+        let mut state = AppState::default();
+        state.set_app_rule("org.example.hidden", AppRule::Hidden);
+        state.set_app_rule("org.example.quiet", AppRule::Quiet);
+        let fixture = |app: &str, unread| nectarlink_core::ChatThreadRecord {
+            peer: device,
+            thread_id: format!("chat:{app}:fixture"),
+            app: app.to_owned(),
+            app_name: String::new(),
+            notification_key: String::new(),
+            reply_action_id: None,
+            title: "Test conversation".into(),
+            is_group: false,
+            snippet: "Test text".into(),
+            last_sender: None,
+            updated_ms: 2_000,
+            unread,
+            active: false,
+            avatar: None,
+            app_icon: None,
+        };
+        let (mut rows, mut unread) = (Vec::new(), 0);
+        append_legacy_chats(
+            &state,
+            device,
+            vec![fixture("org.example.quiet", 2), fixture("org.example.hidden", 5)],
+            &mut rows,
+            &mut unread,
+        );
+        assert_eq!(unread, 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1["app"], "org.example.quiet");
+        assert_eq!(rows[0].1["timestamp"], 2);
+    }
 
     #[tokio::test]
     async fn plugin_wire_payloads_reach_session_and_typing_validation_over_http() {
@@ -467,7 +583,7 @@ mod tests {
         assert_eq!(body["error"], "not_allowed");
         // With it on, they answer (nothing paired in tests), and a device that
         // isn't paired is an error, not every device.
-        PRIVATE_ALLOWED.store(true, Ordering::Release);
+        set_private_access(true);
         let get = |path: &str| {
             format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n")
         };
@@ -484,7 +600,12 @@ mod tests {
         let (code, body) = raw_http_call(addr, &get("/v1/messages?device=nobody")).await;
         assert_eq!(code, 404);
         assert_eq!(body["error"], "unknown_device");
-        PRIVATE_ALLOWED.store(false, Ordering::Release);
+        let in_flight_epoch = private_epoch();
+        set_private_access(false);
+        assert!(private_epoch().is_none());
+        set_private_access(true);
+        assert_ne!(private_epoch(), in_flight_epoch, "an off/on cycle invalidates earlier private reads");
+        set_private_access(false);
 
         // 7. Valid POST /v1/ring, POST /v1/camera, POST /v1/notify, POST /v1/send, GET /v1/timeline.
         let (code, _) = raw_http_call(

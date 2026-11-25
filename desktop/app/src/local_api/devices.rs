@@ -4,7 +4,8 @@ use nectarlink_core::{Battery, DeviceId, LinkState};
 use serde::Deserialize;
 use serde_json::{Value, json};
 pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
-    let (ready, devices) = with_state(|s| {
+    let privacy = super::private_epoch();
+    let (ready, devices, policy) = with_state(|s| {
         let devices = s
             .devices
             .iter()
@@ -30,14 +31,16 @@ pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
                     "link": link_kind,
                     "battery": battery,
                     "smsAllowed": feature_access(s, d.id, "messages.sms"),
+                    "appWindowsAllowed": feature_access(s, d.id, "mirroring.app_windows"),
                     "ringing": s.ringing_devices.contains(&d.id),
                     "controls": phone_controls_json(s, d.id),
                 })
             })
             .collect::<Vec<_>>();
-        (s.paired_devices_ready, devices)
+        (s.paired_devices_ready, devices, privacy.and_then(|_| super::privacy::policy(s)))
     })
     .unwrap_or_default();
+    let privacy = privacy.filter(|&epoch| super::private_epoch() == Some(epoch));
 
     (
         200,
@@ -45,7 +48,9 @@ pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
         json!({
             "ok": true, "devices": devices, "devicesReady": ready,
             "localMessageThreads": true, "pageCacheV2": true,
-            "privateMessages": super::PRIVATE_ALLOWED.load(std::sync::atomic::Ordering::Acquire),
+            "privateMessages": privacy.is_some(),
+            "privateReadEpoch": privacy.map(|epoch| epoch.to_string()),
+            "notificationPolicy": privacy.and(policy),
         }),
     )
 }

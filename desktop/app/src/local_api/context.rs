@@ -109,5 +109,5 @@ pub(super) fn sms_access(device: DeviceId) -> Option<bool> {
     with_state(|s| feature_access(s, device, "messages.sms")).flatten()
 }
 pub(super) fn visible(app: &str) -> bool {
-    with_state(|s| s.app_rule(app) != crate::state::AppRule::Hidden).unwrap_or(false)
+    with_state(|s| super::privacy::visible(s, app)).unwrap_or(false)
 }

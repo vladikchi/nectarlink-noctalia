@@ -855,17 +855,15 @@ impl cxx_qt::Initialize for qobject::Preferences {
                 p.as_mut()
                     .set_local_api_token_path(QString::from(&token_path.to_string_lossy().into_owned()));
                 let settings = p.current_settings();
-                let _ = settings.save(&core_host::host().data_dir);
-                crate::local_api::sync_from_settings();
-                save_in_background(settings);
+                crate::local_api::apply_settings(&settings);
+                save_preferences(settings, true);
             })
             .release();
         self.as_mut()
             .on_local_api_private_changed(|p| {
                 let settings = p.current_settings();
-                let _ = settings.save(&core_host::host().data_dir);
-                crate::local_api::sync_from_settings();
-                save_in_background(settings);
+                crate::local_api::apply_settings(&settings);
+                save_preferences(settings, true);
             })
             .release();
         self.as_mut()
@@ -874,9 +872,8 @@ impl cxx_qt::Initialize for qobject::Preferences {
                 p.as_mut()
                     .set_local_api_token_path(QString::from(&token_path.to_string_lossy().into_owned()));
                 let settings = p.current_settings();
-                let _ = settings.save(&core_host::host().data_dir);
-                crate::local_api::sync_from_settings();
-                save_in_background(settings);
+                crate::local_api::apply_settings(&settings);
+                save_preferences(settings, true);
             })
             .release();
         self.as_mut()
@@ -1458,9 +1455,14 @@ impl qobject::Preferences {
     }
 }
 
-/// Saves off the UI thread (the write is flushed to disk, which can take a
-/// moment), newest settings last even when changes come in quick succession.
 fn save_in_background(settings: Settings) {
+    save_preferences(settings, false);
+}
+
+/// Writes the newest settings last, even if a background save arrives late.
+/// Persist local API changes before returning so an immediate exit cannot
+/// lose a revocation.
+fn save_preferences(settings: Settings, immediate: bool) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     static WRITTEN: Mutex<u64> = Mutex::new(0);
     let seq = NEXT.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1472,11 +1474,14 @@ fn save_in_background(settings: Settings) {
         if let Err(e) = settings.save(&core_host::host().data_dir) {
             tracing::warn!(error = %e, "can't save preferences");
         } else {
-            crate::local_api::sync_from_settings();
             crate::agents::sync_from_settings();
         }
         *written = seq;
     };
+    if immediate {
+        save(settings);
+        return;
+    }
     let fallback = settings.clone();
     if let Err(e) = std::thread::Builder::new().name("save-preferences".into()).spawn(move || save(settings))
     {

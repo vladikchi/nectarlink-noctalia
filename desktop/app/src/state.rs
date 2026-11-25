@@ -312,6 +312,8 @@ pub struct AppState {
     /// for those that aren't shown normally.
     pub app_names: BTreeMap<String, String>,
     pub app_rules: BTreeMap<String, AppRule>,
+    /// Advances only when the set of hidden apps changes, including Hide → Show.
+    pub notification_visibility_revision: u64,
     /// Apps whose notification groups are currently expanded in the feed.
     pub expanded_apps: BTreeSet<String>,
     /// Most recently dismissed notification(s) for in-feed undo.
@@ -841,6 +843,9 @@ impl AppState {
     }
 
     pub fn set_app_rule(&mut self, app: &str, rule: AppRule) -> Changes {
+        if (self.app_rule(app) == AppRule::Hidden) != (rule == AppRule::Hidden) {
+            self.notification_visibility_revision = self.notification_visibility_revision.wrapping_add(1);
+        }
         let changed = match rule {
             AppRule::Show => self.app_rules.remove(app).is_some(),
             rule => self.app_rules.insert(app.to_owned(), rule) != Some(rule),

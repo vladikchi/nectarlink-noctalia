@@ -53,7 +53,7 @@ pub(super) fn handle_get_notifications(query: &HashMap<String, String>) -> (u16,
             .notifications
             .iter()
             .filter(|view| device.is_none_or(|id| id == view.device))
-            .filter(|view| s.app_rule(&view.notification.app) != crate::state::AppRule::Hidden)
+            .filter(|view| super::privacy::visible(s, &view.notification.app))
             .collect::<Vec<_>>();
         visible.sort_by_key(|view| std::cmp::Reverse(view.notification.when));
         visible
@@ -66,6 +66,7 @@ pub(super) fn handle_get_notifications(query: &HashMap<String, String>) -> (u16,
                     "key": n.key,
                     "id": n.key,
                     "app": n.app,
+                    "appScope": super::privacy::app_scope(&n.app),
                     "appName": n.app_name,
                     "title": n.title,
                     "text": n.text,

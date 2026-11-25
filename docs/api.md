@@ -21,7 +21,9 @@ When enabled, NectarLink binds strictly to `127.0.0.1:<localApiPort>` (default `
 }
 ```
 
-When disabled, the listener stops immediately and `api-token.json` is removed.
+Credentials are published only after a successful bind. Disabling the API
+stops accepting connections, cancels pending work and removes `api-token.json`.
+It cannot undo an action already dispatched to the phone.
 
 ---
 
@@ -34,6 +36,15 @@ When disabled, the listener stops immediately and `api-token.json` is removed.
    ```
    Tokens are compared in constant time. Missing or invalid tokens receive `401 Unauthorized` (`{"ok":false,"error":"unauthorized"}`).
 3. **Browser Cross-Origin Protection**: Any HTTP request containing an `Origin` header (automatically attached by web browsers on cross-origin `fetch` / `XMLHttpRequest` calls) is rejected before routing with `403 Forbidden` (`{"ok":false,"error":"forbidden"}`).
+4. **Request limits**: The local listener handles at most 32 connections at a
+   time. Headers are limited to 16 KiB and authenticated bodies to 256 KiB.
+   Send a request body with `Content-Length`, not chunked transfer encoding.
+5. **Private reads**: Notifications and conversations honor the separate
+   **Notifications and messages** switch. Hidden apps are excluded from both
+   notifications and conversation lists, including unread counts.
+
+Use a direct loopback connection. If your client inherits proxy settings,
+exclude `127.0.0.1` before sending the bearer token.
 
 ---
 
@@ -62,6 +73,15 @@ Lists paired devices with connection state and battery status.
   ]
 }
 ```
+
+Builds with Noctalia support also report `privateMessages` and, while enabled,
+the `privateReadEpoch` string. If the epoch changes, discard cached message and
+notification content, even if both polls showed the switch on.
+`notificationPolicy` carries a per-process `instance`, a `revision`, and
+opaque `hidden` tags. Match these against `appScope` on notification and
+chat rows to discard newly hidden content without invalidating other pages.
+If the instance changes, tags from the previous instance cannot be reused.
+These extra fields are optional for legacy clients.
 
 ---
 
@@ -288,7 +308,10 @@ out. Optional `?limit=20` (1 to 100).
 Conversations, newest first, with unread counts: SMS and MMS from each
 connected Android phone (`"kind": "sms"`), and chats from notifications such as
 WhatsApp or Signal kept on this PC (`"kind": "chat"`). A phone that doesn't
-answer within 5 seconds leaves its SMS out.
+answer within 5 seconds leaves its SMS out. Hidden chats do not contribute to
+`unreadTotal`. A request whose visibility rules change while it is being
+prepared may return `409` (`notification_rules_changed`); a new read uses the
+current rules.
 
 **Response (`200 OK`)**:
 ```json

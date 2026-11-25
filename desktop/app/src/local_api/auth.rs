@@ -73,9 +73,15 @@ pub fn ensure_token_file(data_dir: &Path, port: u16) -> std::io::Result<ApiToken
 
 /// Removes `<data_dir>/api-token.json` when the local API is disabled.
 pub fn remove_token_file(data_dir: &Path) {
-    let path = token_file_path_in(data_dir);
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    if let Err(e) = clear_token_file(data_dir) {
+        tracing::warn!(error = %e, "can't remove api-token.json");
+    }
+}
+
+pub(super) fn clear_token_file(data_dir: &Path) -> std::io::Result<()> {
+    match fs::remove_file(token_file_path_in(data_dir)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
