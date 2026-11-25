@@ -1,7 +1,7 @@
 [package]
 name = "nectarlink-desktop"
-description = "NectarLink for Windows: the desktop app"
-version.workspace = true
+description = "NectarLink Desktop with Noctalia integration"
+version = "0.1.6-nightly.12+noctalia"
 edition.workspace = true
 # Above the workspace minimum: material-colors needs Rust 1.97.
 rust-version = "1.97"
@@ -15,7 +15,6 @@ name = "nectarlink-desktop"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 blake3.workspace = true
 cxx.workspace = true
 cxx-qt.workspace = true
@@ -24,17 +23,26 @@ data-encoding.workspace = true
 dirs.workspace = true
 hostname.workspace = true
 material-colors.workspace = true
+# Inflates Google's platform-tools zip (Settings > Install on a phone).
+miniz_oxide = "0.9"
+nectarlink-adb.workspace = true
 nectarlink-core.workspace = true
+nectarlink-actions.workspace = true
 nectarlink-vcam.workspace = true
+percent-encoding = "2.3"
 qrcode.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1_smol = "1"
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# A phone's Gamepad as an Xbox 360 controller, through the ViGEmBus driver.
+vigem-client = "0.1.4"
 # For the COM callbacks that `windows::core::implement` generates.
 windows-collections.workspace = true
 windows-core.workspace = true
@@ -65,6 +73,7 @@ windows = { workspace = true, features = [
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
     "UI_Notifications",
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_UI_Input_XboxController",
     "Win32_Graphics_Direct3D",
@@ -81,13 +90,17 @@ windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_Security",
+    "Win32_Security_Authentication_Identity",
     "Win32_Security_Authorization",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
     "Win32_System_Power",
     "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Shutdown",
     "Win32_System_SystemInformation",
     "Win32_NetworkManagement_WiFi",
@@ -121,6 +134,10 @@ windows = { workspace = true, features = [
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+nectarlink-protocol.workspace = true
+tokio = { workspace = true, features = ["net"] }
+# The Wayland portal code's errors (linux/screen_portal.rs).
+anyhow.workspace = true
 zbus.workspace = true
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

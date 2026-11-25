@@ -1,57 +1,23 @@
 # NectarLink for Noctalia
 
-[NectarLink](https://github.com/thtbee/nectarlink) connects your Android phone to your computer to transfer files, sync the clipboard, and mirror the phone's screen. This build extends the local API so the [NectarLink plugin](https://github.com/vladikchi/nectarlink-plugins) can read notifications, send SMS, manage calls, and start screen mirroring or webcam sessions from Noctalia.
-
-**Use this build with the plugin.** Upstream NectarLink does not provide the API routes the plugin needs. This fork also lets the Hive theme use Noctalia's color palette.
+NectarLink pairs your Android phone with your Linux desktop. This fork extends the local API used by the [NectarLink plugin for Noctalia](https://github.com/vladikchi/nectarlink-plugins). The plugin can show battery status, notifications and recent activity; send SMS; manage calls; browse photos; and start supported screen, webcam and audio sessions.
 
 ## Installation on Linux
 
-The [latest release](https://github.com/vladikchi/nectarlink-noctalia/releases/latest) includes `.deb`, `.rpm`, tarball, and AppImage packages for Linux x86-64.
+Get a Linux build from [GitHub Releases](https://github.com/vladikchi/nectarlink-noctalia/releases). For the source version in this branch, look for `0.1.6-nightly.12+noctalia`. The older `0.1.5+noctalia.2` release does not include the newer API features described below.
 
-### Installer (`.deb`, `.rpm`, or tarball)
+On your phone, install the [official NectarLink Nightly 12 APK](https://github.com/thtbee/nectarlink/releases/tag/v0.1.6-nightly.12). This fork does not ship a modified Android app.
 
-Install with one command:
+1. Start NectarLink Desktop and pair your phone.
+2. Under **Settings → Connection & About**, enable **Local automation API**. If you want the plugin to read notifications and messages, also enable **Notifications and messages**.
+3. Follow the [plugin setup guide](https://github.com/vladikchi/nectarlink-plugins#installation) to add the widget in Noctalia. Run both applications as the same user and use NectarLink's default profile.
 
-```sh
-curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
-```
+## What this fork adds
 
-The installer selects a `.deb` for APT, an `.rpm` for DNF or Zypper, or a tarball otherwise. It verifies the package's SHA-256 checksum before installation. Packages are downloaded from this fork, not from upstream NectarLink.
+- **Local API for the Noctalia panel.** The API listens on `127.0.0.1` and requires a local token. Notification and message access is off by default and respects notification visibility rules.
+- **Faster browsing.** Messages, photos and app lists can reuse cached results. When supported by the phone, the panel can show an estimate of the time remaining until full charge.
+- **Noctalia colors in Hive.** The Hive theme can use an existing `~/.config/nectarlink/noctalia-colors.json`. If no valid palette is available, it uses its built-in colors.
 
-### AppImage
+## Source and licenses
 
-[Download the Linux x86-64 AppImage](https://github.com/vladikchi/nectarlink-noctalia/releases/latest), make it executable, and run it. No system installation is required. For example, for `0.1.5+noctalia.2`:
-
-```sh
-chmod +x ./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
-./Nectarlink-0.1.5-noctalia.2-x86_64.AppImage
-```
-
-### Build from source
-
-You need Rust, Qt 6 development tools, a C++ compiler, CMake, Ninja, and the system libraries. From the repository root:
-
-```sh
-cargo build --release --locked --package nectarlink-desktop
-./target/release/nectarlink-desktop
-```
-
-**Android:** [download the official NectarLink APK](https://github.com/thtbee/nectarlink/releases/download/v0.1.5/Nectarlink-0.1.5-android.apk). Use the upstream Android app on the phone; the fork is only needed on the PC.
-
-The [plugin installation guide](https://github.com/vladikchi/nectarlink-plugins#installation) covers pairing, enabling the API, and adding the widget.
-
-## What's changed from upstream
-
-- **Local API:** adds notification and panel-section reads, phone commands, and session controls. For camera and data-transfer requests, an invalid explicit target is rejected rather than replaced with another phone.
-- **Noctalia palette:** the Hive theme can read an existing `~/.config/nectarlink/noctalia-colors.json`. NectarLink does not create this file. Hive falls back to its built-in colors if no valid palette is available.
-- **Updates and packaging:** upstream updates are disabled on Linux. Before updating manually, quit NectarLink, then replace the AppImage or install a newer package from this fork. Your profile is stored separately. Linux packaging checks that the Russian translation is included.
-
-The Island, phone-to-PC typing, and screen capture fixes for Niri are in [NectarLink for Niri](https://github.com/vladikchi/nectarlink-niri). They are not part of this build.
-
-[Full changes, API routes, and source files](CHANGES.md)
-
-## Verification and licensing
-
-The local AppImage passed `--version` and `--ui-check` on Arch Linux, and the Russian translation loaded. That AppImage check did not cover a real phone, the Wayland portal, or other distributions.
-
-Based on NectarLink `v0.1.6-nightly.10`. [Upstream project](https://github.com/thtbee/nectarlink) · [Component licenses](LICENSE)
+Based on upstream [NectarLink `v0.1.6-nightly.12`](https://github.com/thtbee/nectarlink/tree/v0.1.6-nightly.12). The `android/` source tree is unchanged from that tag. See [the upstream project](https://github.com/thtbee/nectarlink) and [component licenses](LICENSE).

@@ -1,108 +1,228 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use super::{ServerHandle, auth::constant_time_eq, route_request};
+use super::{auth::constant_time_eq, route_request};
 use serde_json::{Value, json};
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    future::poll_fn,
+    io,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    task::Poll,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::oneshot,
+    net::{TcpListener, TcpSocket, TcpStream},
+    sync::watch,
+    task::JoinSet,
+    time::Instant,
 };
-const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const MAX_BODY_BYTES: usize = 256 * 1024;
+const MAX_CONNECTIONS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDLER_TIMEOUT: Duration = super::pages::PAGE_TIMEOUT.saturating_add(Duration::from_secs(1));
-/// Starts the localhost HTTP/JSON server on `127.0.0.1:<port>` (pass `0` in
-/// tests for an OS-assigned ephemeral port).
-pub async fn start_on_port(port: u16, token: String) -> std::io::Result<(SocketAddr, ServerHandle)> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    let addr = listener.local_addr()?;
-    let actual_port = addr.port();
-    let (tx, mut rx) = oneshot::channel::<()>();
 
+#[derive(Debug)]
+pub(super) struct ServerHandle {
+    pub(super) addr: SocketAddr,
+    listener: Arc<Mutex<Option<TcpListener>>>,
+    stop: watch::Sender<bool>,
+}
+
+impl ServerHandle {
+    pub(super) fn cancel(&self) {
+        self.stop.send_if_modified(|stopped| {
+            let changed = !*stopped;
+            *stopped = true;
+            changed
+        });
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.cancel();
+        // Drop the listening socket now, not on the next runtime tick. A
+        // subsequent enable can bind the same port without waiting for tasks.
+        self.listener.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Binds a numeric loopback address synchronously; requires a Tokio I/O context.
+pub(super) fn bind(port: u16) -> io::Result<TcpListener> {
+    let socket = TcpSocket::new_v4()?;
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(SocketAddr::from(([127, 0, 0, 1], port)))?;
+    socket.listen(128)
+}
+
+pub(super) fn serve(listener: TcpListener, addr: SocketAddr, token: Arc<str>) -> ServerHandle {
+    let listener = Arc::new(Mutex::new(Some(listener)));
+    let accepting = listener.clone();
+    let (stop, mut stopped) = watch::channel(false);
     tokio::spawn(async move {
+        let mut clients = JoinSet::new();
         loop {
             tokio::select! {
-                _ = &mut rx => break,
-                accepted = listener.accept() => {
-                    let Ok((stream, _peer)) = accepted else { continue };
-                    let expected_token = token.clone();
-                    tokio::spawn(async move {
-                        let _ = handle_connection(stream, &expected_token).await;
+                biased;
+                _ = cancelled(&mut stopped) => break,
+                _ = clients.join_next(), if !clients.is_empty() => {},
+                accepted = poll_fn(|cx| {
+                    let guard = accepting.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_ref() {
+                        Some(socket) => socket.poll_accept(cx).map(Some),
+                        None => Poll::Ready(None),
+                    }
+                }), if clients.len() < MAX_CONNECTIONS => {
+                    let Some(accepted) = accepted else { break };
+                    let Ok((stream, _)) = accepted else {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    };
+                    let token = token.clone();
+                    let mut stopping = stopped.clone();
+                    clients.spawn(async move {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled(&mut stopping) => {},
+                            _ = handle_connection(stream, &token) => {},
+                        }
                     });
                 }
             }
         }
+        // Dropping the set aborts any remaining work. Per-client cancellation
+        // also prevents a request waiting for input from starting on shutdown.
     });
+    ServerHandle { addr, listener, stop }
+}
 
-    Ok((addr, ServerHandle { addr, port: actual_port, shutdown: Some(tx) }))
+async fn cancelled(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stopped| *stopped).await;
+}
+
+#[cfg(test)]
+pub(super) async fn start_on_port(port: u16, token: String) -> io::Result<(SocketAddr, ServerHandle)> {
+    let listener = bind(port)?;
+    let addr = listener.local_addr()?;
+    Ok((addr, serve(listener, addr, token.into())))
 }
 
 #[derive(Debug)]
-pub(super) struct HttpRequest {
-    pub(super) method: String,
-    pub(super) path: String,
-    pub(super) query: HashMap<String, String>,
-    pub(super) headers: HashMap<String, String>,
-    pub(super) body: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) query: HashMap<String, String>,
+    pub(crate) headers: HashMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+struct RequestHead {
+    method: String,
+    target: String,
+    headers: HashMap<String, String>,
+    buffered_body: Vec<u8>,
+}
+
+pub(crate) fn bearer_token(value: &str) -> Option<&str> {
+    let value = value.trim();
+    value.get(..7)?.eq_ignore_ascii_case("bearer ").then(|| value[7..].trim())
+}
+
+fn invalid_request() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP request")
+}
+
+async fn read_head(stream: &mut TcpStream) -> io::Result<Option<RequestHead>> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 2048];
+    let mut checked = 0;
     let header_end = loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos;
+        if let Some(pos) = buf[checked..].windows(4).position(|w| w == b"\r\n\r\n") {
+            break checked + pos;
         }
-        if buf.len() >= MAX_REQUEST_BYTES {
-            return Ok(None);
+        if buf.len() >= MAX_HEADER_BYTES {
+            return Err(invalid_request());
         }
+        checked = buf.len().saturating_sub(3);
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Ok(None);
+            return if buf.is_empty() { Ok(None) } else { Err(invalid_request()) };
         }
         buf.extend_from_slice(&chunk[..n]);
     };
-
-    let header_bytes = &buf[..header_end];
-    let header_text = String::from_utf8_lossy(header_bytes);
+    if header_end + 4 > MAX_HEADER_BYTES {
+        return Err(invalid_request());
+    }
+    let header_text = std::str::from_utf8(&buf[..header_end]).map_err(|_| invalid_request())?;
     let mut lines = header_text.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_ascii_uppercase();
-    let raw_target = parts.next().unwrap_or("/");
-    if method.is_empty() {
-        return Ok(None);
+    let mut parts = lines.next().unwrap_or_default().split_ascii_whitespace();
+    let method = parts.next().ok_or_else(invalid_request)?.to_ascii_uppercase();
+    let target = parts.next().ok_or_else(invalid_request)?.to_owned();
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next().is_some() {
+        return Err(invalid_request());
     }
 
-    let (path, query) = parse_target(raw_target);
     let mut headers = HashMap::new();
     for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_owned());
+        let (key, value) = line.split_once(':').ok_or_else(invalid_request)?;
+        if key.is_empty()
+            || !key.bytes().all(is_header_name_byte)
+            || value.bytes().any(|b| b < 32 && b != b'\t' || b == 127)
+        {
+            return Err(invalid_request());
         }
-    }
-
-    let content_len = headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(MAX_REQUEST_BYTES);
-
-    let body_start = header_end + 4;
-    let mut body = Vec::with_capacity(content_len);
-    if buf.len() > body_start {
-        let available = (buf.len() - body_start).min(content_len);
-        body.extend_from_slice(&buf[body_start..body_start + available]);
-    }
-    while body.len() < content_len {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break;
+        let key = key.to_ascii_lowercase();
+        if matches!(key.as_str(), "authorization" | "content-length" | "host") && headers.contains_key(&key) {
+            return Err(invalid_request());
         }
-        let take = n.min(content_len - body.len());
-        body.extend_from_slice(&chunk[..take]);
+        headers.insert(key, value.trim().to_owned());
     }
 
-    Ok(Some(HttpRequest { method, path, query, headers, body }))
+    Ok(Some(RequestHead { method, target, headers, buffered_body: buf.split_off(header_end + 4) }))
+}
+
+fn is_header_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+fn body_length(headers: &HashMap<String, String>) -> io::Result<usize> {
+    if headers.contains_key("transfer-encoding") {
+        return Err(invalid_request());
+    }
+    match headers.get("content-length") {
+        None => Ok(0),
+        Some(raw) if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) => {
+            raw.parse::<usize>().ok().filter(|&len| len <= MAX_BODY_BYTES).ok_or_else(invalid_request)
+        }
+        _ => Err(invalid_request()),
+    }
+}
+
+async fn read_body(stream: &mut TcpStream, head: RequestHead) -> io::Result<HttpRequest> {
+    let RequestHead { method, target, headers, buffered_body: mut body } = head;
+    let content_len = body_length(&headers)?;
+    if body.len() < content_len {
+        let present = body.len();
+        body.resize(content_len, 0);
+        stream.read_exact(&mut body[present..]).await?;
+    } else {
+        body.truncate(content_len);
+    }
+    let (path, query) = parse_target(&target);
+    Ok(HttpRequest { method, path, query, headers, body })
+}
+
+/// The agent gateway shares the bounded parser; it has its own access checks.
+pub(crate) async fn read_http_request(stream: &mut TcpStream) -> io::Result<Option<HttpRequest>> {
+    let Some(head) = read_head(stream).await? else { return Ok(None) };
+    read_body(stream, head).await.map(Some)
 }
 
 pub(super) fn parse_target(target: &str) -> (String, HashMap<String, String>) {
@@ -154,7 +274,7 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
-async fn write_json_response(
+pub(crate) async fn write_json_response(
     stream: &mut TcpStream,
     status_code: u16,
     status_text: &str,
@@ -180,12 +300,16 @@ async fn write_response(
 }
 
 async fn handle_connection(mut stream: TcpStream, expected_token: &str) -> std::io::Result<()> {
-    let Some(req) = tokio::time::timeout(IO_TIMEOUT, read_http_request(&mut stream)).await?? else {
-        return Ok(());
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let head = match tokio::time::timeout_at(deadline, read_head(&mut stream)).await? {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return bad_request(&mut stream).await,
+        Err(e) => return Err(e),
     };
 
     // 1. Reject browser cross-origin requests carrying an `Origin` header.
-    if req.headers.contains_key("origin") {
+    if head.headers.contains_key("origin") {
         return write_json_response(
             &mut stream,
             403,
@@ -196,18 +320,7 @@ async fn handle_connection(mut stream: TcpStream, expected_token: &str) -> std::
     }
 
     // 2. Verify `Authorization: Bearer <token>` in constant time.
-    let provided = req
-        .headers
-        .get("authorization")
-        .and_then(|v| {
-            let trimmed = v.trim();
-            if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
-                Some(trimmed[7..].trim())
-            } else {
-                None
-            }
-        })
-        .unwrap_or("");
+    let provided = head.headers.get("authorization").and_then(|v| bearer_token(v)).unwrap_or("");
     if provided.is_empty() || !constant_time_eq(provided, expected_token) {
         return write_json_response(
             &mut stream,
@@ -218,10 +331,23 @@ async fn handle_connection(mut stream: TcpStream, expected_token: &str) -> std::
         .await;
     }
 
+    // No body allocation or route parsing before authentication. Don't
+    // dispatch a body with invalid framing or without all declared bytes.
+    let req = match tokio::time::timeout_at(deadline, read_body(&mut stream, head)).await? {
+        Ok(req) => req,
+        Err(e) if matches!(e.kind(), io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof) => {
+            return bad_request(&mut stream).await;
+        }
+        Err(e) => return Err(e),
+    };
     let (status, reason, payload) = tokio::time::timeout(HANDLER_TIMEOUT, route_request(req))
         .await
         .unwrap_or_else(|_| (504, "Gateway Timeout", json!({ "ok": false, "error": "timeout" })));
     write_json_response(&mut stream, status, reason, &payload).await
+}
+
+async fn bad_request(stream: &mut TcpStream) -> io::Result<()> {
+    write_json_response(stream, 400, "Bad Request", &json!({"ok":false,"error":"invalid_request"})).await
 }
 
 #[cfg(test)]

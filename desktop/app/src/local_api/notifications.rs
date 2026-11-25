@@ -45,26 +45,33 @@ pub(super) async fn handle_post_notify(body: &[u8]) -> (u16, &'static str, Value
     (200, "OK", json!({ "ok": true }))
 }
 
-pub(super) fn handle_get_notifications() -> (u16, &'static str, Value) {
+pub(super) fn handle_get_notifications(query: &HashMap<String, String>) -> (u16, &'static str, Value) {
+    let Ok(device) = super::device_filter(query) else { return super::unknown_device() };
+    let limit = query.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(100).clamp(1, 100);
     let items = with_state(|s| {
         let mut visible = s
             .notifications
             .iter()
-            .filter(|view| s.app_rule(&view.notification.app) != crate::state::AppRule::Hidden)
+            .filter(|view| device.is_none_or(|id| id == view.device))
+            .filter(|view| super::privacy::visible(s, &view.notification.app))
             .collect::<Vec<_>>();
         visible.sort_by_key(|view| std::cmp::Reverse(view.notification.when));
         visible
             .into_iter()
-            .take(100)
+            .take(limit)
             .map(|view| {
                 let n = &view.notification;
                 json!({
                     "deviceId": view.device.to_string(),
                     "key": n.key,
+                    "id": n.key,
                     "app": n.app,
+                    "appScope": super::privacy::app_scope(&n.app),
                     "appName": n.app_name,
                     "title": n.title,
                     "text": n.text,
+                    "sub": n.sub,
+                    "silent": n.silent,
                     "timestamp": n.when,
                     "ongoing": n.ongoing,
                 })
@@ -122,7 +129,7 @@ mod tests {
     use super::*;
     #[test]
     fn notifications_without_core_are_an_empty_live_feed() {
-        let (code, _, body) = handle_get_notifications();
+        let (code, _, body) = handle_get_notifications(&HashMap::new());
         assert_eq!(code, 200);
         assert_eq!(body["ok"], true);
         assert_eq!(body["notifications"], json!([]));

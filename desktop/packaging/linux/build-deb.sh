@@ -39,11 +39,13 @@ fi
 BIN_PATH="${BIN_PATH:-${REPO_ROOT}/target/release/nectarlink-desktop}"
 if [[ ! -f "${BIN_PATH}" ]]; then
     echo "Building nectarlink-desktop (release)..."
-    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop)
+    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop -p nectarlink-mcp)
 fi
 
 STAGE_DIR="$(mktemp -d -t nectarlink-deb-XXXXXX)"
 trap 'rm -rf "${STAGE_DIR}"' EXIT
+
+bash "${SCRIPT_DIR}/build-translations.sh" "${STAGE_DIR}/translations"
 
 PKG_ROOT="${STAGE_DIR}/nectarlink_${VERSION}_${DEB_ARCH}"
 mkdir -p \
@@ -58,6 +60,9 @@ mkdir -p \
     "${PKG_ROOT}/usr/share/icons/hicolor/scalable/apps"
 
 install -m 0755 "${BIN_PATH}" "${PKG_ROOT}/usr/lib/nectarlink/nectarlink-desktop"
+# What AI agents run (Settings > AI agents), next to the app so its setup lines find it.
+AGENT_PATH="${AGENT_PATH:-$(dirname "${BIN_PATH}")/nectarlink-agent}"
+[[ ! -f "${AGENT_PATH}" ]] || install -m 0755 "${AGENT_PATH}" "${PKG_ROOT}/usr/lib/nectarlink/nectarlink-agent"
 for adapter in "$(dirname "${BIN_PATH}")"/libnectarlink-video-ffmpeg*.so; do
     [[ ! -f "${adapter}" ]] || install -m 0755 "${adapter}" "${PKG_ROOT}/usr/lib/nectarlink/"
 done
@@ -72,9 +77,11 @@ exec /usr/lib/nectarlink/nectarlink-desktop "$@"
 EOF
 chmod 0755 "${PKG_ROOT}/usr/bin/nectarlink-desktop"
 
-# shellcheck source=stage-translations.sh
-source "${SCRIPT_DIR}/stage-translations.sh"
-stage_translations "$(dirname "${BIN_PATH}")" "${REPO_ROOT}/desktop/app/i18n" "${PKG_ROOT}/usr/share/nectarlink"
+for qm in "${STAGE_DIR}"/translations/nectarlink_*.qm; do
+    if [[ -f "${qm}" ]]; then
+        install -m 0644 "${qm}" "${PKG_ROOT}/usr/share/nectarlink/$(basename "${qm}")"
+    fi
+done
 
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${PKG_ROOT}/usr/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/org.nectarlink.desktop.metainfo.xml" "${PKG_ROOT}/usr/share/metainfo/org.nectarlink.desktop.metainfo.xml"

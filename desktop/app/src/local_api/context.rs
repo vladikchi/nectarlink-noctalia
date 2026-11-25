@@ -60,7 +60,8 @@ mod tests {
     fn explicit_device_never_falls_back() {
         let first = DeviceId([1; 32]);
         let second = DeviceId([2; 32]);
-        let resolve = |query: &str| match_device(query, [(first, "Work Phone"), (second, "Home Phone")].into_iter());
+        let resolve =
+            |query: &str| match_device(query, [(first, "Work Phone"), (second, "Home Phone")].into_iter());
         assert_eq!(resolve(&second.to_string()), Some(second));
         assert_eq!(resolve("home"), Some(second));
         assert_eq!(resolve("phone"), None);
@@ -76,16 +77,37 @@ mod tests {
 pub(super) fn display_device_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DeviceId, D::Error> {
     String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
 }
-pub(super) fn allowed(device: DeviceId, feature: &str) -> bool {
+pub(super) fn online_with_capabilities(device: DeviceId) -> bool {
     with_state(|s| {
-        s.devices.iter().any(|d| d.id == device && matches!(d.link, LinkState::Online { .. }))
-            && matches!(
-                s.matrices.get(&device).and_then(|m| m.state(feature)),
-                Some(FeatureState::Available | FeatureState::Partial { .. })
-            )
+        s.matrices.contains_key(&device)
+            && s.devices.iter().any(|d| d.id == device && matches!(d.link, LinkState::Online { .. }))
     })
     .unwrap_or(false)
 }
+
+pub(super) fn allowed(device: DeviceId, feature: &str) -> bool {
+    with_state(|s| feature_access(s, device, feature)).flatten() == Some(true)
+}
+
+pub(super) fn feature_access(s: &crate::state::AppState, device: DeviceId, feature: &str) -> Option<bool> {
+    online_feature_state(s, device, feature)
+        .map(|state| matches!(state, FeatureState::Available | FeatureState::Partial { .. }))
+}
+
+pub(super) fn online_feature_state(
+    s: &crate::state::AppState,
+    device: DeviceId,
+    feature: &str,
+) -> Option<FeatureState> {
+    if !s.devices.iter().any(|d| d.id == device && matches!(d.link, LinkState::Online { .. })) {
+        return None;
+    }
+    s.matrices.get(&device)?.state(feature)
+}
+
+pub(super) fn sms_access(device: DeviceId) -> Option<bool> {
+    with_state(|s| feature_access(s, device, "messages.sms")).flatten()
+}
 pub(super) fn visible(app: &str) -> bool {
-    with_state(|s| s.app_rule(app) != crate::state::AppRule::Hidden).unwrap_or(false)
+    with_state(|s| super::privacy::visible(s, app)).unwrap_or(false)
 }

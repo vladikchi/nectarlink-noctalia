@@ -38,16 +38,133 @@ Window {
     property bool sized: false
     property bool readyForResize: false
 
+    // An app window whose display follows its size (see Mirror.setFlexible);
+    // otherwise the display keeps the phone's resolution and the window its shape.
+    readonly property bool flexible: info.app === true && info.flexible !== false
+    // Light and dark swapped in the picture, for apps with no dark mode.
+    readonly property bool dark: info.dark === true
+    // A flexible window between its size changing and the phone's picture
+    // of the new size: frost covers it (see `frost`), and the phone is told
+    // the size once, when the edge is let go.
+    property bool resizing: false
+
+    function frameFitsWindow() {
+        return frame.width > 0 && height > 0
+            && Math.abs((frame.width / frame.height) / (width / height) - 1) < 0.03
+    }
+
+    // The window has the size it's staying at: remember it, and tell the phone.
+    function sizeSettled() {
+        resizeTimer.stop()
+        if (!info.app || !sized)
+            return
+        Mirror.saveGeometry(mirrorKey, x, y, width, height)
+        if (phase === "showing")
+            Mirror.resize(mirrorKey, width, height)
+        if (!resizing)
+            return
+        if (frameFitsWindow() || phase !== "showing")
+            resizing = false
+        else
+            settleTimer.restart()
+    }
+
+    function windowResized() {
+        if (!info.app || !sized || !readyForResize)
+            return
+        if (flexible) {
+            resizing = true
+            settleTimer.stop()
+        }
+        resizeTimer.restart()
+    }
+
+    // Turned on: the display takes the window's size, as after a resize.
+    onFlexibleChanged: if (flexible && sized && phase === "showing") windowResized()
+
+    // A size change without an edge being dragged (maximized, snapped, or any
+    // on Linux and macOS) has settled when no other follows.
     Timer {
         id: resizeTimer
         interval: 300
         repeat: false
+        onTriggered: if (!video.sizing) win.sizeSettled()
+    }
+
+    // Ctrl + wheel: a spin of several notches reaches the phone as one
+    // change, since each one makes the app lay itself out again.
+    Timer {
+        id: zoomTimer
+        property int steps: 0
+        interval: 120
         onTriggered: {
+            const changed = Mirror.changeZoom(win.mirrorKey, steps)
+            steps = 0
+            if (!changed) {
+                win.zooming = false
+                return
+            }
+            win.applyZoom()
+            zoomGiveUpTimer.restart()
+            win.zoomSent = true
+            win.zoomMaybeDone()
+        }
+    }
+    // The app's zoom is changing: frost with a spinner covers the window
+    // from the wheel's first notch until the phone's picture looks
+    // different from the one under the frost, which is the app drawn at its
+    // new size (the picture's own size doesn't change).
+    property bool zooming: false
+    property bool zoomSent: false
+    readonly property bool frosted: resizing || zooming
+    onZoomingChanged: if (!zooming) zoomSent = false
+    function zoomMaybeDone() {
+        if (zooming && zoomSent && !zoomTimer.running && frostView.changedSinceFrozen) {
+            zooming = false
+            zoomGiveUpTimer.stop()
+        }
+    }
+    // An app that looks the same at its new size, or never draws again.
+    Timer {
+        id: zoomGiveUpTimer
+        interval: 5000
+        onTriggered: win.zooming = false
+    }
+    Connections {
+        target: frostView
+        function onChangedSinceFrozenChanged() { win.zoomMaybeDone() }
+    }
+    // The app's zoom reaches the phone with a resize; a window that isn't
+    // flexible sends one of the size its display already has.
+    function applyZoom() {
+        if (flexible)
+            Mirror.resize(mirrorKey, width, height)
+        else if (frame.width > 0)
+            Mirror.zoomDisplay(mirrorKey, frame.width, frame.height)
+    }
+    // A window that isn't flexible never resizes its display, so an app's
+    // remembered zoom is applied once, when its picture first comes.
+    property bool zoomApplied: false
+
+    // In case the phone keeps the size it has (no picture of the new one comes).
+    Timer {
+        id: settleTimer
+        interval: 2000
+        // Not under an edge grabbed again before the last resize settled.
+        onTriggered: if (!video.sizing) win.resizing = false
+    }
+
+    // An edge held (Windows): frost from the moment it's grabbed until it's
+    // let go and the phone has caught up.
+    Connections {
+        target: video
+        function onSizingChanged() {
             if (!win.info.app || !win.sized)
                 return
-            Mirror.saveGeometry(win.mirrorKey, win.x, win.y, win.width, win.height)
-            if (win.phase === "showing")
-                Mirror.resize(win.mirrorKey, win.width, win.height)
+            if (!video.sizing)
+                win.sizeSettled()
+            else if (win.flexible)
+                win.resizing = true
         }
     }
 
@@ -103,7 +220,7 @@ Window {
         if (!sized || !readyForResize)
             return
         if (info.app)
-            resizeTimer.restart()
+            windowResized()
         else
             screenResizeTimer.restart()
     }
@@ -111,7 +228,7 @@ Window {
         if (!sized || !readyForResize)
             return
         if (info.app)
-            resizeTimer.restart()
+            windowResized()
         else
             screenResizeTimer.restart()
     }
@@ -136,8 +253,15 @@ Window {
     onActiveChanged: if (win.active) Mirror.syncClipboardOnFocus(win.mirrorKey)
 
     onFrameChanged: {
-        if (frame.width <= 0)
+        if (frame.width <= 0) {
+            zoomApplied = false
             return
+        }
+        if (info.app && !flexible && !zoomApplied) {
+            zoomApplied = true
+            if ((info.zoom || 100) !== 100)
+                applyZoom()
+        }
         const availW = Screen.desktopAvailableWidth > 0 ? Screen.desktopAvailableWidth : 1920
         const availH = Screen.desktopAvailableHeight > 0 ? Screen.desktopAvailableHeight : 1080
         if (!sized && info.app && (info.savedWidth || 0) >= 240 && (info.savedHeight || 0) >= 240) {
@@ -151,6 +275,15 @@ Window {
             }
             sized = true
             Qt.callLater(() => { win.readyForResize = true })
+            return
+        }
+        // Mid-resize, a picture of the old shape is not the app turning; one
+        // of the new shape ends the resize.
+        if (sized && info.app && resizing) {
+            if (!video.sizing && !resizeTimer.running && frameFitsWindow()) {
+                resizing = false
+                settleTimer.stop()
+            }
             return
         }
         // An app that only runs one way up turned the phone's display (#126):
@@ -180,6 +313,18 @@ Window {
             } else if (Math.abs(width / height - frame.width / frame.height) > 0.05) {
                 fitScreen(Math.max(width, height))
             }
+            return
+        }
+        // At the phone's resolution, an app window takes the picture's shape
+        // at its height, so it has no bars.
+        if (sized && info.app && !flexible && Math.abs(width / height - frame.width / frame.height) > 0.02) {
+            const shape = frame.width / frame.height
+            const h = Math.min(height, availW * 0.95 / shape)
+            readyForResize = false
+            width = Math.max(240, Math.round(h * shape))
+            height = Math.max(240, Math.round(h))
+            Mirror.saveGeometry(mirrorKey, x, y, width, height)
+            Qt.callLater(() => { win.readyForResize = true })
             return
         }
         const maxH = availH * 0.85
@@ -215,10 +360,25 @@ Window {
         id: video
         anchors.fill: parent
         stream: win.mirrorKey
+        keepShape: win.info.app === true && !win.flexible
+        fillsNearShape: win.info.app === true
         windowIcon: win.info.icon || ""
+        layer.enabled: win.dark
+        layer.effect: ShaderEffect {
+            fragmentShader: "qrc:/shaders/darken.frag.qsb"
+        }
         windowAppId: win.info.app && (win.info.pkg || "").length > 0
             ? "Nectarlink.App." + (win.info.device || "").slice(0, 8) + "." + win.info.pkg
             : ""
+        // Pinned to the taskbar, it opens this app again (#465).
+        windowRelaunch: {
+            if (!win.info.app || (win.info.pkg || "").length === 0) return ""
+            const relaunch = Mirror.relaunch(win.info.device || "", win.info.pkg)
+            if (relaunch.length === 0) return ""
+            const r = JSON.parse(relaunch)
+            r.name = (win.info.title || win.info.pkg).replace(/^@+/, "")
+            return JSON.stringify(r)
+        }
         focus: true
         acceptsText: win.phase === "showing" && win.canControl
         // The emoji panel (Win+.) and input methods give finished text here
@@ -272,7 +432,8 @@ Window {
         MouseArea {
             id: pointer
             anchors.fill: parent
-            enabled: win.phase === "showing"
+            // Not `enabled`: the wheel still zooms under the frost.
+            enabled: win.phase === "showing" && !win.resizing
             acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
             cursorShape: win.canControl ? Qt.PointingHandCursor : Qt.ArrowCursor
             property bool down: false
@@ -295,6 +456,8 @@ Window {
             }
             onPressed: (mouse) => {
                 video.forceActiveFocus()
+                if (win.zooming)
+                    return
                 if (!win.canControl) {
                     hintClose.closed = false
                     hintPulse.restart()
@@ -332,6 +495,15 @@ Window {
                 Mirror.touch(win.mirrorKey, "up", p.x, p.y)
             }
             onWheel: (wheel) => {
+                // Ctrl + wheel: the app draws bigger or smaller in its window.
+                if ((wheel.modifiers & Qt.ControlModifier) && win.info.app === true) {
+                    if (wheel.angleDelta.y !== 0) {
+                        win.zooming = true
+                        zoomTimer.steps += wheel.angleDelta.y > 0 ? 1 : -1
+                        zoomTimer.restart()
+                    }
+                    return
+                }
                 if (!win.canControl) {
                     hintClose.closed = false
                     Mirror.requestControl(win.mirrorKey)
@@ -360,6 +532,11 @@ Window {
             }
             if ((event.modifiers & Qt.ControlModifier) && !(event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_R) {
                 Mirror.toggleRecording(win.mirrorKey)
+                event.accepted = true
+                return
+            }
+            if ((event.modifiers & Qt.ControlModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_T) {
+                win.setToolbarHidden(!Preferences.hideMirrorToolbar)
                 event.accepted = true
                 return
             }
@@ -440,44 +617,165 @@ Window {
         return (m < 10 ? "0" + m : "" + m) + ":" + (s < 10 ? "0" + s : "" + s)
     }
 
+    // While an app window is resized: its last picture, blurred and kept as
+    // it was, covers the window with the app's icon over it. It appears at
+    // once (animations barely tick while Windows drags an edge) and fades out.
+    Item {
+        id: frost
+        anchors.fill: parent
+        opacity: 0
+        visible: opacity > 0
+        // Set by hand, not through a Behavior: one could catch the change to
+        // 1 too and animate it, and animations barely tick while Windows
+        // drags an edge (least of all a shrinking one), so the frost stayed
+        // half-transparent for a while.
+        Connections {
+            target: win
+            function onFrostedChanged() {
+                fadeOut.stop()
+                if (win.frosted)
+                    frost.opacity = 1
+                else
+                    fadeOut.start()
+            }
+        }
+        NumberAnimation {
+            id: fadeOut
+            target: frost
+            property: "opacity"
+            to: 0
+            duration: Theme.reduceMotion ? 0 : 180
+            easing.type: Easing.OutCubic
+        }
+        VideoView {
+            id: frostView
+            anchors.fill: parent
+            stream: win.mirrorKey
+            frosted: true
+            frozen: win.frosted
+            layer.enabled: win.dark
+            layer.effect: ShaderEffect {
+                fragmentShader: "qrc:/shaders/darken.frag.qsb"
+            }
+        }
+        RoundedImage {
+            anchors.centerIn: parent
+            visible: (win.info.icon || "").length > 0
+            width: 80
+            height: 80
+            radius: 20
+            source: win.info.icon || ""
+        }
+        Spinner {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: parent.height / 2 + 56
+            visible: win.zooming
+            width: 28
+            height: 28
+        }
+    }
+
+    // Hiding the toolbar (D475) is for every window, and says how to get it back.
+    property string localNotice: ""
+    function setToolbarHidden(hidden) {
+        Preferences.hideMirrorToolbar = hidden
+        localNotice = hidden ? qsTr("Toolbar hidden. Ctrl+Shift+T shows it again.") : ""
+        if (hidden)
+            localNoticeTimer.restart()
+        else
+            toolbarWakeTimer.restart()
+    }
+    Timer {
+        id: localNoticeTimer
+        interval: 3000
+        onTriggered: win.localNotice = ""
+    }
+
     // Floating mirror toolbar: screenshots, MP4 recording, stay awake, screen off, and audio mute.
     Timer {
         id: toolbarWakeTimer
         interval: 1800
         repeat: false
     }
+    // The toolbar sits in a corner of the window, top right unless it was
+    // dragged by its grip to another one: off the app's own buttons (#340).
+    readonly property bool toolbarBottom: Preferences.mirrorToolbarBottom
+    readonly property bool toolbarLeft: Preferences.mirrorToolbarLeft
+    // Hovering this strip along the toolbar's edge shows it.
     Item {
-        anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
+        y: win.toolbarBottom ? parent.height - height : 0
         height: navPill.visible && !navPill.besideToolbar ? 104 : 56
         HoverHandler { id: topZoneHover }
     }
     Rectangle {
         id: toolbar
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 12
+        readonly property real restX: win.toolbarLeft ? 12 : parent.width - width - 12
+        readonly property real restY: win.toolbarBottom
+            ? parent.height - height - 12 - (hintBanner.visible ? hintBanner.height + 12 : 0)
+            : 12
+        x: restX
+        y: restY
         width: toolbarRow.implicitWidth + 8
         height: 40
         radius: 20
         color: Qt.rgba(0, 0, 0, 0.68)
-        visible: win.phase === "showing" && video.frameSize.width > 0
-        readonly property bool toolbarHasFocus: lockBtn.activeFocus || copyShotBtn.activeFocus || saveShotBtn.activeFocus
-            || recordBtn.activeFocus || stayAwakeBtn.activeFocus || screenOffBtn.activeFocus || soundBtn.activeFocus
-            || backBtn.activeFocus || homeBtn.activeFocus || recentsBtn.activeFocus
+        visible: win.phase === "showing" && video.frameSize.width > 0 && !Preferences.hideMirrorToolbar
+        readonly property bool toolbarHasFocus: flexibleBtn.activeFocus || lockBtn.activeFocus || copyShotBtn.activeFocus || saveShotBtn.activeFocus
+            || recordBtn.activeFocus || stayAwakeBtn.activeFocus || screenOffBtn.activeFocus || rotateBtn.activeFocus || soundBtn.activeFocus
+            || backBtn.activeFocus || homeBtn.activeFocus || recentsBtn.activeFocus || hideToolbarBtn.activeFocus
         // Only while it's wanted: it sits over the app's own top bar (#340).
         // Recording and a dark phone screen show in the window's title instead.
         opacity: topZoneHover.hovered || toolbarHover.hovered || navHover.hovered || toolbarWakeTimer.running
-            || toolbarHasFocus ? 1 : 0
+            || toolbarHasFocus || gripDrag.active ? 1 : 0
         Behavior on opacity { enabled: !Theme.reduceMotion; NumberAnimation { duration: Theme.fadeFast } }
 
         HoverHandler { id: toolbarHover }
+
+        // Let go of a drag: the nearest corner keeps it, in every window.
+        function settle() {
+            const parentItem = toolbar.parent
+            Preferences.mirrorToolbarLeft = toolbar.x + toolbar.width / 2 < parentItem.width / 2
+            Preferences.mirrorToolbarBottom = toolbar.y + toolbar.height / 2 > parentItem.height / 2
+            toolbar.x = Qt.binding(() => toolbar.restX)
+            toolbar.y = Qt.binding(() => toolbar.restY)
+            toolbarWakeTimer.restart()
+        }
 
         Row {
             id: toolbarRow
             anchors.centerIn: parent
             spacing: 2
+
+            Item {
+                id: gripHandle
+                width: 20
+                height: 32
+                anchors.verticalCenter: parent.verticalCenter
+                Accessible.role: Accessible.Grip
+                Accessible.name: qsTr("Drag to move the toolbar to another corner")
+                Icon {
+                    anchors.centerIn: parent
+                    width: 14
+                    height: 14
+                    path: Icons.grip
+                    color: Qt.rgba(1, 1, 1, gripHover.hovered || gripDrag.active ? 0.95 : 0.6)
+                }
+                HoverHandler {
+                    id: gripHover
+                    cursorShape: gripDrag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                }
+                DragHandler {
+                    id: gripDrag
+                    target: toolbar
+                    xAxis.minimum: 0
+                    xAxis.maximum: toolbar.parent.width - toolbar.width
+                    yAxis.minimum: 0
+                    yAxis.maximum: toolbar.parent.height - toolbar.height
+                    onActiveChanged: if (!active) toolbar.settle()
+                }
+            }
 
             IconButton {
                 id: copyShotBtn
@@ -511,7 +809,23 @@ Window {
                 text: win.formatDuration(win.recordingElapsedSecs)
             }
             IconButton {
+                id: darkBtn
+                iconPath: Icons.moon
+                iconColor: win.dark ? Theme.primary : "white"
+                label: win.dark ? qsTr("Show the picture as it is") : qsTr("Dark picture: swap light and dark")
+                onClicked: Mirror.setDark(win.mirrorKey, !win.dark)
+            }
+            IconButton {
+                id: flexibleBtn
+                visible: win.info.app === true
+                iconPath: Icons.resize
+                iconColor: win.flexible ? Theme.primary : "white"
+                label: qsTr("Flex mode")
+                onClicked: Mirror.setFlexible(win.mirrorKey, !win.flexible)
+            }
+            IconButton {
                 id: stayAwakeBtn
+                visible: win.info.powerButtons !== false
                 iconPath: Icons.coffee
                 iconColor: win.info.stayAwake === true ? Theme.primary : "white"
                 label: win.info.stayAwake === true
@@ -521,7 +835,7 @@ Window {
             }
             IconButton {
                 id: screenOffBtn
-                visible: win.info.canScreenOff === true
+                visible: win.info.canScreenOff === true && win.info.powerButtons !== false
                 iconPath: Icons.screenOff
                 iconColor: win.info.screenOff === true ? Theme.primary : "white"
                 label: win.info.screenOff === true
@@ -530,8 +844,18 @@ Window {
                 onClicked: Mirror.setScreenOff(win.mirrorKey, !(win.info.screenOff === true))
             }
             IconButton {
+                id: rotateBtn
+                // The phone's screen only, and with Elevated (the phone turns itself).
+                visible: win.canControl && !win.info.app
+                iconPath: Icons.rotate
+                iconColor: "white"
+                label: win.frame.width > win.frame.height ? qsTr("Turn the phone to portrait") : qsTr("Turn the phone to landscape")
+                onClicked: Mirror.rotate(win.mirrorKey, !(win.frame.width > win.frame.height))
+            }
+            IconButton {
                 id: lockBtn
-                visible: win.canControl
+                // The phone's screen only: an app window runs whether it's locked or not.
+                visible: win.canControl && !win.info.app
                 iconPath: Icons.lock
                 iconColor: "white"
                 label: qsTr("Lock phone")
@@ -553,6 +877,13 @@ Window {
                 label: Mirror.muted ? qsTr("Play the phone's sound here") : qsTr("Play the sound on the phone")
                 onClicked: Mirror.toggleSound()
             }
+            IconButton {
+                id: hideToolbarBtn
+                iconPath: Icons.eyeOff
+                iconColor: "white"
+                label: qsTr("Hide the toolbar (Ctrl+Shift+T)")
+                onClicked: win.setToolbarHidden(true)
+            }
         }
     }
 
@@ -561,10 +892,13 @@ Window {
     Rectangle {
         id: navPill
         readonly property bool besideToolbar: win.width >= toolbar.width + width + 30
-        anchors.top: besideToolbar ? parent.top : toolbar.bottom
-        anchors.topMargin: besideToolbar ? 12 : 6
-        anchors.right: besideToolbar ? toolbar.left : parent.right
-        anchors.rightMargin: besideToolbar ? 6 : 12
+        // Beside the toolbar on the window's inner side, or past it, away from the edge.
+        x: besideToolbar
+            ? (win.toolbarLeft ? toolbar.x + toolbar.width + 6 : toolbar.x - width - 6)
+            : (win.toolbarLeft ? toolbar.x : toolbar.x + toolbar.width - width)
+        y: besideToolbar
+            ? toolbar.y
+            : (win.toolbarBottom ? toolbar.y - height - 6 : toolbar.y + toolbar.height + 6)
         width: navRow.implicitWidth + 8
         height: 40
         radius: 20
@@ -609,9 +943,8 @@ Window {
     // toolbar's corner says so, instead of the whole toolbar staying over
     // the picture. A click plays the sound again.
     Rectangle {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 12
+        x: win.toolbarLeft ? 12 : parent.width - width - 12
+        y: win.toolbarBottom ? parent.height - height - 12 : 12
         width: 32
         height: 32
         radius: 16
@@ -636,7 +969,7 @@ Window {
         id: noticePill
         readonly property string pillText: mirrorDropArea.containsDrag
             ? qsTr("Release to send files to %1").arg(win.deviceName.length > 0 ? win.deviceName : qsTr("phone"))
-            : (win.info.notice || "")
+            : (win.localNotice || win.info.notice || "")
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: hintBanner.visible ? hintBanner.top : parent.bottom
         anchors.bottomMargin: hintBanner.visible ? 8 : 16

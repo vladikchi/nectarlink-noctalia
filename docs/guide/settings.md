@@ -38,7 +38,7 @@ Controls startup behavior, the system tray, `Nectar Island`, battery notificatio
 | **Nectar Island** | **Off** | Shows a compact pill at the top center of your primary monitor during active phone events. Automatically hides during full-screen games/videos or Windows Do Not Disturb. |
 | **Island triggers** *(shown when Nectar Island is On)* | **Calls**: On, **Transfers**: On, **Media**: On, **Alerts**: Off | Toggles which phone events expand `Nectar Island`: incoming/active **Calls**, active file **Transfers**, now-playing **Media**, and phone notification **Alerts** (including OTPs, timers, and recordings). |
 | **Battery alerts** | **On** | Shows a desktop notification when a connected phone's battery drops low or reaches a full charge. |
-| **Sync clipboard to phone** | **On** | Automatically sends text and images copied on this PC (`Ctrl+C`) to connected phones. |
+| **Sync clipboard** | **On** | Automatically sends text and images copied on this PC (`Ctrl+C`) to connected phones and paired PCs. |
 | **Clipboard follows control** | **On** | Sends the PC clipboard to the phone when you start controlling it: the mouse moves into its mirror window, or a remote control session starts. |
 | **Copy one-time codes** | **Off** | Automatically copies 4-to-8-digit verification codes detected in incoming phone notifications and SMS messages onto your PC clipboard. |
 | **Copy received files** | **On** | Automatically places small incoming files received from your phone onto the Windows clipboard (`CF_HDROP`) so you can press `Ctrl+V` to paste them anywhere. |
@@ -186,9 +186,11 @@ Provides network diagnostics, **Connect over mobile data**, Wake-on-LAN readines
 | :--- | :--- | :--- |
 | **Connection Doctor** | **Check** button | Runs a live check of Windows Firewall rules, network profile type (Public vs Private), active VPN interfaces, and suspected Wi-Fi AP isolation, and fixes firewall or network profile issues with one click. |
 | **Connect over mobile data** | **Off** | Allows this PC and paired phones to stay connected over LTE/5G or across separate networks via end-to-end encrypted relay packets when direct LAN/USB is unavailable. |
+| **Use USB debugging** | **On** | Connects, pairs, installs the app and starts Elevated over a USB cable. Off, NectarLink never asks a phone on a cable for USB debugging. Applies when NectarLink restarts. |
 | **Wake from your phone** | Read-only status indicator (`Ready`, `Off in Windows`, `Check settings`, `No adapter`) | Inspects your active Windows network adapter and tells you whether Wake on LAN is enabled in Device Manager so your phone can wake this PC from sleep. |
 | **Local automation API** | **Off** (default port `53320`) | Starts the loopback-only HTTP/JSON server (`127.0.0.1:<port>`) for PowerToys, AutoHotkey, and scripts, and writes the 256-bit Bearer token to `%LOCALAPPDATA%\Nectarlink\api-token.json`. |
 | **NectarLink `<version>`** | **Check for updates** and **Open logs** buttons | Shows the app version and this PC's device name, checks GitHub Releases for SHA-256 verified updates, or opens the local diagnostic logs folder. |
+| **What's new** | **Open** button | Opens the same panel as the sparkle button at the top of the window: what changed since you last looked, in short points by category, and a link to the full release notes. After an update that brought something new, the button shows a dot until you open it (on Nightly too). |
 | **Check for updates** | **On** (shown on installed copies) | Checks the update channel's feed over HTTPS (`https://raw.githubusercontent.com/thtbee/nectarlink/channels/<channel>.json`) 30 seconds after startup, then every 12 hours on **Stable** and every 2 hours on **Nightly** (twice as long on battery), and tells your phone when there's a new build. A check of an unchanged feed is a few hundred bytes. |
 | **Update channel** | **Stable** (**Nightly** on a nightly build) | **Stable** gets releases. **Nightly** gets a build from the latest code every couple of hours when it changes, with the newest fixes and features and sometimes new bugs, and releases too. Switching back to **Stable** keeps the nightly installed until the next release is newer. An install stays on its channel when it takes a release, until you change it. |
 | **Install updates automatically** | **On** | Installs a newer release by itself when nobody has used the PC for 10 minutes and nothing is in progress (no mirroring, app window, transfer, call, screen sharing or webcam). No administrator prompt: the installer sets up a task that does it. Turn it off to install from the notification or **Check for updates** when you choose. |
@@ -224,6 +226,8 @@ On Android, tap **Settings** in the floating bottom dock. You can view all setti
 | **Browse this phone's storage in File Explorer** | **Off** (per PC) | Allows that specific PC to mount this phone's shared storage (or selected folders) inside Windows File Explorer. |
 | **Pair another PC** | Button | Opens the pairing screen to scan a QR code or pair nearby with another PC. |
 | **Connect over mobile data** | **Off** | Allows this phone to stay connected to paired PCs over LTE/5G or across different networks when away from Wi-Fi. |
+| **Only on networks where a PC was found** | **Off** | The phone looks for your PCs by itself only on Wi-Fi where it has reached one directly before (it learns these as it goes; **Forget them** clears the list). On other networks a PC can still reach the phone. Networks are told apart by their router and address range, so the phone needs no location permission. |
+| **Stop looking after** | **Never** | With no PC reachable for 15 minutes, 1 hour or 4 hours, the phone stops looking until the network changes or you open NectarLink. Its notification says so. |
 
 ### 3. Permissions
 
@@ -233,7 +237,7 @@ Each permission row shows its live state (**On** / **Allowed** vs **Off**) and a
 | :--- | :--- |
 | **Notifications › Show notifications on your PC** | Grants Android Notification Listener access so phone notifications, inline replies, and actions work on your PC. Includes an **App info** helper on Android 13+ if **Allow restricted settings** is needed. |
 | **Control from your PC › Use your PC's mouse and keyboard** | Enables NectarLink's Android Accessibility Service (`Assist` power level) so you can tap, swipe, and type on your phone from your PC during screen mirroring or via **Type on phone**. |
-| **Control from your PC › Real touch and keys** | Sets up or manages the `Elevated` power level via Android's built-in Wireless Debugging (real-time touch dragging, gamepad, `app window` streaming, background clipboard sync, Android 15+ sensitive OTPs, in-call mute/hold/speaker, and Wi-Fi/Bluetooth toggles). |
+| **Control from your PC › Elevated** | Sets up or manages the `Elevated` power level via Android's built-in Wireless Debugging, Shizuku or root (real-time touch dragging, gamepad, `app window` streaming, background clipboard sync, Android 15+ sensitive OTPs, in-call mute/hold/speaker, and Wi-Fi/Bluetooth toggles). |
 | **Control from your PC › Do Not Disturb and silent mode** | Grants Notification Policy Access so your PC can toggle Do Not Disturb and set the ringer to silent. |
 | **Control from your PC › Screen brightness** | Grants Modify system settings (`WRITE_SETTINGS`) so your PC can adjust your phone's screen brightness slider. |
 | **Background & battery › Stay reachable in the background** | Requests Android's unrestricted battery usage exemption (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) and displays step-by-step instructions tailored to your phone's manufacturer (Samsung, Xiaomi, OnePlus, Oppo/Realme, Vivo, Huawei, Pixel) with a **Battery settings** button. |

@@ -398,6 +398,11 @@ enum Command {
         /// Already answered on the phone: the call is in progress.
         #[arg(long)]
         answered: bool,
+        /// A call in this app (`WhatsApp`) rather than a phone call (#434):
+        /// no number, no in-call controls, and the phone doesn't offer
+        /// control of its own calls.
+        #[arg(long)]
+        app: Option<String>,
     },
     /// A paired phone's text messages: list conversations, show one, or send.
     Sms {
@@ -531,6 +536,44 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         target: Vec<String>,
     },
+    /// For AI agents: serve NectarLink over MCP on stdin and stdout, through
+    /// the running app (Settings > AI agents).
+    Mcp {
+        /// The agent's name, as added in NectarLink.
+        #[arg(long, env = "NECTARLINK_AGENT")]
+        agent: String,
+        /// Only three tools (search, describe, run), for clients with a tool limit.
+        #[arg(long)]
+        dispatch: bool,
+        /// Only these toolsets (comma separated), e.g. core,messages.
+        #[arg(long, value_delimiter = ',')]
+        toolsets: Vec<String>,
+    },
+    /// For AI agents and scripts: run one action through the running app and
+    /// print its JSON answer.
+    Do {
+        /// The action, e.g. devices.list or sms.send.
+        action: String,
+        /// The agent's name, as added in NectarLink.
+        #[arg(long, env = "NECTARLINK_AGENT")]
+        agent: String,
+        /// The arguments as a JSON object.
+        #[arg(long)]
+        args: Option<String>,
+        /// The device, by id or name.
+        #[arg(long)]
+        device: Option<String>,
+        /// Indented output.
+        #[arg(long)]
+        pretty: bool,
+    },
+    /// For AI agents and scripts: list the actions this agent may use.
+    Actions {
+        #[arg(long, env = "NECTARLINK_AGENT")]
+        agent: String,
+        #[arg(long)]
+        pretty: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -607,6 +650,7 @@ enum PowerArg {
     Lock,
     Sleep,
     Hibernate,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1909,7 +1953,7 @@ impl Platform for TerminalPlatform {
             }
         });
     }
-    fn mirror_resize_requested(&self, _peer: &DeviceId, session: u32, width: u32, height: u32) {
+    fn mirror_resize_requested(&self, _peer: &DeviceId, session: u32, width: u32, height: u32, _zoom: u32) {
         let (w, h) = ((width & !1).max(64), (height & !1).max(64));
         println!("The PC resized session {session} to {w}x{h}.");
         for (s, pending, _) in SCREEN_SESSIONS.lock().unwrap().iter() {
@@ -2023,6 +2067,7 @@ impl Platform for TerminalPlatform {
                 outgoing: !incoming,
                 status: (!incoming).then(|| "sent".into()),
                 parts: Vec::new(),
+                sim: None,
             })
             .collect();
         messages.sort_by_key(|m| std::cmp::Reverse(m.date));
@@ -2140,6 +2185,21 @@ impl Platform for TerminalPlatform {
             default: None,
         })
     }
+    /// The same two SIMs for texts, the second as the default (offer
+    /// `sms.sims` to use them).
+    fn sms_sims(&self) -> std::result::Result<nectarlink_core::CallSims, String> {
+        Ok(nectarlink_core::CallSims { default: Some("sim-2".into()), ..self.call_sims()? })
+    }
+    fn send_sms_on(
+        &self,
+        to: &[String],
+        body: &str,
+        attachments: &[SmsAttachment],
+        sim: &str,
+    ) -> std::result::Result<(), String> {
+        println!("A PC asked for this text on {sim}.");
+        self.send_sms_with_attachments(to, body, attachments)
+    }
     fn call_dial_on(&self, number: &str, sim: &str) -> std::result::Result<(), String> {
         println!("A PC asked for this call on {sim}.");
         self.call_dial(number)
@@ -2162,6 +2222,7 @@ impl Platform for TerminalPlatform {
             controls: CALL_CONTROLS
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .then(|| nectarlink_core::CallControls { can_hold: true, ..Default::default() }),
+            app: None,
         };
         *CALL.lock().unwrap() = Some(call.clone());
         CALL_LOG.lock().unwrap().push(nectarlink_core::CallLogEntry {
@@ -2354,6 +2415,25 @@ impl Platform for TerminalPlatform {
     }
     fn remote_input(&self, _peer: &DeviceId, input: nectarlink_core::RemoteInput) -> Result<(), String> {
         println!("Remote input: {input:?}");
+        Ok(())
+    }
+    fn remote_pad(
+        &self,
+        _peer: &DeviceId,
+        pad: Option<nectarlink_core::PadState>,
+        _wait: bool,
+    ) -> Result<(), String> {
+        // Only changes, so a phone's repeats every 100 ms don't flood the terminal.
+        static LAST: std::sync::Mutex<Option<Option<nectarlink_core::PadState>>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref() != Some(&pad) {
+            match pad {
+                Some(pad) => println!("Controller: {pad:?}"),
+                None => println!("Controller unplugged"),
+            }
+            *last = Some(pad);
+        }
         Ok(())
     }
     fn set_phone_toggle(
@@ -2567,6 +2647,27 @@ fn main() -> Result<()> {
                     )
                     .with_writer(std::io::stderr)
                     .init();
+
+                // Agent commands talk to the running app and never start a node.
+                match &cli.command {
+                    Command::Mcp { agent, dispatch, toolsets } => {
+                        return nectarlink_mcp::cli::mcp(agent, *dispatch, toolsets).await;
+                    }
+                    Command::Do { action, agent, args, device, pretty } => {
+                        return nectarlink_mcp::cli::run(
+                            agent,
+                            action,
+                            args.as_deref(),
+                            device.as_deref(),
+                            *pretty,
+                        )
+                        .await;
+                    }
+                    Command::Actions { agent, pretty } => {
+                        return nectarlink_mcp::cli::list(agent, *pretty).await;
+                    }
+                    _ => {}
+                }
 
                 if let Command::NotifyWhen { title, device, target } = &cli.command {
                     return Box::pin(run_notify_when(&cli, title.as_deref(), device.as_deref(), target))
@@ -3267,6 +3368,7 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
                 screen_off: false,
                 watch: None,
                 sound_only: false,
+                display: None,
             };
             node.mirror_start(id, options).await.context("the phone didn't ask its user")?;
             println!(
@@ -3283,7 +3385,7 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let (w, h) = dim.split_once('x').context("--resize takes WxH")?;
                 let (w, h): (u32, u32) = (w.trim().parse()?, h.trim().parse()?);
-                node.mirror_resize(id, session, w, h).await.context("resize not sent")?;
+                node.mirror_resize(id, session, w, h, 100).await.context("resize not sent")?;
                 println!("Resized to {w}x{h}.");
             }
             for at in tap {
@@ -3476,6 +3578,7 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
                 screen_off: false,
                 watch: Some(player.clone()),
                 sound_only: false,
+                display: None,
             };
             node.mirror_start(id, options).await.context("the PC didn't stream it")?;
             println!("Watching {player}; recording for {seconds} s after the first frame.");
@@ -3708,31 +3811,34 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
             println!("Sharing sample conversations, contacts, and calls with paired PCs.");
             watch(node, false).await?;
         }
-        Command::IncomingCall { number, caller, basic, answered } => {
+        Command::IncomingCall { number, caller, basic, answered, app } => {
             if !cli.as_phone {
                 bail!("calls are on phones: add --as-phone");
             }
             let _ = CALL_NODE.set(node.clone());
             let mut offers = cli.offers.clone();
-            offers
-                .extend([nectarlink_core::CALLS_STATE.to_owned(), nectarlink_core::CALLS_CONTROL.to_owned()]);
-            CALL_CONTROLS.store(!*basic, std::sync::atomic::Ordering::Relaxed);
-            if !*basic {
+            offers.push(nectarlink_core::CALLS_STATE.to_owned());
+            if app.is_none() {
+                offers.push(nectarlink_core::CALLS_CONTROL.to_owned());
+            }
+            CALL_CONTROLS.store(!*basic && app.is_none(), std::sync::atomic::Ordering::Relaxed);
+            if !*basic && app.is_none() {
                 offers.push(nectarlink_core::CALLS_IN_CALL.to_owned());
             }
             node.update_power(node_power(cli), with_base_caps(offers)).await;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
             let call = nectarlink_core::CallState {
-                id: now.to_string(),
+                id: if app.is_some() { format!("app:{now}") } else { now.to_string() },
                 state: if *answered { "active" } else { "ringing" }.into(),
                 incoming: true,
-                number: Some(number.clone()),
+                number: app.is_none().then(|| number.clone()),
                 name: caller.clone(),
                 photo: None,
                 missed: false,
                 since: answered.then_some(now),
-                controls: (*answered && !*basic)
+                controls: (*answered && !*basic && app.is_none())
                     .then(|| nectarlink_core::CallControls { can_hold: true, ..Default::default() }),
+                app: app.clone(),
             };
             *CALL.lock().unwrap() = Some(call.clone());
             node.call_changed(call).await.context("can't tell PCs")?;
@@ -3851,6 +3957,7 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
                     missed: false,
                     since: Some(now - 83_000),
                     controls: Some(nectarlink_core::CallControls { can_hold: true, ..Default::default() }),
+                    app: None,
                 };
                 *CALL.lock().unwrap() = Some(call.clone());
                 node.call_changed(call).await.context("can't tell PCs")?;
@@ -4070,6 +4177,7 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
                 PowerArg::Lock => PowerAction::Lock,
                 PowerArg::Sleep => PowerAction::Sleep,
                 PowerArg::Hibernate => PowerAction::Hibernate,
+                PowerArg::Shutdown => PowerAction::Shutdown,
             };
             node.pc_power(id, action).await.context("the PC didn't do it")?;
             println!("Done.");
@@ -4311,7 +4419,9 @@ async fn run(cli: &Cli, node: &Node) -> Result<()> {
             println!("Notification sent to connected PCs (and to others when they connect).");
             watch(node, false).await?;
         }
-        Command::NotifyWhen { .. } => unreachable!("handled in main"),
+        Command::NotifyWhen { .. } | Command::Mcp { .. } | Command::Do { .. } | Command::Actions { .. } => {
+            unreachable!("handled in main")
+        }
     }
     Ok(())
 }

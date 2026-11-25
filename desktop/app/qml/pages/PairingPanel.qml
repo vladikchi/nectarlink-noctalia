@@ -143,6 +143,15 @@ Item {
                 text: qsTr("Pair nearby instead")
                 onClicked: panel.showNearby = true
             }
+            // For phones where installing from a browser is blocked, or simply easier.
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                variant: "text"
+                size: "sm"
+                iconPath: Icons.usb
+                text: qsTr("No app on the phone yet? Install it over USB")
+                onClicked: AppController.triggerHighlight("settings:install_phone")
+            }
         }
 
         // ---- Compact horizontal QR layout (used in Walkthrough Step 4) ----
@@ -232,7 +241,7 @@ Item {
                 wrapMode: Text.WordWrap
                 role: "body"
                 muted: true
-                text: qsTr("On your phone, open NectarLink and choose “Pair nearby”. It shows up here.")
+                text: qsTr("On your phone, open NectarLink and choose “Pair nearby”. It shows up here. To pair another PC, open this on that PC too.")
             }
             Repeater {
                 model: Pairing.nearby
@@ -347,6 +356,7 @@ Item {
                     case "rejected": return qsTr("Pairing was cancelled or the codes didn't match, so nothing was paired. Try again.")
                     case "declined": return qsTr("Pairing was declined on one of the devices.")
                     case "unreachable": return qsTr("Couldn't reach the phone. Make sure both devices are on the same network.")
+                    case "not_pairing": return qsTr("The other device isn't ready to pair. Open its pairing screen, then try again.")
                     case "expired": return qsTr("The code expired.")
                     default: return qsTr("Something went wrong. Try again.")
                     }

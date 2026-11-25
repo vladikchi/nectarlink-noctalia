@@ -1579,6 +1579,18 @@ pub(crate) async fn accept_stream(
             crate::mic::receive(shared, session.peer, send, recv).await;
         }
         Some(h)
+            if h.svc == nectarlink_protocol::messages::calls::AUDIO_SERVICE
+                && h.v == nectarlink_protocol::messages::calls::AUDIO_VERSION
+                && (h.op == nectarlink_protocol::messages::calls::OP_DOWNLINK
+                    || h.op == nectarlink_protocol::messages::calls::OP_UPLINK) =>
+        {
+            if h.op == nectarlink_protocol::messages::calls::OP_DOWNLINK {
+                crate::call_audio::receive_downlink(shared, session.peer, send, recv).await;
+            } else {
+                crate::call_audio::receive_uplink(shared, session.peer, send, recv).await;
+            }
+        }
+        Some(h)
             if h.svc == nectarlink_protocol::messages::webcam::SERVICE
                 && h.op == nectarlink_protocol::messages::webcam::OP_VIDEO
                 && h.v == nectarlink_protocol::messages::webcam::VERSION =>
@@ -2219,10 +2231,13 @@ pub(crate) fn free_space(path: &Path) -> Option<u64> {
     }
 }
 
-/// Moves `from` to `to`, copying when they're on different volumes.
-fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Moves `from` to `to`, copying when they're on different volumes. A copy
+/// is on disk before the original goes, and leaves nothing if it fails.
+pub(crate) fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_err() {
-        if let Err(e) = std::fs::copy(from, to) {
+        let copied = std::fs::copy(from, to)
+            .and_then(|_| std::fs::OpenOptions::new().write(true).open(to)?.sync_all());
+        if let Err(e) = copied {
             let _ = std::fs::remove_file(to);
             return Err(e);
         }

@@ -16,6 +16,7 @@ import androidx.core.app.NotificationManagerCompat
 import app.nectarlink.android.R
 import app.nectarlink.android.elevated.AppDisplay
 import app.nectarlink.android.elevated.Elevated
+import app.nectarlink.android.elevated.ElevatedDisplayStream
 import app.nectarlink.core.MirrorInputEvent
 import app.nectarlink.core.MirrorOptions
 import app.nectarlink.core.MirrorSendResult
@@ -26,7 +27,6 @@ import app.nectarlink.core.mirrorConfig
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.EOFException
-import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,12 +52,14 @@ class AppWindows(
     private class Window(
         val pc: String,
         val session: UInt,
-        val socket: Socket,
+        val socket: ElevatedDisplayStream,
         @Volatile var width: Int,
         @Volatile var height: Int,
         val dpi: Int,
         val maxSize: Int,
     ) {
+        /** The PC's zoom, in percent of [dpi]. */
+        @Volatile var zoom: Int = 100
         @Volatile var display: Int = -1
     }
 
@@ -76,10 +78,9 @@ class AppWindows(
         if (pkg == context.packageName) return false
         val maxSize = options.maxSize.toInt().coerceIn(320, 1920)
         val (width, height, dpi) = size(maxSize)
-        // A window's display starts asleep while the phone is, and its app
-        // never draws (#152); a display that's awake stays so while the
-        // window is open. Mirroring wakes the screen the same way.
-        Elevated.wakeScreen()
+        // The phone stays as it is: the helper gives the window a display
+        // that runs while the phone sleeps, or wakes the phone when it
+        // can't (see AppDisplay.createDisplay).
         // Straight off when it's meant to stay off, so it barely lights up.
         if (options.screenOff) Elevated.setScreenOff(true)
         val socket = Elevated.openApp(pkg, width, height, dpi, options.bitrate.toInt(), options.fps.toInt()) ?: run {
@@ -104,7 +105,7 @@ class AppWindows(
     /** The helper's packets to the PC, until either side closes. */
     private fun forward(window: Window, stream: MirrorStream) {
         try {
-            val input = DataInputStream(window.socket.getInputStream().buffered(1 shl 16))
+            val input = DataInputStream(window.socket.inputStream.buffered(1 shl 16))
             while (true) {
                 val length = input.readInt()
                 if (length < 9 || length > MAX_PACKET) return
@@ -157,32 +158,23 @@ class AppWindows(
     }
 
     private fun keyframe(window: Window) {
-        runCatching {
-            synchronized(window) {
-                window.socket.getOutputStream().apply {
-                    write("K\n".toByteArray())
-                    flush()
-                }
-            }
-        }
+        window.socket.requestKeyframe()
     }
 
-    /** The PC resized an app window: fit to encoder limits and tell the helper. */
-    fun resize(pc: String, session: UInt, width: Int, height: Int) {
+    /**
+     * The PC resized an app window: its own size, fit to encoder limits, so
+     * the picture fills a window of any shape, at the PC's [zoom] (percent
+     * of the window's usual density); tell the helper.
+     */
+    fun resize(pc: String, session: UInt, width: Int, height: Int, zoom: Int) {
         val window = windows[pc to session] ?: return
-        val (phoneW, phoneH) = screen()
-        val (newW, newH) = WindowShape.fit(width, height, window.maxSize, phoneW, phoneH)
-        if (newW == window.width && newH == window.height) return
+        val (newW, newH) = WindowShape.exact(width, height, window.maxSize)
+        if (newW == window.width && newH == window.height && zoom == window.zoom) return
         window.width = newW
         window.height = newH
-        runCatching {
-            synchronized(window) {
-                window.socket.getOutputStream().apply {
-                    write("R $newW $newH ${window.dpi}\n".toByteArray())
-                    flush()
-                }
-            }
-        }
+        window.zoom = zoom
+        val dpi = (window.dpi * zoom / 100).coerceIn(72, 1000)
+        window.socket.resize(newW, newH, dpi)
     }
 
     /** The display a PC's window runs on, once it has one. */

@@ -8,7 +8,7 @@
 //! reads (`CF_CALLBACK_TYPE_FETCH_DATA`). Renames, deletes, and new or modified
 //! files dropped into the sync root are forwarded to the phone.
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod imp {
 
     #![allow(unsafe_code)]
@@ -89,9 +89,31 @@ mod imp {
     #[cfg(windows)]
     const PROVIDER_PREFIX: &str = "Nectarlink!";
 
+    /// Whether this PC has the Cloud Files API. Some trimmed Windows builds
+    /// remove `cldapi.dll`, so build.rs delay-loads it: without it the phone
+    /// folders stay off and the rest of the app still starts.
+    #[cfg(windows)]
+    fn cloud_files_available() -> bool {
+        use windows::{
+            Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
+            core::w,
+        };
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            // SAFETY: loads a system DLL by name from System32 only; it stays
+            // loaded for the delay-load stubs to use.
+            let found =
+                unsafe { LoadLibraryExW(w!("cldapi.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.is_ok();
+            if !found {
+                tracing::warn!("cldapi.dll is missing from this Windows install; phone folders are off");
+            }
+            found
+        })
+    }
+
     /// Difference between Windows FILETIME epoch (1601-01-01) and Unix epoch
     /// (1970-01-01) in 100-nanosecond intervals.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
 
     /// Cloud file network unavailable NTSTATUS (`STATUS_CLOUD_FILE_NETWORK_UNAVAILABLE`).
@@ -155,6 +177,9 @@ mod imp {
     /// Phones whose folder couldn't be registered, and when to try again.
     #[cfg(windows)]
     static FAILED: Mutex<Option<HashMap<DeviceId, RetryLater>>> = Mutex::new(None);
+    /// Phones turned off whose folder was already cleared (by folder name).
+    #[cfg(windows)]
+    static CLEARED: Mutex<Option<HashMap<DeviceId, String>>> = Mutex::new(None);
 
     #[cfg(windows)]
     fn intern_device_id(device: DeviceId) -> *const c_void {
@@ -178,6 +203,9 @@ mod imp {
     /// unregister File Explorer sync roots.
     #[cfg(windows)]
     pub fn start() {
+        if !cloud_files_available() {
+            return;
+        }
         {
             let mut map = active_roots();
             if map.is_none() {
@@ -194,7 +222,7 @@ mod imp {
         sync();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn start() {
         win::storage::start();
     }
@@ -202,6 +230,9 @@ mod imp {
     /// Triggers a reconciliation of active sync roots (e.g. after a device toggle changes).
     #[cfg(windows)]
     pub fn sync() {
+        if !cloud_files_available() {
+            return;
+        }
         let host = core_host::host();
         let Some(node) = core_host::node() else { return };
         let ready = host.hub.read(|s| matches!(s.status, Some(CoreStatus::Ready { .. })));
@@ -270,7 +301,7 @@ mod imp {
         links.get_or_insert_with(HashMap::new).insert(device, online) != Some(online)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn sync() {
         win::storage::sync();
     }
@@ -278,6 +309,9 @@ mod imp {
     /// Handles core events (`StorageChanged`, `DeviceRemoved`, `LinkChanged`).
     #[cfg(windows)]
     pub fn on_event(event: &NodeEvent) {
+        if !cloud_files_available() {
+            return;
+        }
         match event {
             NodeEvent::DeviceRemoved(device) => {
                 let device = *device;
@@ -307,7 +341,7 @@ mod imp {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn on_event(event: &NodeEvent) {
         win::storage::on_event(event);
     }
@@ -324,7 +358,7 @@ mod imp {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn shutdown() {
         win::storage::shutdown();
     }
@@ -361,7 +395,7 @@ mod imp {
         });
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn unregister_all() {
         win::storage::unregister_all();
     }
@@ -372,7 +406,7 @@ mod imp {
         if let Some(active) = get_active_root(&device) {
             return Some(active.root_path.clone());
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(path) = win::storage::mounted_path_for(&device) {
             return Some(path);
         }
@@ -411,7 +445,7 @@ mod imp {
         {
             win::shell::run(Path::new("explorer.exe"), &format!("\"{}\"", path.display()))
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             win::shell::open_folder(&path)
         }
@@ -450,7 +484,7 @@ mod imp {
 
     /// Converts a Unix timestamp in milliseconds to Windows FILETIME 100ns ticks
     /// since 1601-01-01.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn unix_ms_to_filetime_ticks(unix_ms: i64) -> i64 {
         EPOCH_DIFF_100NS.saturating_add(unix_ms.max(0).saturating_mul(10_000))
     }
@@ -464,7 +498,7 @@ mod imp {
     /// Computes the slash-separated relative path inside `root_path` from a full
     /// local path (`""` for the sync root itself). Returns `None` if `full_path` is
     /// not inside `root_path`.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn relative_path_under_root(root_path: &Path, full_path: &Path) -> Option<String> {
         let root_norm = normalize_win_path(root_path);
         let full_norm = normalize_win_path(full_path);
@@ -489,7 +523,7 @@ mod imp {
     /// minute, then twice as long each time up to half an hour. A new name
     /// or folder is worth trying at once.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     struct RetryLater {
         name: String,
         folder: String,
@@ -497,7 +531,7 @@ mod imp {
         delay: std::time::Duration,
     }
 
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     impl RetryLater {
         const FIRST: std::time::Duration = std::time::Duration::from_secs(60);
         const MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -526,7 +560,7 @@ mod imp {
         }
     }
 
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn normalize_win_path(path: &Path) -> String {
         let s = path.to_string_lossy();
         let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
@@ -535,9 +569,16 @@ mod imp {
 
     #[cfg(windows)]
     fn reconcile(desired: &[(DeviceId, String, String, bool)], disabled: &[(DeviceId, String)]) {
-        // Unregister any disabled devices that belong to this instance.
+        // Unregister any disabled devices that belong to this instance. Once
+        // cleared, a phone that stays off isn't unregistered and walked again
+        // on every pass: each one did a Windows call and a folder walk.
         for (id, folder) in disabled {
-            remove_device_root(*id, Some(folder));
+            let active = get_active_root(id).is_some();
+            let cleared = lock(&CLEARED).get_or_insert_with(HashMap::new).get(id) == Some(folder);
+            if active || !cleared {
+                remove_device_root(*id, Some(folder));
+                lock(&CLEARED).get_or_insert_with(HashMap::new).insert(*id, folder.clone());
+            }
             // Turned off: turning it on again tries right away.
             lock(&FAILED).get_or_insert_with(HashMap::new).remove(id);
         }
@@ -582,6 +623,8 @@ mod imp {
             match register_and_connect(*id, name, folder, *online) {
                 Ok(()) => {
                     lock(&FAILED).get_or_insert_with(HashMap::new).remove(id);
+                    // Registered again: turning it off later clears it again.
+                    lock(&CLEARED).get_or_insert_with(HashMap::new).remove(id);
                 }
                 Err(e) => {
                     let mut failed = lock(&FAILED);
@@ -1909,7 +1952,7 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     #![allow(dead_code)]
 

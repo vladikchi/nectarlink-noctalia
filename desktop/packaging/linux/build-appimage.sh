@@ -34,11 +34,13 @@ fi
 BIN_PATH="${BIN_PATH:-${REPO_ROOT}/target/release/nectarlink-desktop}"
 if [[ ! -f "${BIN_PATH}" ]]; then
     echo "Building nectarlink-desktop (release)..."
-    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop)
+    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop -p nectarlink-mcp)
 fi
 
 STAGE_DIR="$(mktemp -d -t nectarlink-appimage-XXXXXX)"
 trap 'rm -rf "${STAGE_DIR}"' EXIT
+
+bash "${SCRIPT_DIR}/build-translations.sh" "${STAGE_DIR}/translations"
 
 APPDIR="${STAGE_DIR}/NectarLink.AppDir"
 mkdir -p \
@@ -52,13 +54,17 @@ mkdir -p \
     "${APPDIR}/usr/share/icons/hicolor/scalable/apps"
 
 install -m 0755 "${BIN_PATH}" "${APPDIR}/usr/bin/nectarlink-desktop"
+AGENT_PATH="${AGENT_PATH:-$(dirname "${BIN_PATH}")/nectarlink-agent}"
+[[ ! -f "${AGENT_PATH}" ]] || install -m 0755 "${AGENT_PATH}" "${APPDIR}/usr/bin/nectarlink-agent"
 for adapter in "$(dirname "${BIN_PATH}")"/libnectarlink-video-ffmpeg*.so; do
     [[ ! -f "${adapter}" ]] || install -m 0755 "${adapter}" "${APPDIR}/usr/bin/"
 done
 
-# shellcheck source=stage-translations.sh
-source "${SCRIPT_DIR}/stage-translations.sh"
-stage_translations "$(dirname "${BIN_PATH}")" "${DESKTOP_DIR}/i18n" "${APPDIR}/usr/share/nectarlink"
+for qm in "${STAGE_DIR}"/translations/nectarlink_*.qm; do
+    if [[ -f "${qm}" ]]; then
+        install -m 0644 "${qm}" "${APPDIR}/usr/share/nectarlink/$(basename "${qm}")"
+    fi
+done
 
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${APPDIR}/usr/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${APPDIR}/nectarlink.desktop"

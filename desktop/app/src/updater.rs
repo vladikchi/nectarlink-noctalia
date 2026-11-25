@@ -92,6 +92,9 @@ impl Update {
 pub const TASK: &str = "Nectarlink Update";
 /// What the task runs: `nectarlink-desktop.exe --update-service`.
 pub const SERVICE_ARG: &str = "--update-service";
+/// What the administrator prompt runs when there's no task (Windows):
+/// `nectarlink-desktop.exe --update-elevated <channel>`.
+pub const ELEVATED_ARG: &str = "--update-elevated";
 /// How long nobody may have used the PC before an update installs by itself.
 const QUIET_FOR: Duration = Duration::from_secs(10 * 60);
 /// While an update waits for a quiet moment, how often to look for one.
@@ -136,6 +139,18 @@ pub fn set_channel(channel: Channel) {
     if changed {
         check_soon();
     }
+}
+
+/// Whether the installer's update task installs updates on this PC, for
+/// every account on it (asked once).
+pub fn task_installs() -> bool {
+    static REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REGISTERED.get_or_init(task_registered)
+}
+
+/// The channel the update task was told, if any, without asking whether the task is there.
+pub fn machine_channel() -> Option<Channel> {
+    read_service_channel()
 }
 
 /// Where the app tells the update task which channel to follow.
@@ -218,16 +233,33 @@ pub fn set_auto_install(on: bool) {
 }
 
 /// Whether this copy updates itself (an installed one, not a build run
-/// from its folder).
+/// from its folder). Not on macOS yet: nothing there picks a Mac build or
+/// installs one, so a check would always say it's up to date.
 pub fn can_update() -> bool {
-    // The upstream channel does not carry this fork's Noctalia integration.
-    !cfg!(target_os = "linux") && std::env::current_exe().is_ok_and(|exe| autostart::is_installed(&exe))
+    // The upstream channel does not carry the Noctalia integration.
+    cfg!(windows) && std::env::current_exe().is_ok_and(|exe| autostart::is_installed(&exe))
+}
+
+/// Whether an update can also install by itself at a quiet moment, with no
+/// one to answer a prompt: only on Windows, through the scheduled task the
+/// installer sets up. Linux updates ask for the password each time.
+pub fn can_install_unattended() -> bool {
+    cfg!(windows) && can_update()
 }
 
 /// Checks soon after startup, then on the channel's schedule ([`check_every`])
 /// or sooner when asked ([`check_soon`]), while automatic checks are on.
 pub fn start() {
     if !can_update() {
+        // No update checks here, but the daily count and a report that
+        // couldn't be sent still go.
+        let _ = std::thread::Builder::new().name("reports".into()).spawn(|| {
+            std::thread::sleep(FIRST_CHECK);
+            loop {
+                crate::bridge::report::follow_up();
+                std::thread::sleep(Duration::from_secs(6 * 3600));
+            }
+        });
         return;
     }
     let spawned = std::thread::Builder::new().name("updates".into()).spawn(|| {
@@ -237,6 +269,7 @@ pub fn start() {
             if AUTO.load(Ordering::Relaxed) {
                 check_now(false);
             }
+            crate::bridge::report::follow_up();
             // While an update waits to install itself, look for a quiet moment.
             let next_check = checked + check_every();
             while let Some(left) = next_check.checked_duration_since(Instant::now()) {
@@ -389,6 +422,16 @@ fn latest_for(channel: Channel, current: &str) -> Result<Option<Update>, String>
     Ok(newer_release(release, current))
 }
 
+/// Where an update's notes are: the project's page on GitHub, and nowhere
+/// else, whatever the feed or the API says.
+fn notes_url(given: &str) -> String {
+    const PROJECT: &str = "https://github.com/thtbee/nectarlink/";
+    let safe = given.starts_with(PROJECT)
+        && given.len() <= 512
+        && given.chars().all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '<' | '>' | '\\'));
+    if safe { given.to_owned() } else { format!("{PROJECT}releases") }
+}
+
 /// The feed's build as an update for this install, if it's newer and has
 /// a file for this kind of install.
 fn feed_update(found: &feed::Feed, current: &str) -> Option<Update> {
@@ -401,7 +444,7 @@ fn feed_update(found: &feed::Feed, current: &str) -> Option<Update> {
     Some(Update {
         version: found.version.clone(),
         name: found.name.clone(),
-        notes_url: found.notes.clone(),
+        notes_url: notes_url(&found.notes),
         installer_url: file.url.clone(),
         installer_name: file.name.clone(),
         sums_url: None,
@@ -560,7 +603,7 @@ fn newer_release_for(release: Release, current: &str, suffix: &str) -> Option<Up
     Some(Update {
         version,
         name: None,
-        notes_url: release.html_url,
+        notes_url: notes_url(&release.html_url),
         installer_url: installer.browser_download_url.clone(),
         installer_name: installer.name.clone(),
         sums_url: Some(sums.browser_download_url.clone()),
@@ -901,6 +944,7 @@ pub fn run_service() -> ExitCode {
     let log_path =
         std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("update.log")));
     let log = |message: &str| {
+        // log-ok: the update service's own fixed lines, also written to update.log.
         tracing::info!("{message}");
         if let Some(path) = &log_path {
             let line = format!("{} {message}\n", unix_seconds_now());
@@ -914,6 +958,26 @@ pub fn run_service() -> ExitCode {
     if let Some(channel) = read_service_channel() {
         *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(channel);
     }
+    install_latest(&log, false)
+}
+
+/// After the administrator prompt, when there's no update task (Windows):
+/// does what the task does, on the channel the user follows, and opens the
+/// new version once it's installed. The app only asks; this copy of
+/// NectarLink, installed where only administrators can write, finds the
+/// release, and checks and runs a copy that only administrators can change.
+pub fn run_elevated(channel: Option<&str>) -> ExitCode {
+    if let Some(channel) = channel.and_then(Channel::parse) {
+        *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(channel);
+    }
+    let log = |message: &str| tracing::info!(step = %message, "update");
+    install_latest(&log, true)
+}
+
+/// Installs the latest release if it's newer than this copy, from a copy in
+/// [`service_dir`] checked there; with `open_after`, the installer opens the
+/// new version (`/RUN`).
+fn install_latest(log: &dyn Fn(&str), open_after: bool) -> ExitCode {
     let update = match latest() {
         Ok(Some(update)) => update,
         Ok(None) => {
@@ -944,11 +1008,15 @@ pub fn run_service() -> ExitCode {
     let spawned = {
         let mut cmd = std::process::Command::new(&path);
         cmd.arg("/S");
+        if open_after {
+            cmd.arg("/RUN");
+        }
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
         cmd.spawn()
     };
     #[cfg(not(windows))]
     let spawned = {
+        let _ = open_after;
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         if name.ends_with(".deb") {
             std::process::Command::new("sh")
@@ -1075,33 +1143,27 @@ fn download_verified(update: &Update, dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The installer with Windows' administrator prompt (no update task): a
-/// fresh copy of the download in this user's temp folder, checked again, so
-/// what runs is what was checked.
+/// The installer with Windows' administrator prompt (no update task). The
+/// prompt is for this program ([`run_elevated`]), not the download: a file
+/// in a folder this account can change could be swapped between being
+/// checked and being run, so it's checked and run only once elevated, from
+/// a copy only administrators can change. The download staged here is
+/// reused when it matches.
 #[cfg(windows)]
-fn install_with_prompt(update: &Update, staged: &Path) -> Result<(), String> {
+fn install_with_prompt(_update: &Update, _staged: &Path) -> Result<(), String> {
     let failed = |e: String| {
         tracing::warn!(error = e, "update failed");
         tr!("Updater", "The update couldn't be started. Try again.")
     };
-    let expected = expected_hash(update).map_err(|e| e.for_user())?;
-    let dir = std::env::temp_dir().join("Nectarlink update");
-    let path: PathBuf = dir.join(&update.installer_name);
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        })
-        .and_then(|()| std::fs::copy(staged, &path).map(|_| ()))
-        .map_err(|e| failed(e.to_string()))?;
-    if sha256_file(&path).map_err(|e| failed(e.to_string()))? != expected {
-        let _ = std::fs::remove_file(&path);
-        return Err(StageError::Damaged.for_user());
+    let exe = std::env::current_exe().map_err(|e| failed(e.to_string()))?;
+    // The installer closes this copy itself, then opens the new version.
+    match crate::win::elevated::start(&exe, &format!("{ELEVATED_ARG} {}", channel().as_str())) {
+        Ok(_) => Ok(()),
+        Err(crate::win::elevated::Error::Declined) => {
+            Err(failed("the administrator prompt was declined".into()))
+        }
+        Err(crate::win::elevated::Error::Other(e)) => Err(failed(e)),
     }
-    // Silent, then opens the new version (/RUN); Windows asks for
-    // permission first. The installer closes this copy itself.
-    crate::win::shell::run(&path, "/S /RUN").map_err(failed)?;
-    Ok(())
 }
 
 /// Root-executed shell script that copies a user-staged `.deb` into a
@@ -1158,6 +1220,25 @@ set -- \"$dir\"/Nectarlink-*/install.sh\n\
 /// Starts the new version once this one has quit. If that can't be arranged
 /// the app stays open (it would otherwise just disappear) and says the update
 /// is in place.
+/// The path this app was started from, to start the new version from after a
+/// package update. Linux adds " (deleted)" once the file there was replaced (by
+/// an earlier update while this kept running); the path itself is still right.
+#[cfg(target_os = "linux")]
+fn installed_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(strip_deleted(exe))
+}
+
+#[cfg(target_os = "linux")]
+fn strip_deleted(exe: std::path::PathBuf) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = exe.as_os_str().as_bytes();
+    match bytes.strip_suffix(b" (deleted)") {
+        Some(path) => std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+        None => exe,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn relaunch_after_install(exe: &Path, version: &str) -> Result<(), String> {
     spawn_relauncher(exe, version, true).map_err(|e| {
@@ -1200,6 +1281,9 @@ fn install_with_prompt(update: &Update, staged: &Path) -> Result<(), String> {
 
     if staged_name.ends_with(".deb") {
         let staged_str = staged.to_string_lossy();
+        // Before installing: once the package replaces the binary, Linux names
+        // the running one "<path> (deleted)", which can't be started.
+        let exe = installed_exe();
         let code = crate::win::elevated::run_elevated(
             Path::new("sh"),
             &["-e", "-c", PRIVILEGED_DEB_INSTALL_SCRIPT, "sh", &staged_str, &expected],
@@ -1208,7 +1292,7 @@ fn install_with_prompt(update: &Update, staged: &Path) -> Result<(), String> {
         if code != 0 {
             return Err(failed(format!("privileged .deb install exited with status {code}")));
         }
-        if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = exe {
             relaunch_after_install(&exe, &update.version)?;
         }
         crate::bridge::app::request_quit();
@@ -1217,6 +1301,9 @@ fn install_with_prompt(update: &Update, staged: &Path) -> Result<(), String> {
 
     if staged_name.ends_with(".rpm") {
         let staged_str = staged.to_string_lossy();
+        // Before installing: once the package replaces the binary, Linux names
+        // the running one "<path> (deleted)", which can't be started.
+        let exe = installed_exe();
         let code = crate::win::elevated::run_elevated(
             Path::new("sh"),
             &["-e", "-c", PRIVILEGED_RPM_INSTALL_SCRIPT, "sh", &staged_str, &expected],
@@ -1225,7 +1312,7 @@ fn install_with_prompt(update: &Update, staged: &Path) -> Result<(), String> {
         if code != 0 {
             return Err(failed(format!("privileged .rpm install exited with status {code}")));
         }
-        if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = exe {
             relaunch_after_install(&exe, &update.version)?;
         }
         crate::bridge::app::request_quit();
@@ -1379,7 +1466,37 @@ impl Clone for Release {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn notes_only_open_on_the_projects_page() {
+        let ok = "https://github.com/thtbee/nectarlink/releases/tag/v0.1.6";
+        assert_eq!(notes_url(ok), ok);
+        for bad in [
+            "https://evil.example/thtbee/nectarlink",
+            "https://github.com/thtbee/nectarlink.evil.example/x",
+            "http://github.com/thtbee/nectarlink/releases",
+            "https://github.com/thtbee/nectarlink/releases\" onclick",
+            "file:///C:/Windows/System32/calc.exe",
+        ] {
+            assert_eq!(notes_url(bad), "https://github.com/thtbee/nectarlink/releases", "{bad}");
+        }
+    }
+
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_binary_is_started_again_from_its_own_path() {
+        use std::path::PathBuf;
+        assert_eq!(
+            strip_deleted(PathBuf::from("/usr/bin/nectarlink-desktop (deleted)")),
+            PathBuf::from("/usr/bin/nectarlink-desktop")
+        );
+        assert_eq!(
+            strip_deleted(PathBuf::from("/usr/bin/nectarlink-desktop")),
+            PathBuf::from("/usr/bin/nectarlink-desktop")
+        );
+    }
 
     fn release(tag: &str) -> Release {
         Release {
@@ -1412,6 +1529,31 @@ mod tests {
                     name: "nectarlink-9.0.0-1.x86_64.rpm".into(),
                     browser_download_url:
                         "https://github.com/thtbee/nectarlink/releases/download/v9/rpm-x86_64".into(),
+                },
+                Asset {
+                    name: "Nectarlink-9.0.0-aarch64.AppImage".into(),
+                    browser_download_url:
+                        "https://github.com/thtbee/nectarlink/releases/download/v9/appimage-arm64".into(),
+                },
+                Asset {
+                    name: "nectarlink_9.0.0_arm64.deb".into(),
+                    browser_download_url:
+                        "https://github.com/thtbee/nectarlink/releases/download/v9/deb-arm64".into(),
+                },
+                Asset {
+                    name: "nectarlink-9.0.0-1.aarch64.rpm".into(),
+                    browser_download_url:
+                        "https://github.com/thtbee/nectarlink/releases/download/v9/rpm-aarch64".into(),
+                },
+                Asset {
+                    name: "Nectarlink-9.0.0-linux-x86_64.tar.gz".into(),
+                    browser_download_url:
+                        "https://github.com/thtbee/nectarlink/releases/download/v9/tarball-x64".into(),
+                },
+                Asset {
+                    name: "Nectarlink-9.0.0-linux-aarch64.tar.gz".into(),
+                    browser_download_url:
+                        "https://github.com/thtbee/nectarlink/releases/download/v9/tarball-arm64".into(),
                 },
                 Asset {
                     name: "SHA256SUMS.txt".into(),
@@ -1540,15 +1682,33 @@ mod tests {
         );
         #[cfg(target_os = "linux")]
         {
+            let (appimage_name, deb_name, rpm_name, tarball_name) = if cfg!(target_arch = "aarch64") {
+                (
+                    "Nectarlink-9.0.0-aarch64.AppImage",
+                    "nectarlink_9.0.0_arm64.deb",
+                    "nectarlink-9.0.0-1.aarch64.rpm",
+                    "Nectarlink-9.0.0-linux-aarch64.tar.gz",
+                )
+            } else {
+                (
+                    "Nectarlink-9.0.0-x86_64.AppImage",
+                    "nectarlink_9.0.0_amd64.deb",
+                    "nectarlink-9.0.0-1.x86_64.rpm",
+                    "Nectarlink-9.0.0-linux-x86_64.tar.gz",
+                )
+            };
             let picked_appimage = newer_release_linux(release("v9.0.0"), "0.0.1", true).unwrap();
-            assert!(picked_appimage.installer_name.ends_with(".AppImage"));
+            assert_eq!(picked_appimage.installer_name, appimage_name);
             let picked_deb = newer_release_linux(release("v9.0.0"), "0.0.1", false).unwrap();
-            assert!(picked_deb.installer_name.ends_with(".deb"));
+            assert_eq!(picked_deb.installer_name, deb_name);
             assert!(PRIVILEGED_DEB_INSTALL_SCRIPT.contains("install -d -m 0700 -o 0 -g 0"));
             assert!(PRIVILEGED_DEB_INSTALL_SCRIPT.contains("sha256sum -c --status -"));
             assert!(PRIVILEGED_DEB_INSTALL_SCRIPT.contains("dpkg -i -- \"$dst\""));
             let rpm = newer_release_linux_kind(release("v9.0.0"), "0.0.1", LinuxInstallKind::Rpm).unwrap();
-            assert_eq!(rpm.installer_name, "nectarlink-9.0.0-1.x86_64.rpm");
+            assert_eq!(rpm.installer_name, rpm_name);
+            let tarball =
+                newer_release_linux_kind(release("v9.0.0"), "0.0.1", LinuxInstallKind::Tarball).unwrap();
+            assert_eq!(tarball.installer_name, tarball_name);
             assert!(PRIVILEGED_RPM_INSTALL_SCRIPT.contains("sha256sum -c --status -"));
             assert!(PRIVILEGED_RPM_INSTALL_SCRIPT.contains("dnf install -y --nogpgcheck -- \"$1\""));
             // An RPM install never falls back to a tarball, a second copy in /opt.

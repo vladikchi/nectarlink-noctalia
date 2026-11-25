@@ -48,6 +48,8 @@ class NectarlinkApplication : Application(), DefaultLifecycleObserver {
 
     override fun onCreate() {
         super<Application>.onCreate()
+        // First, so a crash anywhere after is kept.
+        app.nectarlink.android.diag.Crashes.install(this)
         // Before the core starts: its network code reads the phone's DNS servers.
         app.nectarlink.android.core.AndroidContext.install(this)
         // Before Elevated: it waits while paused for a banking app.
@@ -55,9 +57,16 @@ class NectarlinkApplication : Application(), DefaultLifecycleObserver {
         BankingPause.restoreIfStranded(this)
         // The media volume, if the app stopped while the phone's sound played on the PC.
         app.nectarlink.android.mirror.PhoneQuiet.end(this)
+        // The call volume, if it stopped while a call's sound was on a PC (#133).
+        app.nectarlink.android.calls.CallEarpiece.end(this)
         Elevated.init(this)
+        // Assist only while a PC uses the phone, if the user chose that (#400).
+        app.nectarlink.android.banking.AssistOnDemand.init(this)
         // What the phone offers PCs follows Elevated starting and stopping.
-        Elevated.onChange = { core.refreshNotificationAccess() }
+        Elevated.onChange = {
+            core.refreshNotificationAccess()
+            app.nectarlink.android.banking.AssistOnDemand.reconcile(this)
+        }
         Elevated.onClipboardChanged = { text, html -> core.onElevatedClipboardChanged(text, html) }
         Elevated.onSensitiveCopied = { text -> core.onElevatedSensitiveCopied(text) }
         Elevated.onInputBlocked = { core.onElevatedInputBlocked() }
@@ -87,6 +96,8 @@ class NectarlinkApplication : Application(), DefaultLifecycleObserver {
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        // Android may end the app without warning from here on.
+        runCatching { app.nectarlink.core.flushHealth() }
         if (!Preferences.isBackgroundServiceEnabled(this)) {
             scheduleStop()
         }

@@ -176,6 +176,27 @@ pub fn copy_otp(code: &str) {
     }
 }
 
+/// Copies a notification's text, with its title on the line before when
+/// there is one (#526).
+pub fn copy_text(title: &str, text: &str) {
+    let copied = notification_text(title, text);
+    if copied.is_empty() {
+        return;
+    }
+    if crate::win::clipboard::write(&copied).is_ok() {
+        crate::bridge::app::show_message(tr!("Notifications", "Copied"));
+    }
+}
+
+/// `title` and `text` as copied: each trimmed, the title on its own line.
+pub(crate) fn notification_text(title: &str, text: &str) -> String {
+    match (title.trim(), text.trim()) {
+        ("", text) => text.to_owned(),
+        (title, "") => title.to_owned(),
+        (title, text) => format!("{title}\n{text}"),
+    }
+}
+
 /// Automatically copies `code` when the "Copy codes automatically" setting is
 /// enabled, deduplicating identical codes within 10 seconds.
 pub fn maybe_auto_copy_otp(code: &str) {
@@ -200,8 +221,10 @@ pub fn maybe_auto_copy_otp(code: &str) {
     copy_otp(trimmed);
 }
 
-/// Pictures from notifications, kept for a couple of days (history lasts one).
-const KEEP_IMAGES: std::time::Duration = std::time::Duration::from_secs(2 * 24 * 3600);
+/// Pictures from notifications, kept a day longer than their history lasts.
+fn keep_images() -> std::time::Duration {
+    std::time::Duration::from_secs((u64::from(crate::state::history_days()) + 1) * 24 * 3600)
+}
 
 pub(crate) fn images_dir() -> std::path::PathBuf {
     core_host::host().data_dir.join("cache").join("images")
@@ -250,7 +273,7 @@ pub fn prune_images() {
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
-            .is_ok_and(|t| now.duration_since(t).unwrap_or_default() > KEEP_IMAGES);
+            .is_ok_and(|t| now.duration_since(t).unwrap_or_default() > keep_images());
         if old {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -531,6 +554,16 @@ pub fn on_toast(event: ToastEvent) {
             return;
         }
         ToastEvent::Dismissed { device, .. } if device == crate::clipboard::TOAST_GROUP => return,
+        // A phone asks for this PC's log: Share, or not.
+        ToastEvent::Action { device, key, action } if device == crate::report_requests::TOAST_GROUP => {
+            return crate::report_requests::on_toast(key, Some(action.as_str()));
+        }
+        ToastEvent::Dismissed { device, key } if device == crate::report_requests::TOAST_GROUP => {
+            return crate::report_requests::on_toast(key, None);
+        }
+        ToastEvent::Opened { device, key } if device == crate::report_requests::TOAST_GROUP => {
+            return crate::report_requests::on_opened(key);
+        }
         _ => {}
     }
     match event {
@@ -656,6 +689,14 @@ mod tests {
     use nectarlink_core::NotificationLive;
 
     use super::*;
+
+    #[test]
+    fn copies_the_text_with_or_without_its_title() {
+        assert_eq!(notification_text("", " See you at 6 "), "See you at 6");
+        assert_eq!(notification_text("Mum", "See you at 6"), "Mum\nSee you at 6");
+        assert_eq!(notification_text(" Mum ", ""), "Mum");
+        assert_eq!(notification_text("  ", "  "), "");
+    }
 
     #[test]
     fn phones_are_told_only_when_the_hold_changes() {

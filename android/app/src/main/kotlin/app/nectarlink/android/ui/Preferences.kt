@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.core.content.edit
 import app.nectarlink.android.ui.theme.Appearance
 import app.nectarlink.android.ui.theme.Tokens
+import app.nectarlink.android.ui.theme.normalizeHomeCardHex
 import app.nectarlink.android.ui.walkthrough.WalkthroughPersistence
 import app.nectarlink.android.ui.walkthrough.WalkthroughStep
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +27,15 @@ class Preferences(context: Context) {
 
     private val _volumeKeysControlPc = MutableStateFlow(prefs.getBoolean(VOLUME_KEYS_CONTROL_PC, true))
     val volumeKeysControlPc: StateFlow<Boolean> = _volumeKeysControlPc.asStateFlow()
+
+    private val _pcSoundBufferMs = MutableStateFlow(pcSoundBufferMs(context))
+    val pcSoundBufferMs: StateFlow<Int> = _pcSoundBufferMs.asStateFlow()
+
+    private val _quietWhileUsingPc = MutableStateFlow(prefs.getBoolean(QUIET_WHILE_USING_PC, false))
+    val quietWhileUsingPc: StateFlow<Boolean> = _quietWhileUsingPc.asStateFlow()
+
+    private val _hideFromRecents = MutableStateFlow(prefs.getBoolean(HIDE_FROM_RECENTS, false))
+    val hideFromRecents: StateFlow<Boolean> = _hideFromRecents.asStateFlow()
 
     private val _backgroundServiceEnabled = MutableStateFlow(prefs.getBoolean(BACKGROUND_SERVICE_ENABLED, true))
     val backgroundServiceEnabled: StateFlow<Boolean> = _backgroundServiceEnabled.asStateFlow()
@@ -56,6 +66,47 @@ class Preferences(context: Context) {
         _hiveInviteShown.value = false
     }
 
+    /**
+     * The card asking to come chat on Discord: armed by an update, at most
+     * once a month, ending after joining or after three answers
+     * ([CommunityInvite]). Never on a fresh install.
+     */
+    private val _communityInviteShown = MutableStateFlow(
+        prefs.getBoolean(COMMUNITY_ARMED, false) && !prefs.getBoolean(COMMUNITY_DONE, false),
+    )
+    val communityInviteShown: StateFlow<Boolean> = _communityInviteShown.asStateFlow()
+
+    /** When the app opens: once per version, after an update, arms the card if it's due. */
+    fun armCommunityInvite(updated: Boolean, now: Long = System.currentTimeMillis()) {
+        val version = app.nectarlink.android.BuildConfig.VERSION_CODE.toLong()
+        if (prefs.getLong(COMMUNITY_VERSION, -1L) == version) return
+        prefs.edit { putLong(COMMUNITY_VERSION, version) }
+        val due = updated && CommunityInvite.due(
+            done = prefs.getBoolean(COMMUNITY_DONE, false),
+            armed = prefs.getBoolean(COMMUNITY_ARMED, false),
+            count = prefs.getInt(COMMUNITY_COUNT, 0),
+            lastAt = prefs.getLong(COMMUNITY_AT, 0L),
+            now = now,
+        )
+        if (!due) return
+        prefs.edit {
+            putBoolean(COMMUNITY_ARMED, true)
+            putLong(COMMUNITY_AT, now)
+        }
+        _communityInviteShown.value = true
+    }
+
+    /** Answered: joining ends it for good, and so does the third answer. */
+    fun answerCommunityInvite(joined: Boolean) {
+        val count = prefs.getInt(COMMUNITY_COUNT, 0) + 1
+        prefs.edit {
+            putBoolean(COMMUNITY_ARMED, false)
+            putInt(COMMUNITY_COUNT, count)
+            if (joined || count >= CommunityInvite.TIMES) putBoolean(COMMUNITY_DONE, true)
+        }
+        _communityInviteShown.value = false
+    }
+
     private val _walkthrough = MutableStateFlow(loadWalkthrough())
     val walkthrough: StateFlow<WalkthroughPersistence> = _walkthrough.asStateFlow()
 
@@ -68,6 +119,7 @@ class Preferences(context: Context) {
             dynamicColor = prefs.getBoolean(DYNAMIC, defaults.dynamicColor),
             amoled = prefs.getBoolean(AMOLED, defaults.amoled),
             combMotion = prefs.getBoolean(COMB_MOTION, defaults.combMotion),
+            homeCardSeed = prefs.getString(HOME_CARD_SEED, defaults.homeCardSeed),
         )
     }
 
@@ -92,6 +144,7 @@ class Preferences(context: Context) {
             putBoolean(DYNAMIC, next.dynamicColor)
             putBoolean(AMOLED, next.amoled)
             putBoolean(COMB_MOTION, next.combMotion)
+            putString(HOME_CARD_SEED, next.homeCardSeed)
         }
         _appearance.value = next
     }
@@ -114,6 +167,25 @@ class Preferences(context: Context) {
         prefs.edit { putBoolean(VOLUME_KEYS_CONTROL_PC, enabled) }
         _volumeKeysControlPc.value = enabled
         (appContext as app.nectarlink.android.NectarlinkApplication).core.pcMedia.volumeKeys(enabled)
+    }
+
+    fun updatePcSoundBufferMs(ms: Int) {
+        val value = ms.coerceIn(MIN_SOUND_BUFFER_MS, MAX_SOUND_BUFFER_MS)
+        prefs.edit { putInt(PC_SOUND_BUFFER_MS, value) }
+        _pcSoundBufferMs.value = value
+        (appContext as app.nectarlink.android.NectarlinkApplication).core.setPcSoundBufferMs(value)
+    }
+
+    fun updateQuietWhileUsingPc(enabled: Boolean) {
+        prefs.edit { putBoolean(QUIET_WHILE_USING_PC, enabled) }
+        _quietWhileUsingPc.value = enabled
+        app.nectarlink.android.notifications.NotificationListener.refreshHostHints()
+    }
+
+    fun updateHideFromRecents(hide: Boolean) {
+        prefs.edit { putBoolean(HIDE_FROM_RECENTS, hide) }
+        _hideFromRecents.value = hide
+        applyHideFromRecents(appContext, hide)
     }
 
     fun updateBackgroundServiceEnabled(enabled: Boolean) {
@@ -144,10 +216,21 @@ class Preferences(context: Context) {
         private const val DYNAMIC = "dynamic_color"
         private const val AMOLED = "amoled_black"
         private const val COMB_MOTION = "comb_motion"
+        private const val HOME_CARD_SEED = "home_card_seed"
         private const val HIVE_INVITE_ANSWERED = "hive_invite_answered_version"
+        private const val COMMUNITY_VERSION = "community_invite_version"
+        private const val COMMUNITY_ARMED = "community_invite_armed"
+        private const val COMMUNITY_DONE = "community_invite_done"
+        private const val COMMUNITY_COUNT = "community_invite_count"
+        private const val COMMUNITY_AT = "community_invite_at"
         private const val TOUCHPAD_SENSITIVITY = "touchpad_sensitivity"
         private const val SUGGEST_CLIPBOARD_ACTIONS = "suggest_clipboard_actions"
         private const val VOLUME_KEYS_CONTROL_PC = "volume_keys_control_pc"
+        private const val QUIET_WHILE_USING_PC = "quiet_while_using_pc"
+        private const val PC_SOUND_BUFFER_MS = "pc_sound_buffer_ms"
+        private const val MIN_SOUND_BUFFER_MS = 40
+        private const val MAX_SOUND_BUFFER_MS = 500
+        private const val HIDE_FROM_RECENTS = "hide_from_recents"
         internal const val BACKGROUND_SERVICE_ENABLED = "background_service_enabled"
         private const val AWAY_MODE = "away_mode"
         private const val WALKTHROUGH_COMPLETED = "walkthrough_completed"
@@ -164,6 +247,7 @@ class Preferences(context: Context) {
             dynamicColor: Boolean = true,
             amoled: Boolean = false,
             combMotion: Boolean = true,
+            homeCardSeed: String? = null,
         ): Appearance {
             val defaults = Appearance()
             val safeTheme = theme?.takeIf { it in VALID_THEMES } ?: defaults.theme
@@ -176,6 +260,7 @@ class Preferences(context: Context) {
                 dynamicColor = dynamicColor,
                 amoled = amoled,
                 combMotion = combMotion,
+                homeCardSeed = homeCardSeed?.takeIf { it in Tokens.bloomSeeds } ?: normalizeHomeCardHex(homeCardSeed),
             )
         }
 
@@ -187,6 +272,7 @@ class Preferences(context: Context) {
                 dynamicColor = appearance.dynamicColor,
                 amoled = appearance.amoled,
                 combMotion = appearance.combMotion,
+                homeCardSeed = appearance.homeCardSeed,
             )
 
         fun isSuggestClipboardActionsEnabled(context: Context): Boolean =
@@ -194,10 +280,46 @@ class Preferences(context: Context) {
                 .getSharedPreferences("appearance", Context.MODE_PRIVATE)
                 .getBoolean(SUGGEST_CLIPBOARD_ACTIONS, true)
 
+        /** How much of the PC's sound the phone holds before playing it, in ms (#321). */
+        fun pcSoundBufferMs(context: Context): Int =
+            context.applicationContext
+                .getSharedPreferences("appearance", Context.MODE_PRIVATE)
+                .getInt(PC_SOUND_BUFFER_MS, MIN_SOUND_BUFFER_MS)
+                .coerceIn(MIN_SOUND_BUFFER_MS, MAX_SOUND_BUFFER_MS)
+
         fun isVolumeKeysControlPcEnabled(context: Context): Boolean =
             context.applicationContext
                 .getSharedPreferences("appearance", Context.MODE_PRIVATE)
                 .getBoolean(VOLUME_KEYS_CONTROL_PC, true)
+
+        /**
+         * Whether the phone silences its own notification sounds and vibration
+         * while a paired PC that shows them is in use. Off by default: the
+         * phone sounds as it always does (#384, #407).
+         */
+        fun isQuietWhileUsingPc(context: Context): Boolean =
+            context.applicationContext
+                .getSharedPreferences("appearance", Context.MODE_PRIVATE)
+                .getBoolean(QUIET_WHILE_USING_PC, false)
+
+        /**
+         * Keeps NectarLink's tasks out of the recent apps screen, or puts them
+         * back (#409): where clearing recent apps also stops what's running,
+         * NectarLink then can't be closed by accident.
+         */
+        fun applyHideFromRecents(context: Context, hide: Boolean) {
+            runCatching {
+                context.getSystemService(android.app.ActivityManager::class.java)?.appTasks?.forEach {
+                    it.setExcludeFromRecents(hide)
+                }
+            }
+        }
+
+        /** Whether NectarLink keeps out of the recent apps screen (#409). */
+        fun isHideFromRecents(context: Context): Boolean =
+            context.applicationContext
+                .getSharedPreferences("appearance", Context.MODE_PRIVATE)
+                .getBoolean(HIDE_FROM_RECENTS, false)
 
         fun isAwayModeEnabled(context: Context): Boolean =
             context.applicationContext

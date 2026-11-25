@@ -6,12 +6,14 @@
 #![allow(unsafe_code)]
 
 pub mod audio;
+pub mod audio_in;
 pub mod audio_out;
 pub mod autostart;
 pub mod ble_beacon;
 pub mod browser;
 pub mod bt_hfp;
 pub mod clipboard;
+pub mod displays;
 pub mod doctor;
 pub mod elevated;
 pub mod h264;
@@ -24,6 +26,7 @@ pub mod jumplist;
 pub mod media_sessions;
 pub mod mp4;
 pub mod net;
+pub mod pointer_hooks;
 pub mod share;
 pub mod share_target;
 pub mod shell;
@@ -33,6 +36,8 @@ pub mod smtc;
 pub mod sound;
 pub mod toast;
 pub mod tray;
+pub mod unlock;
+pub mod usb_driver;
 pub mod vcam;
 pub mod wallpaper;
 pub mod widget;
@@ -198,6 +203,16 @@ pub fn system_dark() -> bool {
         r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
         "AppsUseLightTheme",
     ) == Some(0)
+}
+
+/// Whether the taskbar is light (Windows mode set to Light), for a
+/// one-colour tray icon that has to stand out on it.
+pub fn taskbar_light() -> bool {
+    reg_dword(
+        HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "SystemUsesLightTheme",
+    ) == Some(1)
 }
 
 /// Whether the user turned off animations in Windows settings.

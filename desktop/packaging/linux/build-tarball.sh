@@ -30,26 +30,30 @@ fi
 BIN_PATH="${BIN_PATH:-${REPO_ROOT}/target/release/nectarlink-desktop}"
 if [[ ! -f "${BIN_PATH}" ]]; then
     echo "Building nectarlink-desktop (release)..."
-    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop)
+    (cd "${REPO_ROOT}" && cargo build --release -p nectarlink-desktop -p nectarlink-mcp)
 fi
 
 STAGE_DIR="$(mktemp -d -t nectarlink-tar-XXXXXX)"
 trap 'rm -rf "${STAGE_DIR}"' EXIT
+
+bash "${SCRIPT_DIR}/build-translations.sh" "${STAGE_DIR}/translations"
 
 BUNDLE_NAME="Nectarlink-${VERSION}-linux-${ARCH}"
 BUNDLE_DIR="${STAGE_DIR}/${BUNDLE_NAME}"
 mkdir -p "${BUNDLE_DIR}/share/applications" "${BUNDLE_DIR}/share/metainfo" "${BUNDLE_DIR}/share/icons" "${BUNDLE_DIR}/share/nectarlink"
 
 install -m 0755 "${BIN_PATH}" "${BUNDLE_DIR}/nectarlink-desktop"
+AGENT_PATH="${AGENT_PATH:-$(dirname "${BIN_PATH}")/nectarlink-agent}"
+[[ ! -f "${AGENT_PATH}" ]] || install -m 0755 "${AGENT_PATH}" "${BUNDLE_DIR}/nectarlink-agent"
 for adapter in "$(dirname "${BIN_PATH}")"/libnectarlink-video-ffmpeg*.so; do
     [[ ! -f "${adapter}" ]] || install -m 0755 "${adapter}" "${BUNDLE_DIR}/"
 done
 printf '%s\n' "${VERSION}" > "${BUNDLE_DIR}/VERSION"
-# shellcheck source=stage-translations.sh
-source "${SCRIPT_DIR}/stage-translations.sh"
-stage_translations "$(dirname "${BIN_PATH}")" "${REPO_ROOT}/desktop/app/i18n" "${BUNDLE_DIR}"
-for qm in "${BUNDLE_DIR}"/nectarlink_*.qm; do
-    install -m 0644 "${qm}" "${BUNDLE_DIR}/share/nectarlink/$(basename "${qm}")"
+for qm in "${STAGE_DIR}"/translations/nectarlink_*.qm; do
+    if [[ -f "${qm}" ]]; then
+        install -m 0644 "${qm}" "${BUNDLE_DIR}/$(basename "${qm}")"
+        install -m 0644 "${qm}" "${BUNDLE_DIR}/share/nectarlink/$(basename "${qm}")"
+    fi
 done
 install -m 0644 "${SCRIPT_DIR}/nectarlink.desktop" "${BUNDLE_DIR}/share/applications/nectarlink.desktop"
 install -m 0644 "${SCRIPT_DIR}/org.nectarlink.desktop.metainfo.xml" "${BUNDLE_DIR}/share/metainfo/org.nectarlink.desktop.metainfo.xml"
@@ -167,6 +171,7 @@ fi
 
 mkdir -p "${PREFIX}" "$(dirname "${BIN_LINK}")" "${APPS_DIR}" "${META_DIR}" "${ICON_DIR}" "${PNG_ICON_DIR}"
 install -m 0755 "${SELF_DIR}/nectarlink-desktop" "${PREFIX}/nectarlink-desktop"
+[[ ! -f "${SELF_DIR}/nectarlink-agent" ]] || install -m 0755 "${SELF_DIR}/nectarlink-agent" "${PREFIX}/nectarlink-agent"
 for adapter in "${SELF_DIR}"/libnectarlink-video-ffmpeg*.so; do
     [[ ! -f "${adapter}" ]] || install -m 0755 "${adapter}" "${PREFIX}/"
 done

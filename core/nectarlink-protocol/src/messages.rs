@@ -19,6 +19,17 @@ pub mod types {
     pub const EVENT_UPDATE: &str = "event.update";
     pub const DEVICE_RING: &str = "device.ring";
     pub const DEVICE_RING_STOPPED: &str = "device.ring_stopped";
+    pub const UNLOCK_ENROLL: &str = "unlock.enroll";
+    pub const UNLOCK_WRAPPED: &str = "unlock.wrapped";
+    pub const UNLOCK_REQUEST: &str = "unlock.request";
+    pub const UNLOCK_RELEASE: &str = "unlock.release";
+    pub const UNLOCK_FORGET: &str = "unlock.forget";
+    pub const LINUX_UNLOCK_ENROLL: &str = "unlock.linux.v1.enroll";
+    pub const LINUX_UNLOCK_ENROLLED: &str = "unlock.linux.v1.enrolled";
+    pub const LINUX_UNLOCK_SIGN: &str = "unlock.linux.v1.sign";
+    pub const LINUX_UNLOCK_SIGNED: &str = "unlock.linux.v1.signed";
+    pub const LINUX_UNLOCK_FORGET: &str = "unlock.linux.v1.forget";
+    pub const LINUX_UNLOCK_CANCEL: &str = "unlock.linux.v1.cancel";
 
     pub const PAIR_REQUEST: &str = "pair.request";
     pub const PAIR_ACCEPT: &str = "pair.accept";
@@ -67,6 +78,8 @@ pub mod types {
     pub const CALL_LOG_CHANGED: &str = "call.log.changed";
     pub const CALL_DIAL: &str = "call.dial";
     pub const CALL_SIMS: &str = "call.sims";
+    pub const CALL_AUDIO_START: &str = "call.audio.start";
+    pub const CALL_AUDIO_STOP: &str = "call.audio.stop";
     pub const CONTACTS_LIST: &str = "contacts.list";
     pub const CONTACTS_CHANGED: &str = "contacts.changed";
     pub const SMS_THREADS: &str = "sms.threads";
@@ -74,15 +87,28 @@ pub mod types {
     pub const SMS_SEND: &str = "sms.send";
     pub const SMS_PART: &str = "sms.part";
     pub const SMS_CHANGED: &str = "sms.changed";
+    pub const SMS_SIMS: &str = "sms.sims";
     pub const MIRROR_START: &str = "mirror.start";
     pub const MIRROR_STOP: &str = "mirror.stop";
     pub const MIRROR_POWER: &str = "mirror.power";
+    pub const MIRROR_ROTATE: &str = "mirror.rotate";
     pub const MIRROR_SOUND: &str = "mirror.sound";
+    /// Phone → PC: play my sound (#398). The PC starts its phone sound as
+    /// if its user had turned it on; answered `ok`.
+    pub const MIRROR_LISTEN_ASK: &str = "mirror.listen.ask";
     pub const MIRROR_KEYFRAME: &str = "mirror.keyframe";
     pub const MIRROR_RESIZE: &str = "mirror.resize";
     pub const MIRROR_INPUT: &str = "mirror.input";
     pub const MIRROR_APPS: &str = "mirror.apps";
+    /// PC → phone: uninstall this app (`AppUninstall`); answered `ok` once it's gone.
+    pub const MIRROR_APP_UNINSTALL: &str = "mirror.apps.uninstall";
     pub const MIRROR_NOTICE: &str = "mirror.notice";
+    /// Phone → PC: its screens (an empty `MirrorDisplays` asks; answered with one).
+    pub const MIRROR_DISPLAYS: &str = "mirror.displays";
+    pub const POINTER_ENTER: &str = "pointer.enter";
+    pub const POINTER_MOVE: &str = "pointer.move";
+    pub const POINTER_WHERE: &str = "pointer.where";
+    pub const POINTER_LEAVE: &str = "pointer.leave";
     pub const REMOTE_CHECK: &str = "remote.check";
     pub const REMOTE_INPUT: &str = "remote.input";
     pub const PHONE_TOGGLES: &str = "phone.toggles";
@@ -106,6 +132,9 @@ pub mod types {
     pub const ELEVATED_USB_READY: &str = "elevated.usb.ready";
     pub const MIC_START: &str = "mic.start";
     pub const MIC_STOP: &str = "mic.stop";
+    pub const DIAG_ASK: &str = "diag.ask";
+    pub const DIAG_PART: &str = "diag.part";
+    pub const DIAG_LOG: &str = "diag.log";
     pub const WEBCAM_START: &str = "webcam.start";
     pub const WEBCAM_STOP: &str = "webcam.stop";
     pub const WEBCAM_KEYFRAME: &str = "webcam.keyframe";
@@ -1151,8 +1180,9 @@ impl MediaWatch {
 
 // ---- Actions (docs/protocol/actions.md) ----
 
-/// Body of `pc.power`: `lock`, `sleep`, or `hibernate` (only to a PC that
-/// offers [`pc_power::HIBERNATE`]).
+/// Body of `pc.power`: `lock`, `sleep`, `hibernate` (only to a PC that
+/// offers [`pc_power::HIBERNATE`]) or `shutdown` (only to one offering
+/// [`pc_power::SHUTDOWN`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PcPower {
     pub action: String,
@@ -1162,6 +1192,8 @@ pub mod pc_power {
     /// Offered by PCs that can hibernate right now (it can be turned off, or
     /// have nowhere to save to).
     pub const HIBERNATE: &str = "pc.power.hibernate";
+    /// Offered by PCs a phone may shut down (D372).
+    pub const SHUTDOWN: &str = "pc.power.shutdown";
 }
 
 /// The longest link sent, in bytes.
@@ -1382,6 +1414,8 @@ pub mod mirror {
     pub const AUDIO_PLAYBACK: &str = "mirror.audio.playback";
     /// Offered by PCs that play a mirrored phone's sound.
     pub const LISTEN: &str = "mirror.listen";
+    /// Offered by PCs a phone may ask to play its sound (`mirror.listen.ask`, #398).
+    pub const LISTEN_ASK: &str = "mirror.listen.ask";
     /// Offered by devices that report each video packet as it arrives, and
     /// use those reports to keep what they send from getting ahead of the link.
     pub const PACE: &str = "mirror.pace";
@@ -1394,15 +1428,27 @@ pub mod mirror {
     /// Offered by phones that run an app on a display of its own, shown in
     /// a window of its own (Elevated).
     pub const VIRTUAL_DISPLAY: &str = "mirror.virtual_display";
+    /// Offered by phones that uninstall an app a PC asks for (Elevated, D349).
+    pub const APP_UNINSTALL: &str = "mirror.apps.uninstall";
     /// The session of the phone's own screen; app windows have others.
     pub const SCREEN: u32 = 0;
     /// Apps in a `mirror.apps` answer, at most.
     pub const MAX_APPS: usize = 500;
     /// An app's icon (PNG), at most.
     pub const MAX_ICON_BYTES: usize = 8 * 1024;
+    /// Offered by phones that take the PC's mouse over the edge of its screen,
+    /// with a pointer of their own (`pointer.*`, docs/protocol/mirror.md).
+    pub const POINTER: &str = "mirror.pointer";
     /// `mirror.notice`: the phone refuses the PC's taps and keys (on Xiaomi,
     /// until USB debugging (Security settings) is on).
     pub const NOTICE_INPUT_BLOCKED: &str = "input_blocked";
+    /// `mirror.notice`: the PC could not start or continue sharing its screen.
+    pub const NOTICE_PC_CAPTURE_FAILED: &str = "pc_capture_failed";
+    /// Offered by PCs that list their screens (`mirror.displays`) and share
+    /// the one a phone picks (`MirrorStart::display`).
+    pub const DISPLAYS: &str = "mirror.displays";
+    /// Screens in a `mirror.displays` answer, at most.
+    pub const MAX_DISPLAYS: usize = 16;
 }
 
 /// Whether `name` looks like an Android package name.
@@ -1451,6 +1497,10 @@ pub struct MirrorStart {
     /// phone that offers [`mirror::SOUND`]). The PC plays it without a window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sound_only: bool,
+    /// Which of the PC's screens to share (an id from `mirror.displays`), sent
+    /// to a PC that offers [`mirror::DISPLAYS`]; its main one when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<u32>,
 }
 
 impl MirrorStart {
@@ -1492,6 +1542,16 @@ pub struct MirrorPower {
     pub screen_off: bool,
 }
 
+/// Body of `mirror.rotate`: turn the mirrored phone's screen (`session ==
+/// SCREEN`) to landscape or back to portrait (#473). The phone keeps it there
+/// while it's mirrored, then lets its own rotation take over again. Phones
+/// from before this ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorRotate {
+    #[serde(default)]
+    pub landscape: bool,
+}
+
 /// Body of `mirror.sound`: send the phone's sound to the PC, or leave it on the
 /// phone, while mirroring its screen. Phones from before this ignore it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1507,8 +1567,8 @@ pub struct MirrorSession {
     pub session: u32,
 }
 
-/// Body of `mirror.notice` (phone → PC): something the PC should tell its
-/// user about a mirroring, by a code it knows (`mirror::NOTICE_*`).
+/// Body of `mirror.notice`: something the viewer should tell its user
+/// about a mirroring, by a code it knows (`mirror::NOTICE_*`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorNotice {
     #[serde(default)]
@@ -1522,19 +1582,61 @@ impl MirrorNotice {
     }
 }
 
+/// One of a PC's screens (`mirror.displays`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorDisplay {
+    /// What `MirrorStart::display` names it by; stable while the PC's screens stay as they are.
+    pub id: u32,
+    /// Its size in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// The PC's main screen.
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// Answer to `mirror.displays` (an empty body asks): the PC's screens, the
+/// main one first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorDisplays {
+    #[serde(default)]
+    pub displays: Vec<MirrorDisplay>,
+}
+
+impl MirrorDisplays {
+    pub fn is_valid(&self) -> bool {
+        self.displays.len() <= mirror::MAX_DISPLAYS
+            && self
+                .displays
+                .iter()
+                .all(|d| d.width > 0 && d.height > 0 && d.width <= 65_536 && d.height <= 65_536)
+    }
+}
+
 /// Body of `mirror.resize`: resize an app window's display (`session != 0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorResize {
     pub session: u32,
     pub width: u32,
     pub height: u32,
+    /// How big the app draws, in percent of the display's usual density
+    /// (100 from PCs that don't say; phones from before this ignore it).
+    #[serde(default = "MirrorResize::usual_zoom")]
+    pub zoom: u32,
 }
 
 impl MirrorResize {
+    pub const ZOOM: std::ops::RangeInclusive<u32> = 50..=200;
+
+    fn usual_zoom() -> u32 {
+        100
+    }
+
     pub fn is_valid(&self) -> bool {
         self.session != mirror::SCREEN
             && (64..=4096).contains(&self.width)
             && (64..=4096).contains(&self.height)
+            && Self::ZOOM.contains(&self.zoom)
     }
 }
 
@@ -1555,6 +1657,18 @@ impl std::fmt::Debug for PhoneApp {
             .field("pkg", &self.pkg)
             .field("icon", &self.icon.as_ref().map(Vec::len))
             .finish_non_exhaustive()
+    }
+}
+
+/// Body of `mirror.apps.uninstall`: the app to remove from the phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUninstall {
+    pub pkg: String,
+}
+
+impl AppUninstall {
+    pub fn is_valid(&self) -> bool {
+        is_package_name(&self.pkg)
     }
 }
 
@@ -1688,6 +1802,91 @@ impl MirrorInput {
     }
 }
 
+// ---- The PC's mouse on the phone (`pointer.*`) ----
+
+/// Which edge of the phone's screen the PC's mouse comes in at, or goes out
+/// of: the one facing the PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PointerEdge {
+    Left,
+    Right,
+}
+
+/// Body of `pointer.enter` (PC → phone, a request): the PC's mouse went over
+/// the edge of its screen towards the phone, `y` of the way down (0 to 1).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PointerEnter {
+    pub edge: PointerEdge,
+    pub y: f32,
+}
+
+impl PointerEnter {
+    pub fn is_valid(&self) -> bool {
+        self.y.is_finite() && (0.0..=1.0).contains(&self.y)
+    }
+}
+
+/// The answer to `pointer.enter` (and to `pointer.where`'s size): the screen
+/// as the phone's pointer sees it, in pixels, and how far one count of
+/// `pointer.move` moves it. The PC follows the pointer from these and asks
+/// `pointer.where` only near the edge it leaves by.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PointerScreen {
+    pub width: u32,
+    pub height: u32,
+    /// Pixels per count.
+    pub scale: f32,
+}
+
+impl PointerScreen {
+    pub fn is_valid(&self) -> bool {
+        (1..=16_384).contains(&self.width)
+            && (1..=16_384).contains(&self.height)
+            && self.scale.is_finite()
+            && (0.05..=64.0).contains(&self.scale)
+    }
+}
+
+/// Body of `pointer.move` (PC → phone): the mouse moved by `dx`, `dy` counts,
+/// with `buttons` held (bits: 1 left, 2 right, 4 middle), and the wheel turned
+/// `wheel` notches (positive: up, as a mouse reports it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointerMove {
+    pub dx: i32,
+    pub dy: i32,
+    #[serde(default)]
+    pub buttons: u8,
+    #[serde(default)]
+    pub wheel: i8,
+}
+
+impl PointerMove {
+    /// Counts in one move, at most (a fast flick between two sends).
+    pub const MAX_COUNTS: i32 = 4096;
+
+    pub fn is_valid(&self) -> bool {
+        // `unsigned_abs`: `i32::MIN.abs()` overflows (and wraps to itself in release).
+        self.dx.unsigned_abs() <= Self::MAX_COUNTS.unsigned_abs()
+            && self.dy.unsigned_abs() <= Self::MAX_COUNTS.unsigned_abs()
+            && self.buttons <= 7
+    }
+}
+
+/// The answer to `pointer.where` (PC → phone, a request): where the phone's
+/// pointer is, in pixels of [`PointerScreen`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PointerAt {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl PointerAt {
+    pub fn is_valid(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.x >= 0.0 && self.y >= 0.0
+    }
+}
+
 /// The format of a mirroring stream (a config packet's data, in CBOR).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorConfig {
@@ -1801,14 +2000,25 @@ fn is_shell_word(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/=~+-:".contains(&b))
 }
 
-/// The app's own installed APK (`pm path` gives `/data/app/<...>/base.apk`).
+/// The app's own installed APK: `/data/app/<package>-<random>/base.apk`, or
+/// since Android 11 `/data/app/~~<random>/<package>-<random>/base.apk`. Android
+/// names the folder after the package, and package names never contain `-`, so
+/// the folder's name up to its first `-` is the package. That has to be
+/// NectarLink's own ([`is_own_package`]): another app whose name merely contains
+/// it (`com.x.app.nectarlink.y`) would otherwise get its code run as the shell.
 pub fn is_valid_app_apk(apk: &str) -> bool {
-    apk.len() <= 512
-        && apk.starts_with("/data/app/")
-        && apk.ends_with("/base.apk")
-        && !apk.contains("..")
-        && apk.contains(elevated::PACKAGE)
-        && is_shell_word(apk)
+    if apk.len() > 512 || apk.contains("..") || !is_shell_word(apk) {
+        return false;
+    }
+    let Some(dirs) = apk.strip_prefix("/data/app/").and_then(|p| p.strip_suffix("/base.apk")) else {
+        return false;
+    };
+    let package_dir = match dirs.split('/').collect::<Vec<_>>().as_slice() {
+        [dir] => *dir,
+        [random, dir] if random.starts_with("~~") && random.len() > 2 => *dir,
+        _ => return false,
+    };
+    package_dir.split_once('-').is_some_and(|(package, random)| is_own_package(package) && !random.is_empty())
 }
 
 /// NectarLink's package. Debug builds of the PC app also accept its local
@@ -2072,6 +2282,9 @@ pub mod sms {
     pub const SEND: &str = "sms.send";
     /// Offered by PCs that show text messages.
     pub const SHOW: &str = "sms.show";
+    /// Offered by phones that list the SIMs they text from (`sms.sims`) and
+    /// send on the one a PC picks (`sms.send`'s `sim`).
+    pub const SIMS: &str = "sms.sims";
     /// Most conversations or messages in one answer.
     pub const MAX_PAGE: u32 = 100;
     /// A text sent from a PC: at most this many bytes.
@@ -2151,6 +2364,10 @@ pub struct SmsMessage {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<SmsPart>,
+    /// The SIM it came in on or went out from (an id from `sms.sims`), when
+    /// the phone knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim: Option<String>,
 }
 
 /// Never prints numbers or text (protocol v0 §11).
@@ -2238,6 +2455,10 @@ pub struct SmsSend {
     /// Optional image attachment(s) to send as MMS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<SmsAttachment>,
+    /// The SIM to send on (an id from `sms.sims`); the phone's default when
+    /// missing. Phones from before this send on their default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim: Option<String>,
 }
 
 /// Never prints numbers or text (protocol v0 §11).
@@ -2247,13 +2468,15 @@ impl std::fmt::Debug for SmsSend {
             .field("to", &self.to.len())
             .field("bytes", &self.body.len())
             .field("attachments", &self.attachments.len())
+            .field("sim", &self.sim)
             .finish()
     }
 }
 
 impl SmsSend {
     pub fn is_valid(&self) -> bool {
-        (1..=sms::MAX_RECIPIENTS).contains(&self.to.len())
+        self.sim.as_deref().is_none_or(is_valid_sim_id)
+            && (1..=sms::MAX_RECIPIENTS).contains(&self.to.len())
             && self.to.iter().all(|a| (1..=64).contains(&a.trim().len()))
             && (!self.body.trim().is_empty() || !self.attachments.is_empty())
             && self.body.len() <= sms::MAX_SEND_BYTES
@@ -2309,6 +2532,19 @@ pub mod calls {
     /// Offered by phones that list their SIMs (`call.sims`) and dial on the
     /// one a PC picks (`call.dial`'s `sim`).
     pub const SIMS: &str = "call.sims";
+    /// Offered by phones that carry a call's sound to a PC and the PC's
+    /// microphone into the call (`call.audio.start`).
+    pub const AUDIO: &str = "call.audio";
+    /// Stream service of the call's sound; `downlink` goes phone to PC (the
+    /// other party), `uplink` PC to phone (the PC's microphone).
+    pub const AUDIO_SERVICE: &str = "calls";
+    pub const OP_DOWNLINK: &str = "downlink";
+    pub const OP_UPLINK: &str = "uplink";
+    pub const AUDIO_VERSION: u32 = 1;
+    /// The call's sound: 16 kHz mono 16-bit PCM, both ways.
+    pub const AUDIO_RATE: u32 = 16_000;
+    /// Stream reset code: the call's sound stopped (or was refused).
+    pub const AUDIO_STOPPED: u32 = 14;
     /// Most SIMs (phone accounts that place calls) in one answer.
     pub const MAX_SIMS: usize = 8;
     /// A caller's photo: a JPEG of at most this many bytes.
@@ -2388,6 +2624,12 @@ pub struct CallState {
     /// and hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controls: Option<CallControls>,
+    /// The app the call is in (`WhatsApp`, `Signal`...) when it isn't a
+    /// phone call (#434). The phone sends one only when it can answer,
+    /// decline and end it through the app's own buttons; its sound stays on
+    /// the phone, and there's no mute, speaker, hold or keypad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 fn yes() -> bool {
@@ -2413,6 +2655,7 @@ impl CallState {
             && [calls::RINGING, calls::ACTIVE, calls::ENDED].contains(&self.state.as_str())
             && text_ok(&self.number)
             && text_ok(&self.name)
+            && text_ok(&self.app)
             && self.photo.as_ref().is_none_or(|p| p.len() <= calls::MAX_PHOTO_BYTES)
     }
 }
@@ -2507,6 +2750,18 @@ impl CallDial {
             && self.number.len() <= calls::MAX_TEXT_BYTES
             && !self.number.chars().any(char::is_control)
             && self.sim.as_deref().is_none_or(is_valid_sim_id)
+    }
+}
+
+/// Body of `call.audio.start`: carry this call's sound to the PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallAudioStart {
+    pub id: String,
+}
+
+impl CallAudioStart {
+    pub fn is_valid(&self) -> bool {
+        !self.id.is_empty() && self.id.len() <= calls::MAX_ID_BYTES
     }
 }
 
@@ -3286,6 +3541,58 @@ pub mod remote {
     pub const SERVICE: &str = "remote";
     pub const OP_MOTION: &str = "motion";
     pub const VERSION: u32 = 1;
+    /// The buttons a [`super::PadState`] may hold: the Xbox layout's, so
+    /// `0x0800` (unused there) is never set.
+    pub const PAD_BUTTONS: u16 = 0xF7FF;
+}
+
+/// A whole game controller at one moment, in the Xbox layout
+/// (`docs/protocol/remote.md` §3.1). Each update carries everything, so one
+/// lost on the way is made up for by the next.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadState {
+    /// Pressed buttons, XInput bits: `0x0001` up, `0x0002` down, `0x0004`
+    /// left, `0x0008` right, `0x0010` start, `0x0020` back, `0x0040` left
+    /// stick, `0x0080` right stick, `0x0100` LB, `0x0200` RB, `0x0400`
+    /// guide, `0x1000` A, `0x2000` B, `0x4000` X, `0x8000` Y.
+    #[serde(default)]
+    pub buttons: u16,
+    /// Left and right triggers, 0 (released) to 255 (all the way).
+    #[serde(default)]
+    pub lt: u8,
+    #[serde(default)]
+    pub rt: u8,
+    /// Sticks, -32768 to 32767; `y` positive is up, as in XInput.
+    #[serde(default)]
+    pub lx: i16,
+    #[serde(default)]
+    pub ly: i16,
+    #[serde(default)]
+    pub rx: i16,
+    #[serde(default)]
+    pub ry: i16,
+}
+
+impl PadState {
+    pub const A: u16 = 0x1000;
+    pub const B: u16 = 0x2000;
+    pub const X: u16 = 0x4000;
+    pub const Y: u16 = 0x8000;
+    pub const UP: u16 = 0x0001;
+    pub const DOWN: u16 = 0x0002;
+    pub const LEFT: u16 = 0x0004;
+    pub const RIGHT: u16 = 0x0008;
+    pub const START: u16 = 0x0010;
+    pub const BACK: u16 = 0x0020;
+    pub const LTHUMB: u16 = 0x0040;
+    pub const RTHUMB: u16 = 0x0080;
+    pub const LB: u16 = 0x0100;
+    pub const RB: u16 = 0x0200;
+    pub const GUIDE: u16 = 0x0400;
+
+    pub fn is_valid(&self) -> bool {
+        self.buttons & !remote::PAD_BUTTONS == 0
+    }
 }
 
 /// A mouse button on the PC (`docs/protocol/remote.md` §3).
@@ -3431,6 +3738,13 @@ pub enum RemoteInput {
         #[serde(default)]
         y: f32,
     },
+    /// The phone's game controller as it is now. Only to PCs that offer
+    /// `input.gamepad`; repeated while the controller is open, so the PC lets
+    /// go of everything when updates stop.
+    Pad { pad: PadState },
+    /// The phone closed its game controller: the PC unplugs it.
+    #[serde(rename = "pad_off")]
+    PadOff,
 }
 
 /// Never prints typed text (protocol v0 §11).
@@ -3446,6 +3760,8 @@ impl std::fmt::Debug for RemoteInput {
             RemoteInput::Slide { action } => write!(f, "Slide({action:?})"),
             RemoteInput::Laser { on: false, .. } => f.write_str("Laser(off)"),
             RemoteInput::Laser { on: true, x, y } => write!(f, "Laser({x}, {y})"),
+            RemoteInput::Pad { pad } => write!(f, "Pad({pad:?})"),
+            RemoteInput::PadOff => f.write_str("PadOff"),
         }
     }
 }
@@ -3478,12 +3794,20 @@ impl RemoteInput {
                     && y.is_finite()
                     && (!*on || ((0.0..=1.0).contains(x) && (0.0..=1.0).contains(y)))
             }
+            RemoteInput::Pad { pad } => pad.is_valid(),
+            RemoteInput::PadOff => true,
         }
     }
 
     /// Whether this event may travel in a lossy QUIC datagram.
     pub fn is_datagram_allowed(&self) -> bool {
-        matches!(self, RemoteInput::Move { .. } | RemoteInput::Scroll { .. } | RemoteInput::Laser { .. })
+        matches!(
+            self,
+            RemoteInput::Move { .. }
+                | RemoteInput::Scroll { .. }
+                | RemoteInput::Laser { .. }
+                | RemoteInput::Pad { .. }
+        )
     }
 
     /// Whether this event may travel in a `remote.input` control request.
@@ -4485,8 +4809,486 @@ impl StorageChanged {
     }
 }
 
+// ---- Problem reports (docs/protocol/diag.md) ----
+
+pub mod diag {
+    /// Offered by devices that answer `diag.ask`.
+    pub const REPORT: &str = "diag.report";
+    /// Most log text in one `diag.log`.
+    pub const MAX_LOG_BYTES: usize = 24 * 1024;
+    /// Most log lines in one `diag.log`.
+    pub const MAX_LOG_LINES: usize = 400;
+    /// Most checks, facts or hardware lines in a part.
+    pub const MAX_ITEMS: usize = 32;
+    /// Most days of feature health in a part.
+    pub const MAX_DAYS: usize = 14;
+    /// Most crashes in a part.
+    pub const MAX_CRASHES: usize = 5;
+    /// Longest single text value in a part.
+    pub const MAX_TEXT: usize = 200;
+}
+
+/// Body of `diag.ask`: a paired device is making a problem report and asks
+/// for this device's part. `log` asks for the recent activity log too,
+/// which its user has to agree to on this device.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagAsk {
+    #[serde(default)]
+    pub log: bool,
+    #[serde(default)]
+    pub just_now: bool,
+    /// Echoed as `diag.log`'s `ask`, so a log nobody asked for is dropped.
+    #[serde(default)]
+    pub nonce: u64,
+}
+
+/// What a device says about itself in a report: versions and hardware,
+/// never names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagFacts {
+    #[serde(default)]
+    pub app_version: String,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub install: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub hardware: Vec<String>,
+    /// `[name, value]`, from fixed lists.
+    #[serde(default)]
+    pub extra: Vec<(String, String)>,
+}
+
+/// One day of feature health: feature, then outcome code and count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagDay {
+    pub day: String,
+    pub counts: Vec<(String, Vec<(String, u32)>)>,
+}
+
+/// One crash: where in NectarLink's code, what kind, never values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagCrash {
+    pub sig: String,
+    pub kind: String,
+    pub location: String,
+    pub message: String,
+    pub version: String,
+    pub at: u64,
+}
+
+/// What became of the log a `diag.ask` asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagLogState {
+    /// Not asked for.
+    #[default]
+    NotAsked,
+    /// The user is being asked; `diag.log` follows with the answer.
+    Asking,
+    /// Asked too recently; not asked again.
+    Busy,
+    /// A state from a newer device.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Answer to `diag.ask`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagPart {
+    pub facts: DiagFacts,
+    /// `[check, outcome]`.
+    #[serde(default)]
+    pub checks: Vec<(String, String)>,
+    #[serde(default)]
+    pub health: Vec<DiagDay>,
+    #[serde(default)]
+    pub crashes: Vec<DiagCrash>,
+    #[serde(default)]
+    pub log: DiagLogState,
+}
+
+impl DiagPart {
+    /// Within the limits in [`diag`], whatever the sender put in.
+    pub fn sanitized(mut self) -> DiagPart {
+        let cut = |s: &mut String| {
+            if let Some((at, _)) = s.char_indices().nth(diag::MAX_TEXT) {
+                s.truncate(at);
+            }
+        };
+        let f = &mut self.facts;
+        for s in [&mut f.app_version, &mut f.channel, &mut f.install, &mut f.os, &mut f.arch] {
+            cut(s);
+        }
+        f.hardware.truncate(diag::MAX_ITEMS);
+        f.hardware.iter_mut().for_each(cut);
+        f.extra.truncate(diag::MAX_ITEMS);
+        self.checks.truncate(diag::MAX_ITEMS);
+        for (name, value) in f.extra.iter_mut().chain(self.checks.iter_mut()) {
+            cut(name);
+            cut(value);
+        }
+        self.health.truncate(diag::MAX_DAYS);
+        for day in &mut self.health {
+            cut(&mut day.day);
+            day.counts.truncate(diag::MAX_ITEMS);
+            for (feature, codes) in &mut day.counts {
+                cut(feature);
+                codes.truncate(diag::MAX_ITEMS);
+                codes.iter_mut().for_each(|(code, _)| cut(code));
+            }
+        }
+        self.crashes.truncate(diag::MAX_CRASHES);
+        for c in &mut self.crashes {
+            for s in [&mut c.sig, &mut c.kind, &mut c.location, &mut c.message, &mut c.version] {
+                cut(s);
+            }
+        }
+        self
+    }
+}
+
+/// Body of `diag.log`: the answer to a `diag.ask` that asked for the log,
+/// once this device's user has answered. `ask` is that request's `nonce`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagLog {
+    pub ask: u64,
+    /// The user said no (or didn't answer in time).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declined: bool,
+    #[serde(default)]
+    pub lines: Vec<String>,
+}
+
+impl DiagLog {
+    /// At most [`diag::MAX_LOG_LINES`] lines and [`diag::MAX_LOG_BYTES`],
+    /// newest kept, one line each.
+    pub fn sanitized(mut self) -> DiagLog {
+        let skip = self.lines.len().saturating_sub(diag::MAX_LOG_LINES);
+        self.lines.drain(..skip);
+        let mut total = 0;
+        let mut keep = Vec::new();
+        for line in self.lines.into_iter().rev() {
+            let line = line.replace(['\r', '\n'], " ");
+            total += line.len() + 1;
+            if total > diag::MAX_LOG_BYTES {
+                break;
+            }
+            keep.push(line);
+        }
+        keep.reverse();
+        self.lines = keep;
+        self
+    }
+}
+
+// ---- Unlock the PC with the phone (docs/protocol/unlock.md) ----
+
+pub mod unlock {
+    /// Offered by a phone that can hold a PC's key behind a strong biometric.
+    pub const CAP_KEY: &str = "unlock.key";
+    /// Offered by a PC that can unlock its locked session with a phone.
+    pub const CAP_PC: &str = "unlock.pc";
+    /// The per-device toggle on both sides, off by default.
+    pub const TOGGLE: &str = "unlock";
+    /// Bytes in the key `K`.
+    pub const KEY_LEN: usize = 32;
+    /// Bytes in a request ID.
+    pub const REQUEST_LEN: usize = 16;
+    /// Largest wrapped key accepted (AES-GCM of 32 bytes plus IV and tag fits
+    /// easily; room for a format byte).
+    pub const MAX_WRAPPED: usize = 256;
+    /// Longest PC or user name shown on the phone, in UTF-8 bytes.
+    pub const MAX_NAME: usize = 128;
+    /// Longest Windows security identifier (`S-1-5-21-…`).
+    pub const MAX_USER: usize = 184;
+
+    pub(crate) fn name_ok(s: &str) -> bool {
+        !s.is_empty() && s.len() <= MAX_NAME && !s.chars().any(char::is_control)
+    }
+
+    pub(crate) fn user_ok(s: &str) -> bool {
+        !s.is_empty() && s.len() <= MAX_USER && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+
+    /// Whether `s` looks like a Windows security identifier.
+    pub fn user_ok_pub(s: &str) -> bool {
+        user_ok(s)
+    }
+}
+
+/// `unlock.enroll` (PC to phone): wrap `key` behind the phone owner's
+/// biometric for this PC and Windows user.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockEnroll {
+    pub pc_name: String,
+    pub user_name: String,
+    /// The Windows user's security identifier.
+    pub user: String,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
+}
+
+impl UnlockEnroll {
+    pub fn is_valid(&self) -> bool {
+        unlock::name_ok(&self.pc_name)
+            && unlock::name_ok(&self.user_name)
+            && unlock::user_ok(&self.user)
+            && self.key.len() == unlock::KEY_LEN
+    }
+}
+
+/// Never prints the key.
+impl std::fmt::Debug for UnlockEnroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockEnroll")
+            .field("pc_name", &self.pc_name)
+            .field("user_name", &self.user_name)
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `unlock.wrapped` (phone to PC, the answer to `unlock.enroll`).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockWrapped {
+    #[serde(with = "serde_bytes")]
+    pub wrapped: Vec<u8>,
+}
+
+impl UnlockWrapped {
+    pub fn is_valid(&self) -> bool {
+        !self.wrapped.is_empty() && self.wrapped.len() <= unlock::MAX_WRAPPED
+    }
+}
+
+impl std::fmt::Debug for UnlockWrapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnlockWrapped({} bytes)", self.wrapped.len())
+    }
+}
+
+/// `unlock.request` (PC to phone): someone at the locked PC asked to unlock it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockRequest {
+    #[serde(with = "serde_bytes")]
+    pub request: Vec<u8>,
+    pub pc_name: String,
+    pub user_name: String,
+    pub user: String,
+    #[serde(with = "serde_bytes")]
+    pub wrapped: Vec<u8>,
+}
+
+impl UnlockRequest {
+    pub fn is_valid(&self) -> bool {
+        self.request.len() == unlock::REQUEST_LEN
+            && unlock::name_ok(&self.pc_name)
+            && unlock::name_ok(&self.user_name)
+            && unlock::user_ok(&self.user)
+            && !self.wrapped.is_empty()
+            && self.wrapped.len() <= unlock::MAX_WRAPPED
+    }
+}
+
+impl std::fmt::Debug for UnlockRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockRequest")
+            .field("pc_name", &self.pc_name)
+            .field("user_name", &self.user_name)
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `unlock.release` (phone to PC, the answer to `unlock.request`): the
+/// unwrapped key, after the owner's biometric.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockRelease {
+    #[serde(with = "serde_bytes")]
+    pub request: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
+}
+
+impl UnlockRelease {
+    pub fn is_valid(&self) -> bool {
+        self.request.len() == unlock::REQUEST_LEN && self.key.len() == unlock::KEY_LEN
+    }
+}
+
+impl std::fmt::Debug for UnlockRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UnlockRelease")
+    }
+}
+
+/// `unlock.forget` (either way): drop what's kept for this pair, or only for
+/// `user`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockForget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+// ---- Linux session unlock (docs/protocol/linux-unlock.md) ----
+
+pub mod linux_unlock {
+    pub const CAP_PC: &str = "unlock.linux.pc";
+    pub const CAP_KEY: &str = "unlock.linux.key";
+    pub const DOMAIN: &[u8] = b"nectarlink/linux-unlock/v1\0";
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxUnlockEnroll {
+    pub pc: DeviceId,
+    pub phone: DeviceId,
+    pub uid: u32,
+    pub user_name: String,
+}
+
+impl std::fmt::Debug for LinuxUnlockEnroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinuxUnlockEnroll").finish_non_exhaustive()
+    }
+}
+
+impl LinuxUnlockEnroll {
+    pub fn is_valid(&self) -> bool {
+        self.uid != 0 && unlock::name_ok(&self.user_name) && !self.user_name.trim().is_empty()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxUnlockEnrolled {
+    #[serde(with = "serde_bytes")]
+    pub public_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for LinuxUnlockEnrolled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinuxUnlockEnrolled").finish_non_exhaustive()
+    }
+}
+
+impl LinuxUnlockEnrolled {
+    /// Canonical uncompressed P-256 point encoding.
+    pub fn is_valid(&self) -> bool {
+        self.public_key.len() == 65 && self.public_key[0] == 0x04
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxUnlockChallenge {
+    pub pc: DeviceId,
+    pub phone: DeviceId,
+    pub uid: u32,
+    #[serde(with = "serde_bytes")]
+    pub nonce: [u8; 32],
+}
+
+impl LinuxUnlockChallenge {
+    /// Canonical transcript for P-256/SHA-256, independent of the CBOR envelope.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(linux_unlock::DOMAIN.len() + 100);
+        bytes.extend_from_slice(linux_unlock::DOMAIN);
+        bytes.extend_from_slice(self.pc.as_bytes());
+        bytes.extend_from_slice(self.phone.as_bytes());
+        bytes.extend_from_slice(&self.uid.to_be_bytes());
+        bytes.extend_from_slice(&self.nonce);
+        bytes
+    }
+}
+
+impl std::fmt::Debug for LinuxUnlockChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinuxUnlockChallenge").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxUnlockSigned {
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+}
+
+impl std::fmt::Debug for LinuxUnlockSigned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinuxUnlockSigned").finish_non_exhaustive()
+    }
+}
+
+impl LinuxUnlockSigned {
+    /// Size and tag for the DER SEQUENCE of two P-256 integers.
+    /// The PAM verifier checks the DER contents and the signature itself.
+    pub fn is_valid(&self) -> bool {
+        (8..=72).contains(&self.signature.len()) && self.signature[0] == 0x30
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxUnlockForget {
+    User { uid: u32 },
+    All,
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_unlock_enrollment_requires_a_non_root_account() {
+        let request = LinuxUnlockEnroll {
+            pc: DeviceId([1; 32]),
+            phone: DeviceId([2; 32]),
+            uid: 0,
+            user_name: "root".into(),
+        };
+        assert!(!request.is_valid());
+        assert!(LinuxUnlockEnroll { uid: 1000, user_name: "bee".into(), ..request }.is_valid());
+    }
+
+    #[test]
+    fn linux_unlock_signs_the_fixed_v1_transcript() {
+        let challenge = LinuxUnlockChallenge {
+            pc: DeviceId([0x11; 32]),
+            phone: DeviceId([0xe2; 32]),
+            uid: 0x0102_0304,
+            nonce: [0xa3; 32],
+        };
+        let expected = b"nectarlink/linux-unlock/v1\0\
+            \x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\
+            \x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\
+            \xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\
+            \xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\xe2\
+            \x01\x02\x03\x04\
+            \xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\
+            \xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3\xa3";
+        assert_eq!(challenge.signing_bytes(), expected.as_slice());
+        let decoded: LinuxUnlockChallenge =
+            crate::Envelope::new(types::LINUX_UNLOCK_SIGN, &challenge).unwrap().body().unwrap();
+        assert_eq!(decoded, challenge);
+    }
+
+    #[test]
+    fn linux_unlock_rejects_a_challenge_with_a_short_nonce() {
+        #[derive(Serialize)]
+        struct ShortNonce {
+            pc: DeviceId,
+            phone: DeviceId,
+            uid: u32,
+            #[serde(with = "serde_bytes")]
+            nonce: [u8; 31],
+        }
+        let short = ShortNonce { pc: DeviceId([1; 32]), phone: DeviceId([2; 32]), uid: 1000, nonce: [3; 31] };
+        let envelope = crate::Envelope::new(types::LINUX_UNLOCK_SIGN, &short).unwrap();
+
+        assert!(envelope.body::<LinuxUnlockChallenge>().is_err());
+    }
+
     #[test]
     fn update_hints_take_known_channels_and_plain_versions_only() {
         let hint = |channel: &str, version: &str| {
@@ -4513,6 +5315,7 @@ mod tests {
             screen_off: false,
             watch: None,
             sound_only: true,
+            display: None,
         };
         assert!(sound.is_valid());
         assert!(!MirrorStart { audio: false, ..sound.clone() }.is_valid(), "the sound is the point");
@@ -4597,9 +5400,24 @@ mod tests {
         };
         assert!(start.is_valid());
 
+        // Before Android 11 the package's folder sits right under /data/app.
+        assert!(
+            ElevatedUsbStart { apk: "/data/app/app.nectarlink-1/base.apk".into(), ..start.clone() }
+                .is_valid()
+        );
         for apk in [
             "/data/app/other.app-1/base.apk",
             "/sdcard/app.nectarlink/base.apk",
+            // Other apps whose package merely contains NectarLink's.
+            "/data/app/~~kG3x_Q==/com.x.app.nectarlink.y-Ab1==/base.apk",
+            "/data/app/~~kG3x_Q==/app.nectarlink.evil-Ab1==/base.apk",
+            "/data/app/~~kG3x_Q==/app.nectarlinkx-Ab1==/base.apk",
+            "/data/app/app.nectarlink.evil-1/base.apk",
+            "/data/app/~~kG3x_Q==/other-1/app.nectarlink-1/base.apk",
+            "/data/app/~~kG3x_Q==/app.nectarlink/base.apk",
+            "/data/app/~~kG3x_Q==/app.nectarlink-/base.apk",
+            "/data/app/~~/app.nectarlink-1/base.apk",
+            "/data/app/x/app.nectarlink-1/base.apk",
             "/data/app/app.nectarlink-1/../../evil/base.apk",
             "/data/app/app.nectarlink-1/base.apk; reboot",
             "/data/app/app.nectarlink-1/base.apk$(id)",
@@ -4633,6 +5451,16 @@ mod tests {
             ..start
         };
         assert_eq!(dev.is_valid(), cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn pointer_moves_stay_within_bounds_at_the_integer_limits() {
+        let ok =
+            PointerMove { dx: PointerMove::MAX_COUNTS, dy: -PointerMove::MAX_COUNTS, buttons: 7, wheel: 0 };
+        assert!(ok.is_valid());
+        for (dx, dy) in [(i32::MIN, 0), (0, i32::MIN), (i32::MAX, 0), (PointerMove::MAX_COUNTS + 1, 0)] {
+            assert!(!PointerMove { dx, dy, ..ok }.is_valid(), "{dx} {dy}");
+        }
     }
 
     #[test]
@@ -5131,11 +5959,65 @@ mod tests {
     }
 
     #[test]
+    fn pointer_messages_round_trip_and_are_checked() {
+        let enter = PointerEnter { edge: PointerEdge::Right, y: 0.25 };
+        assert!(enter.is_valid());
+        let env = Envelope::new(types::POINTER_ENTER, &enter).unwrap();
+        assert_eq!(env.body::<PointerEnter>().unwrap(), enter);
+        assert!(!PointerEnter { y: 1.5, ..enter }.is_valid());
+        assert!(!PointerEnter { y: f32::NAN, ..enter }.is_valid());
+
+        let screen = PointerScreen { width: 1080, height: 2400, scale: 2.0 };
+        assert!(screen.is_valid());
+        assert_eq!(
+            Envelope::new(types::POINTER_ENTER, &screen).unwrap().body::<PointerScreen>().unwrap(),
+            screen
+        );
+        assert!(!PointerScreen { width: 0, ..screen }.is_valid());
+        assert!(!PointerScreen { scale: 0.0, ..screen }.is_valid());
+        assert!(!PointerScreen { scale: f32::INFINITY, ..screen }.is_valid());
+
+        let moved = PointerMove { dx: -12, dy: 40, buttons: 1, wheel: -2 };
+        assert!(moved.is_valid());
+        assert_eq!(Envelope::new(types::POINTER_MOVE, &moved).unwrap().body::<PointerMove>().unwrap(), moved);
+        assert!(!PointerMove { dx: PointerMove::MAX_COUNTS + 1, ..moved }.is_valid());
+        assert!(!PointerMove { buttons: 8, ..moved }.is_valid());
+        // Buttons and wheel can be left out when nothing's held or turned.
+        #[derive(Serialize)]
+        struct Bare {
+            dx: i32,
+            dy: i32,
+        }
+        let bare = Envelope::new(types::POINTER_MOVE, &Bare { dx: 3, dy: 0 }).unwrap();
+        assert_eq!(bare.body::<PointerMove>().unwrap(), PointerMove { dx: 3, dy: 0, buttons: 0, wheel: 0 });
+
+        assert!(PointerAt { x: 0.0, y: 2399.0 }.is_valid());
+        assert!(!PointerAt { x: -1.0, y: 0.0 }.is_valid());
+    }
+
+    #[test]
     fn texts_to_send_are_checked() {
-        let send =
-            SmsSend { to: vec!["+15550100".into()], body: "On my way".into(), attachments: Vec::new() };
+        let send = SmsSend {
+            to: vec!["+15550100".into()],
+            body: "On my way".into(),
+            attachments: Vec::new(),
+            sim: None,
+        };
         assert!(send.is_valid());
         assert!(!format!("{send:?}").contains("way"));
+        // On a SIM the phone listed (#474); an empty or control-character id isn't one.
+        assert!(SmsSend { sim: Some("2".into()), ..send.clone() }.is_valid());
+        assert!(!SmsSend { sim: Some(String::new()), ..send.clone() }.is_valid());
+        assert!(!SmsSend { sim: Some("1\n".into()), ..send.clone() }.is_valid());
+        // A phone from before SIMs reads a PC's text with one as it always did.
+        let env = Envelope::new(types::SMS_SEND, &SmsSend { sim: Some("2".into()), ..send.clone() }).unwrap();
+        #[derive(Deserialize)]
+        struct Old {
+            to: Vec<String>,
+            body: String,
+        }
+        let old: Old = env.body().unwrap();
+        assert_eq!((old.to, old.body.as_str()), (send.to.clone(), "On my way"));
         assert!(!SmsSend { to: vec![], ..send.clone() }.is_valid());
         assert!(!SmsSend { body: "  ".into(), ..send.clone() }.is_valid());
         assert!(!SmsSend { body: "x".repeat(sms::MAX_SEND_BYTES + 1), ..send.clone() }.is_valid());
@@ -5173,6 +6055,7 @@ mod tests {
             missed: false,
             since: None,
             controls: None,
+            app: None,
         };
         assert!(call.is_valid());
         let shown = format!("{call:?}");
@@ -5183,7 +6066,27 @@ mod tests {
         // Missing fields take their defaults: incoming, not missed.
         let env = Envelope::new("x", &CallState { number: None, name: None, photo: None, ..call }).unwrap();
         let back: CallState = env.body().unwrap();
-        assert!(back.incoming && !back.missed && back.number.is_none());
+        assert!(back.incoming && !back.missed && back.number.is_none() && back.app.is_none());
+    }
+
+    #[test]
+    fn app_calls_name_their_app() {
+        let call = CallState {
+            id: "app:1".into(),
+            state: calls::RINGING.into(),
+            incoming: true,
+            number: None,
+            name: Some("Sam".into()),
+            photo: None,
+            missed: false,
+            since: None,
+            controls: None,
+            app: Some("WhatsApp".into()),
+        };
+        assert!(call.is_valid());
+        let back: CallState = Envelope::new("x", &call).unwrap().body().unwrap();
+        assert_eq!(back.app.as_deref(), Some("WhatsApp"));
+        assert!(!CallState { app: Some("x".repeat(calls::MAX_TEXT_BYTES + 1)), ..call }.is_valid());
     }
 
     #[test]
@@ -5225,6 +6128,11 @@ mod tests {
         assert!(CallDial { number: "555".into(), sim: Some("1".into()) }.is_valid());
         assert!(!CallDial { number: "555".into(), sim: Some(String::new()) }.is_valid());
         assert!(!CallDial { number: "555".into(), sim: Some("a\nb".into()) }.is_valid());
+        let start = CallAudioStart { id: "7".into() };
+        let env = Envelope::new(types::CALL_AUDIO_START, &start).unwrap();
+        assert_eq!(Envelope::from_cbor(&env.to_cbor()).unwrap().body::<CallAudioStart>().unwrap(), start);
+        assert!(!CallAudioStart { id: String::new() }.is_valid());
+        assert!(!CallAudioStart { id: "1".repeat(calls::MAX_ID_BYTES + 1) }.is_valid());
         let old = Envelope::new(types::CALL_DIAL, &CallDial { number: "555".into(), sim: None }).unwrap();
         assert_eq!(old.body::<CallDial>().unwrap().sim, None);
         let sims = CallSims {
@@ -5326,6 +6234,26 @@ mod tests {
         assert_eq!(RemoteInput::from_datagram(&laser.to_datagram()).unwrap(), laser);
         let laser_off = RemoteInput::Laser { on: false, x: 0.0, y: 0.0 };
         assert_eq!(RemoteInput::from_datagram(&laser_off.to_datagram()).unwrap(), laser_off);
+
+        // A controller travels both ways; unplugging it only reliably.
+        let pad = RemoteInput::Pad {
+            pad: PadState {
+                buttons: PadState::A | PadState::LB,
+                lt: 255,
+                rt: 0,
+                lx: -32768,
+                ly: 32767,
+                rx: 5,
+                ry: -5,
+            },
+        };
+        assert!(pad.is_valid() && pad.is_datagram_allowed() && pad.is_control_allowed());
+        assert_eq!(RemoteInput::from_datagram(&pad.to_datagram()).unwrap(), pad);
+        assert!(RemoteInput::from_datagram(&RemoteInput::PadOff.to_datagram()).is_err());
+        let env = Envelope::new(types::REMOTE_INPUT, &RemoteInput::PadOff).unwrap();
+        assert_eq!(env.body::<RemoteInput>().unwrap(), RemoteInput::PadOff);
+        // Bit 0x0800 isn't a button.
+        assert!(!RemoteInput::Pad { pad: PadState { buttons: 0x0800, ..PadState::default() } }.is_valid());
 
         // Button or key in a datagram is rejected.
         let click = RemoteInput::Button { button: MouseButton::Left, action: ButtonAction::Click };
@@ -5733,6 +6661,7 @@ mod tests {
             screen_off: false,
             watch: Some("Chrome".into()),
             sound_only: false,
+            display: None,
         };
         assert!(screen.is_valid());
         // Watching is of the PC's screen session only, never with an app.
@@ -5743,6 +6672,18 @@ mod tests {
         assert!(!MirrorStart { watch: Some(String::new()), ..screen.clone() }.is_valid());
         // Older PCs and phones leave it out.
         let plain = MirrorStart { watch: None, ..screen };
+        // A screen of the PC to view travels as `display`; older PCs ignore it.
+        let on_second = MirrorStart { display: Some(1), ..plain.clone() };
+        assert!(on_second.is_valid());
+        let env = crate::Envelope::new(types::MIRROR_START, &on_second).unwrap();
+        assert_eq!(env.body::<MirrorStart>().unwrap().display, Some(1));
+        let many = MirrorDisplays {
+            displays: (0..=mirror::MAX_DISPLAYS as u32)
+                .map(|id| MirrorDisplay { id, width: 1920, height: 1080, primary: id == 0 })
+                .collect(),
+        };
+        assert!(!many.is_valid(), "at most MAX_DISPLAYS");
+        assert!(MirrorDisplays { displays: many.displays[..2].to_vec() }.is_valid());
         let mut bytes = Vec::new();
         ciborium::into_writer(&plain, &mut bytes).unwrap();
         let back: MirrorStart = ciborium::from_reader(bytes.as_slice()).unwrap();
@@ -6053,6 +6994,7 @@ mod tests {
                 4 => try_decode!(
                     MirrorStart,
                     MirrorPower,
+                    MirrorRotate,
                     MirrorSession,
                     MirrorResize,
                     PhoneApp,
@@ -6205,5 +7147,64 @@ mod tests {
         for code in ["", "Input_Blocked", "input blocked", &"a".repeat(33), "über"] {
             assert!(!MirrorNotice { session: 0, code: code.into() }.is_valid(), "{code}");
         }
+    }
+
+    #[test]
+    fn diag_parts_stay_within_limits() {
+        let long = "x".repeat(500);
+        let part = DiagPart {
+            facts: DiagFacts {
+                os: long.clone(),
+                hardware: vec![long.clone(); 50],
+                extra: vec![(long.clone(), long.clone()); 50],
+                ..DiagFacts::default()
+            },
+            checks: vec![("a".into(), "ok".into()); 40],
+            health: vec![DiagDay { day: "2026-11-20".into(), counts: vec![] }; 30],
+            crashes: vec![DiagCrash::default(); 9],
+            log: DiagLogState::Asking,
+        }
+        .sanitized();
+        assert_eq!(part.facts.os.chars().count(), diag::MAX_TEXT);
+        assert_eq!(part.facts.hardware.len(), diag::MAX_ITEMS);
+        assert!(part.facts.extra.iter().all(|(n, v)| n.len() == diag::MAX_TEXT && v.len() == diag::MAX_TEXT));
+        assert_eq!(part.checks.len(), diag::MAX_ITEMS);
+        assert_eq!(part.health.len(), diag::MAX_DAYS);
+        assert_eq!(part.crashes.len(), diag::MAX_CRASHES);
+
+        let log = DiagLog { ask: 7, declined: false, lines: vec!["line\nE forged".into(); 1000] }.sanitized();
+        assert!(log.lines.len() <= diag::MAX_LOG_LINES);
+        assert!(log.lines.iter().all(|l| !l.contains('\n')));
+        assert!(log.lines.iter().map(|l| l.len() + 1).sum::<usize>() <= diag::MAX_LOG_BYTES);
+    }
+
+    #[test]
+    fn diag_messages_round_trip_and_tolerate_newer_devices() {
+        #[derive(Serialize)]
+        struct Newer {
+            facts: NewerFacts,
+            log: &'static str,
+            later: u32,
+        }
+        #[derive(Serialize)]
+        struct NewerFacts {
+            app_version: &'static str,
+            future: u32,
+        }
+        let env = crate::Envelope::new(
+            types::DIAG_PART,
+            &Newer { facts: NewerFacts { app_version: "0.1.6", future: 1 }, log: "something_new", later: 2 },
+        )
+        .unwrap();
+        let part: DiagPart = env.body().unwrap();
+        assert_eq!(part.facts.app_version, "0.1.6");
+        assert_eq!(part.log, DiagLogState::Unknown);
+        #[derive(Serialize)]
+        struct Empty {}
+        let ask: DiagAsk = crate::Envelope::new(types::DIAG_ASK, &Empty {}).unwrap().body().unwrap();
+        assert_eq!(ask, DiagAsk { log: false, just_now: false, nonce: 0 });
+        let log = DiagLog { ask: 3, declined: true, lines: vec![] };
+        let back: DiagLog = crate::Envelope::new(types::DIAG_LOG, &log).unwrap().body().unwrap();
+        assert_eq!(back, log);
     }
 }

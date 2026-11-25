@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use super::context::{allowed, try_node};
+use super::context::{
+    allowed, online_feature_state, online_with_capabilities, sms_access, try_node, with_state,
+};
 use super::protocol::{Action, Query};
+use nectarlink_core::FeatureState;
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
@@ -17,6 +20,13 @@ fn success(data: Value) -> Reply {
 }
 fn valid_query(p: &Query) -> bool {
     matches!(p.page.as_str(), "messages" | "calls" | "photos" | "apps" | "deck")
+        && (!(p.local_only || p.thread_index) || (p.page == "messages" && p.thread.is_empty()))
+        && (!p.photo_rows_only || (p.page == "photos" && p.photo_ids.is_none()))
+        && p.photo_ids.as_ref().is_none_or(|ids| {
+            p.page == "photos"
+                && ids.len() <= 8
+                && ids.iter().all(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+        })
         && p.thread.len() <= 1024
         && p.album.as_ref().is_none_or(|a| a.len() <= 256)
         && p.before_id.len() <= 256
@@ -32,10 +42,97 @@ pub(super) async fn read(body: &[u8]) -> Reply {
     if !valid_query(&p) {
         return fail("invalid_page");
     }
-    match tokio::time::timeout(PAGE_TIMEOUT, read_inner(p)).await {
-        Ok(Ok(data)) => success(data),
+    let private = p.page == "messages";
+    let private_epoch = super::private_epoch();
+    if private && private_epoch.is_none() {
+        return super::not_allowed();
+    }
+    let device = p.device;
+    let sms_history = private && !p.thread.is_empty() && !p.thread.starts_with("chat:");
+    let chat_history = private && p.thread.starts_with("chat:");
+    let sms_list = private && p.thread.is_empty() && !p.local_only;
+    let reads_chats = private && !sms_history;
+    let notification_revision = reads_chats.then(super::privacy::revision).flatten();
+    let sms_before = (sms_history || sms_list).then(|| sms_access(device)).flatten();
+    if sms_history && sms_before == Some(false) {
+        return sms_denied();
+    }
+    let feature = match p.page.as_str() {
+        "photos" => Some("files.recent_photos"),
+        "apps" => Some("mirroring.app_windows"),
+        "messages" if chat_history => Some("notifications.mirror"),
+        _ => None,
+    };
+    let result = tokio::time::timeout(PAGE_TIMEOUT, read_inner(p)).await;
+    if private && private_epoch != super::private_epoch() {
+        return super::not_allowed();
+    }
+    if reads_chats && notification_revision != super::privacy::revision() {
+        // The next read uses the new rule set. Don't report a permission loss
+        // for the entire Messages section while a rule is changing.
+        return fail("notification_rules_changed");
+    }
+    if sms_history || sms_list {
+        let rows = result.as_ref().ok().and_then(|result| result.as_ref().ok());
+        if let Some(error) = check_sms_read(sms_history, sms_before, sms_access(device), rows) {
+            return error;
+        }
+    }
+    match result {
+        Ok(Ok(data)) if feature.is_none_or(|feature| allowed(device, feature)) => success(data),
+        Ok(Err(nectarlink_core::Error::NotFound)) if chat_history => {
+            (404, "Not Found", json!({"ok":false,"error":"chat_unavailable"}))
+        }
+        Ok(Err(nectarlink_core::Error::Denied)) if sms_history => fail("unavailable"),
+        Ok(Ok(_) | Err(nectarlink_core::Error::Denied)) if online_with_capabilities(device) => {
+            let state = feature
+                .and_then(|feature| with_state(|s| online_feature_state(s, device, feature)).flatten());
+            if feature.is_some()
+                && !matches!(state, Some(FeatureState::Locked { .. } | FeatureState::Unsupported { .. }))
+            {
+                return fail("unavailable");
+            }
+            feature_denied(feature, state)
+        }
+        Ok(Ok(_)) => fail("unavailable"),
         Ok(Err(_)) => fail("unavailable"),
         Err(_) => fail("timeout"),
+    }
+}
+
+fn feature_denied(feature: Option<&str>, state: Option<FeatureState>) -> Reply {
+    let mut data = json!({"ok":false,"error":"feature_denied"});
+    if let Some(feature) = feature {
+        data["feature"] = json!(feature);
+    }
+    match state {
+        Some(FeatureState::Locked { upgrade }) => {
+            let (action, target) = upgrade.action.describe();
+            data["upgrade"] = json!({"action":action,"target":target});
+        }
+        Some(FeatureState::Unsupported { .. }) => data["unsupported"] = json!(true),
+        _ => {}
+    }
+    (403, "Forbidden", data)
+}
+
+fn sms_denied() -> Reply {
+    (403, "Forbidden", json!({"ok":false,"error":"sms_denied"}))
+}
+
+fn check_sms_read(
+    history: bool,
+    before: Option<bool>,
+    after: Option<bool>,
+    data: Option<&Value>,
+) -> Option<Reply> {
+    let contains_sms = data.is_some_and(|data| {
+        history || data["items"].as_array().is_some_and(|rows| rows.iter().any(|row| row["kind"] == "sms"))
+    });
+    match after {
+        Some(false) if history || before == Some(true) || contains_sms => Some(sms_denied()),
+        None if contains_sms => Some(fail("unavailable")),
+        _ => None,
     }
 }
 async fn read_inner(p: Query) -> Result<Value, nectarlink_core::Error> {
@@ -44,6 +141,11 @@ async fn read_inner(p: Query) -> Result<Value, nectarlink_core::Error> {
         return super::deck::read();
     }
     let node = try_node().ok_or(Error::Offline)?;
+    // The link can be online before its capability matrix has arrived. That
+    // is a transient failure, not a reason to revoke previously cached data.
+    if matches!(p.page.as_str(), "messages" | "photos" | "apps") && !online_with_capabilities(p.device) {
+        return Err(Error::Offline);
+    }
     let limit = p.limit.unwrap_or(5).min(if p.page == "calls" { 6 } else { 7 });
     match p.page.as_str() {
         "messages" => super::messages::read(p, node, limit).await,
@@ -139,9 +241,25 @@ mod tests {
     use super::super::protocol::sized_window;
     use super::super::{cache::cached_list, deck::deck_view};
     use super::*;
+
+    #[test]
+    fn app_denial_carries_the_same_upgrade_reason_as_native_ui() {
+        use nectarlink_core::features::{Effort, Upgrade, UpgradeAction};
+        let state = FeatureState::Locked {
+            upgrade: Upgrade {
+                action: UpgradeAction::RaisePower(nectarlink_core::PowerLevel::Elevated),
+                effort: Effort::Minutes(2),
+            },
+        };
+        let (status, _, body) = feature_denied(Some("mirroring.app_windows"), Some(state));
+        assert_eq!(status, 403);
+        assert_eq!(body["error"], "feature_denied");
+        assert_eq!(body["feature"], "mirroring.app_windows");
+        assert_eq!(body["upgrade"], json!({"action":"raisePower","target":"elevated"}));
+    }
     use nectarlink_core::DeviceId;
     fn window(items: Vec<Value>, offset: usize) -> Value {
-        sized_window(items, offset, 5)
+        sized_window(items.into_iter(), offset, 5, std::convert::identity)
     }
     #[tokio::test]
     async fn readonly_lists_reuse_results_and_force_refresh_without_phone_actions() {
@@ -159,6 +277,11 @@ mod tests {
             assert_eq!(rows, vec![1, 2, 3]);
         }
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            super::super::cache::lookup(&slot, device, Duration::from_secs(60), |rows| rows.first().copied()),
+            Some(1)
+        );
+        assert_eq!(super::super::cache::lookup(&slot, device, Duration::ZERO, |_| Some(1)), None);
         for n in [4, 5] {
             cached_list(&slot, DeviceId([n; 32]), false, Duration::from_secs(60), async { Ok(vec![9]) })
                 .await
@@ -176,7 +299,7 @@ mod tests {
                 serde_json::from_value(json!({"device":device.to_string(),"page":"apps","limit":limit}))
                     .unwrap();
             assert!(valid_query(&q));
-            let window = sized_window((0..200).map(|i| json!({"id":i})).collect(), limit, limit);
+            let window = sized_window(0..200, limit, limit, |i| json!({"id":i}));
             assert_eq!(window["items"].as_array().unwrap().len(), limit);
             assert_eq!(window["items"][0]["id"], limit);
             assert_eq!(window["more"], true);
@@ -190,14 +313,14 @@ mod tests {
     }
     #[test]
     fn gallery_apps_and_complete_deck_have_explicit_bounds() {
-        let rows = || (0..40).map(|i| json!({"id":i})).collect::<Vec<_>>();
-        let gallery = sized_window(rows(), 0, 8);
+        let row = |i| json!({"id":i});
+        let gallery = sized_window(0..40, 0, 8, row);
         assert_eq!(gallery["items"].as_array().unwrap().len(), 8);
         assert_eq!(gallery["more"], true);
-        let apps = sized_window(rows(), 12, 12);
+        let apps = sized_window(0..40, 12, 12, row);
         assert_eq!(apps["items"][0]["id"], 12);
         assert_eq!(apps["items"].as_array().unwrap().len(), 12);
-        let dense_apps = sized_window(rows(), 15, 15);
+        let dense_apps = sized_window(0..40, 15, 15, row);
         assert_eq!(dense_apps["items"][0]["id"], 15);
         assert_eq!(dense_apps["items"].as_array().unwrap().len(), 15);
         let deck = deck_view((0..192).map(|i| json!({"id":i})).collect());
@@ -206,6 +329,40 @@ mod tests {
         assert_eq!(deck["more"], false);
         assert_eq!(deck_view((0..250).map(|i| json!(i)).collect())["items"].as_array().unwrap().len(), 192);
     }
+    #[test]
+    fn local_only_is_opt_in_and_only_for_the_conversation_list() {
+        let device = DeviceId([7; 32]).to_string();
+        for (page, thread, expected) in
+            [("messages", "", true), ("messages", "chat:one", false), ("calls", "", false)]
+        {
+            let query: Query = serde_json::from_value(
+                json!({"device":device,"page":page,"thread":thread,"local_only":true}),
+            )
+            .unwrap();
+            assert_eq!(valid_query(&query), expected);
+        }
+    }
+
+    #[test]
+    fn progressive_queries_are_bounded_and_not_available_on_other_routes() {
+        let device = DeviceId([7; 32]).to_string();
+        for (fields, expected) in [
+            (json!({"page":"messages","thread_index":true,"limit":7}), true),
+            (json!({"page":"messages","thread_index":true,"thread":"chat:one"}), false),
+            (json!({"page":"photos","photo_rows_only":true}), true),
+            (json!({"page":"photos","photo_ids":["media:123"]}), true),
+            (json!({"page":"photos","photo_ids":[]}), true),
+            (json!({"page":"photos","photo_ids":vec!["media:1"; 9]}), false),
+            (json!({"page":"photos","photo_ids":[""]}), false),
+            (json!({"page":"photos","photo_ids":["media:1"],"photo_rows_only":true}), false),
+            (json!({"page":"calls","photo_ids":[]}), false),
+        ] {
+            let mut data = fields;
+            data["device"] = json!(device);
+            assert_eq!(valid_query(&serde_json::from_value::<Query>(data).unwrap()), expected);
+        }
+    }
+
     #[test]
     fn display_ids_and_bounded_queries() {
         let device = DeviceId([7; 32]).to_string();
@@ -232,5 +389,24 @@ mod tests {
         }
         assert_eq!(act(&body).await.2["error"], "action_failed_check_phone");
         assert_eq!(act(&body).await.2["error"], "duplicate_request");
+    }
+
+    #[test]
+    fn late_sms_reads_do_not_expose_rows_after_access_changes() {
+        let mixed = json!({"items":[{"kind":"sms"},{"kind":"chat"}]});
+        let chats = json!({"items":[{"kind":"chat"}]});
+        let history = json!({"items":[{"id":"message"}]});
+        for (thread, before, data) in
+            [(false, Some(true), &mixed), (false, None, &mixed), (true, Some(true), &history)]
+        {
+            assert_eq!(
+                check_sms_read(thread, before, Some(false), Some(data)).unwrap().2["error"],
+                "sms_denied"
+            );
+            assert_eq!(check_sms_read(thread, before, None, Some(data)).unwrap().2["error"], "unavailable");
+            assert!(check_sms_read(thread, before, Some(true), Some(data)).is_none());
+        }
+        assert!(check_sms_read(false, Some(false), Some(false), Some(&chats)).is_none());
+        assert!(check_sms_read(false, None, None, Some(&chats)).is_none());
     }
 }

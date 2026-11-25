@@ -170,6 +170,8 @@ pub enum PowerAction {
     Lock,
     Sleep,
     Hibernate,
+    /// Shuts the PC down the normal way: apps with unsaved work can still stop it.
+    Shutdown,
 }
 
 impl PowerAction {
@@ -178,6 +180,7 @@ impl PowerAction {
             PowerAction::Lock => "lock",
             PowerAction::Sleep => "sleep",
             PowerAction::Hibernate => "hibernate",
+            PowerAction::Shutdown => "shutdown",
         }
     }
 
@@ -186,6 +189,7 @@ impl PowerAction {
             "lock" => Some(PowerAction::Lock),
             "sleep" => Some(PowerAction::Sleep),
             "hibernate" => Some(PowerAction::Hibernate),
+            "shutdown" => Some(PowerAction::Shutdown),
             _ => None,
         }
     }
@@ -218,8 +222,13 @@ pub(crate) async fn pc_power(shared: &Arc<Shared>, session: &Session, action: Po
     if !shared.offers(&session.peer, POWER)? {
         return Err(Error::Unsupported);
     }
-    if action == PowerAction::Hibernate
-        && !shared.offers(&session.peer, nectarlink_protocol::messages::pc_power::HIBERNATE)?
+    let needs = match action {
+        PowerAction::Hibernate => Some(nectarlink_protocol::messages::pc_power::HIBERNATE),
+        PowerAction::Shutdown => Some(nectarlink_protocol::messages::pc_power::SHUTDOWN),
+        PowerAction::Lock | PowerAction::Sleep => None,
+    };
+    if let Some(capability) = needs
+        && !shared.offers(&session.peer, capability)?
     {
         return Err(Error::Unsupported);
     }
@@ -411,14 +420,14 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
         types::PC_WAKE_INFO => {
             let info: PcWakeInfo = env.body()?;
             if !info.is_valid() {
-                tracing::debug!(%peer, "ignoring invalid pc.wake_info");
+                tracing::debug!(peer = %peer.short(), "ignoring invalid pc.wake_info");
                 return Ok(true);
             }
             let info = info.sanitized();
             let stored = (!info.macs.is_empty()).then_some(info);
             let can_wake = stored.is_some();
             if let Err(e) = shared.store.update_wake_info(&peer, stored.as_ref()) {
-                tracing::warn!(%peer, error = %e, "couldn't store wake info");
+                tracing::warn!(peer = %peer.short(), error = %e, "couldn't store wake info");
             }
             shared.emit(NodeEvent::WakeInfoChanged { device: peer, can_wake });
             return Ok(true);
@@ -439,7 +448,10 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
                         session.send(reply).await?;
                         tokio::spawn(async move {
                             // Give the answer time to leave before sleep cuts the network.
-                            if matches!(action, PowerAction::Sleep | PowerAction::Hibernate) {
+                            if matches!(
+                                action,
+                                PowerAction::Sleep | PowerAction::Hibernate | PowerAction::Shutdown
+                            ) {
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                             }
                             if let Err(reason) = tokio::task::spawn_blocking(move || platform.power(action))
@@ -547,9 +559,9 @@ mod tests {
 
     #[test]
     fn power_actions_round_trip() {
-        for action in [PowerAction::Lock, PowerAction::Sleep] {
+        for action in [PowerAction::Lock, PowerAction::Sleep, PowerAction::Hibernate, PowerAction::Shutdown] {
             assert_eq!(PowerAction::parse(action.as_str()), Some(action));
         }
-        assert_eq!(PowerAction::parse("shutdown"), None);
+        assert_eq!(PowerAction::parse("restart"), None);
     }
 }

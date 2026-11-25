@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import QtQuick
+import QtQuick.Dialogs
 import app.nectarlink
 
 // Apps: every app on the phone, to open one in a window of its own on this PC
@@ -38,6 +39,13 @@ Item {
             return ({})
         }
     }
+    // Apps pinned to the top (#477), in the order they were pinned.
+    readonly property var pinnedPkgs: {
+        Preferences.pinsRevision
+        try { return JSON.parse(Preferences.pinnedApps(deviceId)) } catch (e) { return [] }
+    }
+    readonly property var pinned: pinnedPkgs.map(pkg => apps.find(a => a.pkg === pkg)).filter(a => a !== undefined)
+    function isPinned(app) { return app && pinnedPkgs.indexOf(app.pkg) >= 0 }
     readonly property string query: search.text.trim().toLocaleLowerCase()
     readonly property var shown: query.length === 0 ? apps
         : apps.filter(a => a.label.toLocaleLowerCase().indexOf(query) >= 0 || a.pkg.indexOf(query) >= 0)
@@ -45,6 +53,18 @@ Item {
 
     function launch(app) {
         Mirror.startApp(deviceId, app.pkg, app.label)
+    }
+
+    // An app's other actions: right-click, the Menu key, or a long press.
+    property var actionApp: null
+    property bool confirmUninstall: false
+    readonly property var uninstallFeature: AppController.capsRevision >= 0 && deviceId.length > 0
+        ? AppController.featureState(deviceId, "mirroring.app_uninstall") : ({})
+    readonly property bool canUninstall: uninstallFeature.state === "available"
+    function showActions(app) {
+        actionApp = app
+        confirmUninstall = false
+        appActions.open()
     }
 
     // Loads the list the first time the page shows for a phone; Refresh reloads it.
@@ -58,6 +78,18 @@ Item {
     onDeviceIdChanged: { search.text = ""; loadIfNeeded() }
     onAvailableChanged: loadIfNeeded()
     Component.onCompleted: loadIfNeeded()
+
+    // An app file sent to the phone, which offers to install it (#442).
+    FileDialog {
+        id: apkPicker
+        title: qsTr("Install an app on %1").arg(page.deviceName)
+        fileMode: FileDialog.OpenFiles
+        nameFilters: [qsTr("Android apps (*.apk)")]
+        onAccepted: {
+            if (page.deviceId.length > 0 && selectedFiles.length > 0)
+                TransferList.send(page.deviceId, selectedFiles.map(url => url.toString()))
+        }
+    }
 
     // ---- No phone, or opening apps isn't available yet ----
     Column {
@@ -116,7 +148,7 @@ Item {
             spacing: 8
 
             Rectangle {
-                width: parent.width - refresh.width - parent.spacing
+                width: parent.width - refresh.width - installApk.width - parent.spacing * 2
                 height: parent.height
                 radius: Theme.graphite ? Theme.radiusSm : height / 2
                 color: Theme.graphite ? "transparent" : Theme.surfaceContainerHighest
@@ -156,6 +188,13 @@ Item {
                         text: qsTr("Search %1's apps").arg(page.deviceName)
                     }
                 }
+            }
+            IconButton {
+                id: installApk
+                anchors.verticalCenter: parent.verticalCenter
+                iconPath: Icons.download
+                label: qsTr("Install an app (.apk) on %1").arg(page.deviceName)
+                onClicked: apkPicker.open()
             }
             IconButton {
                 id: refresh
@@ -199,6 +238,7 @@ Item {
             }
         }
 
+        ScrollRail { flick: grid }
         GridView {
             id: grid
             anchors.top: toolbar.bottom
@@ -216,17 +256,38 @@ Item {
 
             header: Column {
                 width: grid.width
-                visible: page.query.length === 0 && page.recent.length > 0
+                visible: page.query.length === 0 && (page.recent.length > 0 || page.pinned.length > 0)
                 height: visible ? implicitHeight : 0
                 spacing: 8
                 bottomPadding: 8
 
                 Txt {
+                    visible: page.pinned.length > 0
+                    role: "label"
+                    muted: true
+                    text: qsTr("Pinned")
+                }
+                Flow {
+                    visible: page.pinned.length > 0
+                    width: parent.width
+                    Repeater {
+                        model: page.pinned
+                        delegate: AppCell {
+                            required property var modelData
+                            app: modelData
+                            width: grid.cellWidth
+                        }
+                    }
+                }
+                Divider { visible: page.pinned.length > 0 && page.recent.length > 0 }
+                Txt {
+                    visible: page.recent.length > 0
                     role: "label"
                     muted: true
                     text: qsTr("Recent")
                 }
                 Row {
+                    visible: page.recent.length > 0
                     width: parent.width
                     clip: true
                     spacing: 0
@@ -328,6 +389,75 @@ Item {
             }
         }
         HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
-        TapHandler { id: tap; onTapped: page.launch(cell.app) }
+        Keys.onMenuPressed: page.showActions(app)
+        TapHandler { id: tap; onTapped: page.launch(cell.app); onLongPressed: page.showActions(cell.app) }
+        TapHandler { acceptedButtons: Qt.RightButton; onTapped: page.showActions(cell.app) }
+    }
+
+    Sheet {
+        id: appActions
+        cardWidth: 380
+        Column {
+            width: parent.width
+            spacing: 10
+
+            Txt {
+                width: parent.width
+                role: "headline"
+                text: page.actionApp ? page.actionApp.label : ""
+                elide: Text.ElideRight
+            }
+            Button {
+                width: parent.width
+                variant: "tonal"
+                iconPath: Icons.window
+                text: qsTr("Open in a window")
+                onClicked: {
+                    appActions.close()
+                    page.launch(page.actionApp)
+                }
+            }
+            Button {
+                width: parent.width
+                variant: "tonal"
+                iconPath: Icons.pin
+                text: page.isPinned(page.actionApp) ? qsTr("Unpin") : qsTr("Pin to the top")
+                onClicked: {
+                    const app = page.actionApp
+                    appActions.close()
+                    Preferences.setAppPinned(page.deviceId, app.pkg, !page.isPinned(app))
+                }
+            }
+            // A shortcut that opens it straight in a window (#370).
+            Button {
+                width: parent.width
+                visible: Mirror.appShortcutsSupported()
+                variant: "tonal"
+                iconPath: Icons.pin
+                text: Qt.platform.os === "windows" ? qsTr("Add to desktop") : qsTr("Add to app menu")
+                onClicked: {
+                    appActions.close()
+                    Mirror.addAppShortcut(page.deviceId, page.actionApp.pkg, page.actionApp.label)
+                }
+            }
+            // Through Elevated, after a second press confirms it (D349).
+            Button {
+                width: parent.width
+                visible: page.canUninstall
+                variant: page.confirmUninstall ? "fill" : "outline"
+                iconPath: Icons.trash
+                text: page.confirmUninstall
+                    ? qsTr("Uninstall it from %1").arg(page.deviceName)
+                    : qsTr("Uninstall")
+                onClicked: {
+                    if (!page.confirmUninstall) {
+                        page.confirmUninstall = true
+                        return
+                    }
+                    appActions.close()
+                    Mirror.uninstallApp(page.deviceId, page.actionApp.pkg, page.actionApp.label)
+                }
+            }
+        }
     }
 }

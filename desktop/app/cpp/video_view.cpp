@@ -2,12 +2,16 @@
 #include "video_view.h"
 
 #include <QtCore/QHash>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QMetaMethod>
 #include <QtCore/QUrl>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
 #include <QtGui/QImage>
 #include <QtGui/QInputMethod>
 #include <QtGui/QInputMethodEvent>
+#include <QtGui/QPainter>
 #include <QtGui/QPixmap>
 #include <QtQuick/QQuickWindow>
 #include <QtQuick/QSGSimpleTextureNode>
@@ -49,6 +53,64 @@ void wakeViews(const QString &stream)
     }
 }
 
+// A small, heavily blurred, dimmed copy of a picture. Made once per resize
+// on the CPU (about a millisecond), so it's on screen with the very next
+// frame and each step of the drag only scales one small texture.
+QImage frost(const QImage &picture)
+{
+    QImage img = picture.scaled(96, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                     .convertToFormat(QImage::Format_RGB32);
+    QImage tmp(img.size(), img.format());
+    const int w = img.width(), h = img.height();
+    const int radius = 8;
+    // Three box blurs each way come close to a Gaussian one.
+    for (int pass = 0; pass < 6; ++pass) {
+        const bool across = pass % 2 == 0;
+        const int length = across ? w : h;
+        for (int y = 0; y < h; ++y) {
+            const QRgb *from = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+            QRgb *to = reinterpret_cast<QRgb *>(tmp.scanLine(y));
+            for (int x = 0; x < w; ++x) {
+                int r = 0, g = 0, b = 0;
+                for (int d = -radius; d <= radius; ++d) {
+                    const int at = qBound(0, (across ? x : y) + d, length - 1);
+                    const QRgb p = across ? from[at] : reinterpret_cast<const QRgb *>(img.constScanLine(at))[x];
+                    r += qRed(p);
+                    g += qGreen(p);
+                    b += qBlue(p);
+                }
+                const int n = 2 * radius + 1;
+                to[x] = qRgb(r / n, g / n, b / n);
+            }
+        }
+        img.swap(tmp);
+    }
+    QPainter(&img).fillRect(img.rect(), QColor(0, 0, 0, 70));
+    return img;
+}
+
+// Whether two pictures look different: more than a few of a grid of points
+// differ clearly. A blinking caret or the encoder's noise doesn't count; an
+// app that laid itself out again does.
+bool looksDifferent(const QImage &a, const QImage &b)
+{
+    if (a.size() != b.size() || a.isNull())
+        return a.size() != b.size();
+    const int grid = 48;
+    int differing = 0;
+    for (int gy = 0; gy < grid; ++gy) {
+        const int y = (2 * gy + 1) * a.height() / (2 * grid);
+        const QRgb *rowA = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const QRgb *rowB = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+        for (int gx = 0; gx < grid; ++gx) {
+            const int x = (2 * gx + 1) * a.width() / (2 * grid);
+            if (qAbs(qGray(rowA[x]) - qGray(rowB[x])) > 16)
+                ++differing;
+        }
+    }
+    return differing >= 8;
+}
+
 // Owns its texture (replaced with each picture).
 class VideoNode : public QSGSimpleTextureNode
 {
@@ -70,12 +132,14 @@ VideoView::VideoView(QQuickItem *parent)
     : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
+    QGuiApplication::instance()->installNativeEventFilter(this);
     std::lock_guard guard(lock);
     views.push_back(this);
 }
 
 VideoView::~VideoView()
 {
+    QGuiApplication::instance()->removeNativeEventFilter(this);
     std::lock_guard guard(lock);
     views.erase(std::remove(views.begin(), views.end(), this), views.end());
 }
@@ -111,6 +175,15 @@ void VideoView::setWindowAppId(const QString &appId)
     applyWindowChrome();
 }
 
+void VideoView::setWindowRelaunch(const QString &relaunch)
+{
+    if (relaunch == m_windowRelaunch)
+        return;
+    m_windowRelaunch = relaunch;
+    emit windowRelaunchChanged();
+    applyWindowChrome();
+}
+
 void VideoView::setAcceptsText(bool on)
 {
     if (on == m_acceptsText)
@@ -120,6 +193,110 @@ void VideoView::setAcceptsText(bool on)
     if (hasActiveFocus())
         QGuiApplication::inputMethod()->update(Qt::ImEnabled);
     emit acceptsTextChanged();
+}
+
+void VideoView::setFrosted(bool on)
+{
+    if (on == m_frosted)
+        return;
+    m_frosted = on;
+    m_shown = 0;
+    emit frostedChanged();
+    update();
+}
+
+void VideoView::setFrozen(bool on)
+{
+    if (on == m_frozen)
+        return;
+    m_frozen = on;
+    // Turned on: the newest picture is taken once more, then kept.
+    m_holding = false;
+    {
+        std::lock_guard guard(lock);
+        m_kept = on ? latest.value(m_stream).image : QImage();
+    }
+    if (m_changedSinceFrozen) {
+        m_changedSinceFrozen = false;
+        emit changedSinceFrozenChanged();
+    }
+    emit frozenChanged();
+    update();
+}
+
+void VideoView::setKeepShape(bool on)
+{
+    if (on == m_keepShape)
+        return;
+    m_keepShape = on;
+    emit keepShapeChanged();
+}
+
+bool VideoView::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
+{
+#ifdef _WIN32
+    if (eventType != "windows_generic_MSG")
+        return false;
+    const MSG *msg = static_cast<const MSG *>(message);
+    // An edge is grabbed (the press on it, or the system's Size command,
+    // before the mouse moves), dragged, or let go.
+    const bool grabbed = (msg->message == WM_NCLBUTTONDOWN && msg->wParam >= HTLEFT && msg->wParam <= HTBOTTOMRIGHT)
+        || (msg->message == WM_SYSCOMMAND && (msg->wParam & 0xFFF0) == SC_SIZE);
+    if (!grabbed && msg->message != WM_SIZING && msg->message != WM_EXITSIZEMOVE)
+        return false;
+    QQuickWindow *win = window();
+    // Only a window that exists: winId() would create one.
+    if (!win || !win->handle() || msg->hwnd != reinterpret_cast<HWND>(win->winId()))
+        return false;
+    if (m_sizing != (msg->message != WM_EXITSIZEMOVE)) {
+        m_sizing = !m_sizing;
+        emit sizingChanged();
+        // Only where a window listens (a mirror window, not a preview on a page).
+        if (m_sizing && isSignalConnected(QMetaMethod::fromSignal(&VideoView::sizingChanged))) {
+            // What the window changed for it is drawn now: once the press is
+            // handed on, Windows holds the thread until the mouse moves.
+            win->update();
+            QEvent draw(QEvent::UpdateRequest);
+            QCoreApplication::sendEvent(win, &draw);
+        }
+    }
+    if (msg->message != WM_SIZING || !m_keepShape || m_frameSize.isEmpty())
+        return false;
+    // The rect being dragged is the whole window; the picture fills the
+    // client area, so the frame's thickness stays out of the shape.
+    RECT outer{}, client{};
+    GetWindowRect(msg->hwnd, &outer);
+    GetClientRect(msg->hwnd, &client);
+    const int frameW = (outer.right - outer.left) - client.right;
+    const int frameH = (outer.bottom - outer.top) - client.bottom;
+    RECT *r = reinterpret_cast<RECT *>(msg->lParam);
+    const double ratio = double(m_frameSize.width()) / m_frameSize.height();
+    const int w = qMax(1, int(r->right - r->left) - frameW);
+    const int h = qMax(1, int(r->bottom - r->top) - frameH);
+    switch (msg->wParam) {
+    case WMSZ_TOP:
+    case WMSZ_BOTTOM:
+        // Height leads; the width follows to the right.
+        r->right = r->left + qRound(h * ratio) + frameW;
+        break;
+    case WMSZ_TOPLEFT:
+    case WMSZ_TOPRIGHT:
+        // Width leads; the top edge follows.
+        r->top = r->bottom - (qRound(w / ratio) + frameH);
+        break;
+    default:
+        // Left, right and the bottom corners: width leads, the bottom follows.
+        r->bottom = r->top + qRound(w / ratio) + frameH;
+        break;
+    }
+    *result = TRUE;
+    return true;
+#else
+    Q_UNUSED(eventType)
+    Q_UNUSED(message)
+    Q_UNUSED(result)
+    return false;
+#endif
 }
 
 void VideoView::inputMethodEvent(QInputMethodEvent *event)
@@ -152,11 +329,39 @@ QVariant VideoView::inputMethodQuery(Qt::InputMethodQuery query) const
     }
 }
 
+#ifdef _WIN32
+namespace {
+// Takes the window's taskbar ID and relaunch details off it again.
+void clearTaskbarProperties(QWindow *win)
+{
+    HWND hwnd = reinterpret_cast<HWND>(win->winId());
+    IPropertyStore *store = nullptr;
+    if (!hwnd || FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) || !store)
+        return;
+    PROPVARIANT empty{};
+    for (const PROPERTYKEY &key : {PKEY_AppUserModel_RelaunchIconResource,
+                                   PKEY_AppUserModel_RelaunchDisplayNameResource,
+                                   PKEY_AppUserModel_RelaunchCommand, PKEY_AppUserModel_ID})
+        store->SetValue(key, empty);
+    store->Commit();
+    store->Release();
+}
+} // namespace
+#endif
+
 void VideoView::itemChange(ItemChange change, const ItemChangeData &value)
 {
     QQuickItem::itemChange(change, value);
     if (change == ItemSceneChange && value.window) {
         connect(value.window, &QWindow::visibleChanged, this, [this](bool) { applyWindowChrome(); });
+#ifdef _WIN32
+        // Windows wants the taskbar properties gone before the window is.
+        QQuickWindow *win = value.window;
+        connect(win, &QWindow::visibleChanged, this, [win](bool visible) {
+            if (!visible)
+                clearTaskbarProperties(win);
+        });
+#endif
         applyWindowChrome();
     }
 }
@@ -167,14 +372,36 @@ void VideoView::applyWindowChrome()
     if (!win)
         return;
 #ifdef _WIN32
-    if (!m_windowAppId.isEmpty()) {
+    if (!m_windowAppId.isEmpty() && win->isVisible()) {
         if (HWND hwnd = reinterpret_cast<HWND>(win->winId())) {
             IPropertyStore *store = nullptr;
             if (SUCCEEDED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) && store) {
-                PROPVARIANT pv{};
-                pv.vt = VT_LPWSTR;
-                pv.pwszVal = const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(m_windowAppId.utf16()));
-                store->SetValue(PKEY_AppUserModel_ID, pv);
+                auto set = [store](const PROPERTYKEY &key, const QString &text) {
+                    PROPVARIANT pv{};
+                    pv.vt = VT_LPWSTR;
+                    pv.pwszVal = const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(text.utf16()));
+                    store->SetValue(key, pv);
+                };
+                // Pinned, the window starts its app again, not NectarLink
+                // (#465). Windows reads these with the ID, so they go first.
+                const QJsonObject relaunch = QJsonDocument::fromJson(m_windowRelaunch.toUtf8()).object();
+                const QString command = relaunch.value(QStringLiteral("command")).toString();
+                const QString name = relaunch.value(QStringLiteral("name")).toString();
+                const QString icon = relaunch.value(QStringLiteral("icon")).toString();
+                PROPVARIANT empty{};
+                if (!command.isEmpty() && !name.isEmpty()) {
+                    set(PKEY_AppUserModel_RelaunchCommand, command);
+                    set(PKEY_AppUserModel_RelaunchDisplayNameResource, name);
+                    if (!icon.isEmpty())
+                        set(PKEY_AppUserModel_RelaunchIconResource, icon);
+                    else
+                        store->SetValue(PKEY_AppUserModel_RelaunchIconResource, empty);
+                } else {
+                    store->SetValue(PKEY_AppUserModel_RelaunchIconResource, empty);
+                    store->SetValue(PKEY_AppUserModel_RelaunchDisplayNameResource, empty);
+                    store->SetValue(PKEY_AppUserModel_RelaunchCommand, empty);
+                }
+                set(PKEY_AppUserModel_ID, m_windowAppId);
                 store->Commit();
                 store->Release();
             }
@@ -199,6 +426,9 @@ QRectF VideoView::pictureRect() const
 {
     if (m_frameSize.isEmpty())
         return {};
+    const qreal shapes = (qreal(m_frameSize.width()) / m_frameSize.height()) / (width() / qMax<qreal>(1, height()));
+    if (m_fillsNearShape && qAbs(shapes - 1) < 0.02)
+        return QRectF(0, 0, width(), height());
     const QSizeF fitted = QSizeF(m_frameSize).scaled(size(), Qt::KeepAspectRatio);
     return QRectF((width() - fitted.width()) / 2, (height() - fitted.height()) / 2, fitted.width(), fitted.height());
 }
@@ -214,10 +444,15 @@ void VideoView::queueFrame()
 void VideoView::frameArrived()
 {
     m_framePending.store(false);
-    QSize size;
+    QImage newest;
     {
         std::lock_guard guard(lock);
-        size = latest.value(m_stream).image.size();
+        newest = latest.value(m_stream).image;
+    }
+    const QSize size = newest.size();
+    if (m_frozen && !m_changedSinceFrozen && !newest.isNull() && looksDifferent(m_kept, newest)) {
+        m_changedSinceFrozen = true;
+        emit changedSinceFrozenChanged();
     }
     if (size != m_frameSize) {
         m_frameSize = size;
@@ -243,14 +478,23 @@ QSGNode *VideoView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *)
     auto *node = static_cast<VideoNode *>(old);
     if (!node)
         node = new VideoNode;
-    if (picture.serial != m_shown || !node->texture()) {
-        QSGTexture *texture = window()->createTextureFromImage(picture.image);
+    if (!node->texture() || (picture.serial != m_shown && !m_holding)) {
+        QSGTexture *texture = window()->createTextureFromImage(m_frosted ? frost(picture.image) : picture.image);
         texture->setFiltering(QSGTexture::Linear);
         node->replaceTexture(texture);
         m_shown = picture.serial;
+        m_holding = m_frozen;
     }
     node->setFiltering(QSGTexture::Linear);
-    node->setRect(pictureRect());
+    if (m_frosted) {
+        // The shape of the picture on screen (a kept one may be older than
+        // `frameSize`), covering the item.
+        const QSizeF cover = QSizeF(node->texture()->textureSize()).scaled(size(), Qt::KeepAspectRatioByExpanding);
+        node->setRect(QRectF((width() - cover.width()) / 2, (height() - cover.height()) / 2, cover.width(),
+                             cover.height()));
+    } else {
+        node->setRect(pictureRect());
+    }
     return node;
 }
 

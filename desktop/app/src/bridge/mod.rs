@@ -6,6 +6,8 @@
 
 // cxx-qt generates FFI code with `unsafe`; these modules are the boundary.
 #[allow(unsafe_code)]
+pub mod agents;
+#[allow(unsafe_code)]
 pub mod app;
 #[allow(unsafe_code)]
 pub mod calls;
@@ -28,6 +30,8 @@ pub mod notifications;
 #[allow(unsafe_code)]
 pub mod pairing;
 #[allow(unsafe_code)]
+pub mod phone_install;
+#[allow(unsafe_code)]
 pub mod phone_mic;
 #[allow(unsafe_code)]
 pub mod photo_backup;
@@ -35,6 +39,8 @@ pub mod photo_backup;
 pub mod photos;
 #[allow(unsafe_code)]
 pub mod prefs;
+#[allow(unsafe_code)]
+pub mod report;
 #[allow(unsafe_code)]
 pub mod setup;
 #[allow(unsafe_code)]

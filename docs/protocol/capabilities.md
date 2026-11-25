@@ -28,6 +28,7 @@ capability is missing.
 | `clip.image` | Accepts images on its clipboard ([clipboard service](clipboard.md)) | app update |
 | `media.control` | Shares its media players for remote control ([media service](media.md); phone: needs notification access) | phone: notification access · desktop: app update |
 | `media.remote` | Shows and controls other devices' media players | app update |
+| `diag.report` | Answers `diag.ask` with its part of a problem report; shares its log only when its user taps Share ([problem reports](diag.md)) | app update |
 
 > **LocalSend v2.1 LAN interop:** Unpaired LocalSend discovery and file transfer
 > (`224.0.0.167:53317` UDP multicast + HTTP/HTTPS `/api/localsend/v2/*` on TCP
@@ -44,8 +45,10 @@ capability is missing.
 | `notify.reply` | Accepts inline replies and actions on notifications | notification access |
 | `notify.sensitive` | Forwards notifications Android hides as sensitive (e.g. one-time codes) | Elevated |
 | `notify.show` | Shows a paired phone's or tablet's notifications ([notifications service](notifications.md)) | app update |
+| `unlock.linux.key` | Authorizes a paired Linux PC's session-unlock challenge with a biometric-backed signing key ([Linux session unlock](linux-unlock.md)) | Android 11 or newer with a strong biometric |
 | `sms.read` | Lists conversations and messages ([messages](sms.md)) | SMS permission |
 | `sms.send` | Sends texts when a PC asks ([messages](sms.md)) | SMS permission |
+| `sms.sims` | Lists the SIMs it texts from and sends on the one a PC picks ([messages](sms.md)) | SMS and phone permissions |
 | `call.state` | Reports incoming and ongoing calls ([calls](calls.md)) | phone permission |
 | `call.control` | Answers, declines and silences calls when a PC asks ([calls](calls.md)) | phone permission |
 | `call.incall` | Mutes, holds and presses keys on the call in progress ([calls](calls.md)) | Elevated, Android 12+ |
@@ -86,7 +89,9 @@ capability is missing.
 |---|---|---|
 | `pc.power` | Locks or sleeps on request ([actions](actions.md)) | app update |
 | `pc.power.hibernate` | Can hibernate on request now ([actions](actions.md)); not while hibernation is off on the PC | app update |
+| `pc.power.shutdown` | Can be shut down on request ([actions](actions.md)); Windows and Linux | app update |
 | `pc.wake` | Shares network adapter addresses (`pc.wake_info`) so a paired phone can wake it with Wake-on-LAN ([actions](actions.md)) | app update |
+| `unlock.linux.pc` | Requests a biometric signature to unlock a Linux session ([Linux session unlock](linux-unlock.md)) | Linux PAM service and desktop unlock relay |
 | `photos.show` | Shows a phone's new photos and gallery ([photos](photos.md)) | app update |
 | `call.show` | Shows a phone's calls, recent calls and dialer ([calls](calls.md)) | app update |
 | `contacts.show` | Shows a phone's contacts ([contacts](contacts.md)) | app update |
@@ -97,6 +102,7 @@ capability is missing.
 | `files.browse` | Lets a paired phone browse and fetch its files | app update |
 | `storage.mount` | Mounts a paired phone's shared storage in File Explorer ([storage](storage.md)) | app update |
 | `input.inject` | Accepts pointer, keyboard and presentation input ([remote input](remote.md)) | app update |
+| `input.gamepad` | Plugs in a game controller for a phone's Gamepad ([remote input](remote.md) §3.1) | app update |
 | `recorder` | Saves and converts voice recordings from a phone ([recorder](recorder.md)) | app update |
 | `deck.actions` | Shares its Deck layout and live tile state and runs Deck actions ([deck](deck.md)) | app update |
 | `pc.audio` | Reports active audio output devices in `deck.state` and accepts `pc.audio.set` volume/mute changes ([deck](deck.md)) | app update |

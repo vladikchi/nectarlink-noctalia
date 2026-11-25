@@ -243,7 +243,9 @@ Item {
         return parts.join(" ")
     }
 
+    ScrollRail { flick: homeFlick }
     Flickable {
+        id: homeFlick
         anchors.fill: parent
         contentHeight: column.height + Theme.contentPadding * 2
         boundsBehavior: Flickable.StopAtBounds
@@ -485,7 +487,18 @@ Item {
                 model: DeviceList
                 delegate: DeviceHome {
                     required property int index
-                    visible: index === page.current
+                    required property string os
+                    visible: index === page.current && !page.isPc(kind, os)
+                    width: visible ? column.width : 0
+                }
+            }
+
+            // Another PC paired with this one (#432) gets its own, smaller page.
+            Repeater {
+                model: DeviceList
+                delegate: PcHome {
+                    required property int index
+                    visible: index === page.current && page.isPc(kind, os)
                     width: visible ? column.width : 0
                 }
             }
@@ -1565,60 +1578,7 @@ Item {
             }
 
             // ---- Transfers ----
-            Card {
-                width: parent.width
-                visible: TransferList.count > 0
-                Column {
-                    width: parent.width
-                    spacing: 4
-                    Item {
-                        width: parent.width
-                        height: Math.max(transfersHeader.height, clearTransfers.height)
-                        Txt {
-                            id: transfersHeader
-                            anchors.verticalCenter: parent.verticalCenter
-                            role: "label"
-                            muted: true
-                            text: qsTr("Transfers")
-                        }
-                        Row {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 6
-                            Button {
-                                variant: "text"
-                                size: "sm"
-                                text: qsTr("Timeline")
-                                onClicked: AppController.currentPage = "timeline"
-                            }
-                            Button {
-                                id: clearTransfers
-                                visible: TransferList.count > TransferList.active
-                                variant: "text"
-                                size: "sm"
-                                text: qsTr("Clear finished")
-                                onClicked: TransferList.clearFinished()
-                            }
-                        }
-                    }
-                    Column {
-                        id: transferList
-                        width: parent.width
-                        move: Transition {
-                            enabled: !Theme.reduceMotion && !page.resizing
-                            NumberAnimation { properties: "y"; duration: 220; easing.type: Easing.OutCubic }
-                        }
-                        add: Transition {
-                            enabled: !Theme.reduceMotion && !page.resizing
-                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
-                        }
-                        Repeater {
-                            model: TransferList
-                            delegate: TransferItem { width: transferList.width }
-                        }
-                    }
-                }
-            }
+            TransfersCard { width: parent.width }
 
             // ---- LocalSend nearby ----
             LocalSendCard {
@@ -1769,7 +1729,7 @@ Item {
                                 height: visible ? implicitHeight : 0
                                 canOpenApp: home.feature("mirroring.app_windows").state === "available" && app.length > 0
                                 onOpenAppRequested: Mirror.startApp(deviceId, app, appName.length > 0 ? appName : app)
-                                onOptionsRequested: appSheet.openFor(app, appName)
+                                onOptionsRequested: appSheet.openFor(app, appName, title, text)
                                 onImageClicked: (url) => imagePreviewSheet.openFor(url, title.length > 0 ? title : appName)
                             }
                         }
@@ -1810,9 +1770,9 @@ Item {
                                 width: parent.width - 32 - (turnOn.visible ? turnOn.width + 24 : 0)
                                 role: "bodySmall"
                                 wrapMode: Text.WordWrap
-                                text: Qt.platform.os === "linux"
-                                    ? qsTr("Desktop notifications are off. Turn them on in your system's notification settings.")
-                                    : qsTr("Windows notifications are off.")
+                                text: Qt.platform.os === "windows"
+                                    ? qsTr("Windows notifications are off.")
+                                    : qsTr("Desktop notifications are off. Turn them on in your system's notification settings.")
                             }
                             Button {
                                 id: turnOn
@@ -2655,10 +2615,15 @@ Item {
         property string app
         property string appName
         property string rule: "show"
+        // The notification whose menu was opened, to copy from (#526).
+        property string noteTitle
+        property string noteText
         cardWidth: 420
-        function openFor(app, name) {
+        function openFor(app, name, title, text) {
             appSheet.app = app
             appSheet.appName = name
+            appSheet.noteTitle = title || ""
+            appSheet.noteText = text || ""
             appSheet.rule = NotificationList.appRule(app)
             open()
         }
@@ -2666,6 +2631,27 @@ Item {
             width: parent.width
             spacing: 16
             Txt { width: parent.width; text: qsTr("%1 notifications").arg(appSheet.appName); role: "headline"; wrapMode: Text.WordWrap }
+            Flow {
+                width: parent.width
+                spacing: 8
+                visible: appSheet.noteText.length > 0 || appSheet.noteTitle.length > 0
+                Button {
+                    visible: appSheet.noteText.length > 0
+                    variant: "tonal"
+                    size: "sm"
+                    iconPath: Icons.copy
+                    text: qsTr("Copy text")
+                    onClicked: { NotificationList.copyText("", appSheet.noteText); appSheet.close() }
+                }
+                Button {
+                    visible: appSheet.noteTitle.length > 0 && appSheet.noteText.length > 0
+                    variant: "tonal"
+                    size: "sm"
+                    iconPath: Icons.copy
+                    text: qsTr("Copy title and text")
+                    onClicked: { NotificationList.copyText(appSheet.noteTitle, appSheet.noteText); appSheet.close() }
+                }
+            }
             Segmented {
                 options: [
                     { value: "show", label: qsTr("Show") },
@@ -2687,9 +2673,9 @@ Item {
                       ? qsTr("Hidden on this PC.")
                       : appSheet.rule === "quiet"
                         ? qsTr("Shown in feed without pop-ups.")
-                        : Qt.platform.os === "linux"
-                          ? qsTr("Shown in feed and as desktop pop-ups.")
-                          : qsTr("Shown in feed and as Windows pop-ups.")
+                        : Qt.platform.os === "windows"
+                          ? qsTr("Shown in feed and as Windows pop-ups.")
+                          : qsTr("Shown in feed and as desktop pop-ups.")
             }
             Row {
                 anchors.right: parent.right
@@ -3138,6 +3124,222 @@ Item {
     }
 
     // A quick action. Unavailable actions are dimmed and say what unlocks them.
+    /** A paired PC rather than a phone or tablet. */
+    function isPc(kind, os) {
+        return kind === "desktop" || kind === "laptop"
+            || (kind === "unknown" && (os === "windows" || os === "macos" || os === "linux"))
+    }
+
+    // Another PC (#432): its status, and sending it files and the clipboard, or ringing it.
+    component PcHome: Column {
+        id: pcHome
+        required property string deviceId
+        required property string name
+        required property string kind
+        required property string os
+        required property bool online
+        required property string path
+        required property int rttMs
+        required property int battery
+        required property bool charging
+        required property real lastSeen
+        required property bool reconnect
+
+        spacing: Theme.gutter
+
+        // Dropped files go to this PC, as they do to a phone on screen.
+        Binding { target: page; property: "currentDeviceId"; value: pcHome.deviceId; when: pcHome.visible; restoreMode: Binding.RestoreNone }
+        Binding { target: page; property: "currentDeviceName"; value: pcHome.name; when: pcHome.visible; restoreMode: Binding.RestoreNone }
+        Binding {
+            target: page
+            property: "currentCanReceive"
+            value: pcHome.feature("pc.files").state === "available"
+                   || (!pcHome.online
+                       && pcHome.feature("pc.files").state !== "locked"
+                       && pcHome.feature("pc.files").state !== "unsupported")
+            when: pcHome.visible
+        }
+
+        function feature(id) {
+            return AppController.capsRevision >= 0 ? AppController.featureState(deviceId, id) : ({})
+        }
+        readonly property bool ringing: AppController.ringingDevices.includes(pcHome.deviceId)
+
+        Card {
+            width: parent.width
+            Row {
+                width: parent.width
+                spacing: 16
+
+                Rectangle {
+                    width: 56
+                    height: 56
+                    radius: 16
+                    color: Theme.primaryContainer
+                    Icon {
+                        anchors.centerIn: parent
+                        path: pcHome.kind === "laptop" ? Icons.laptop : Icons.desktop
+                        width: 28
+                        height: 28
+                        color: Theme.primaryContainerContent
+                    }
+                }
+
+                Column {
+                    width: parent.width - 72
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 4
+                    Txt {
+                        width: parent.width
+                        role: "title"
+                        text: pcHome.name
+                        elide: Text.ElideRight
+                    }
+                    Txt {
+                        width: parent.width
+                        role: "bodySmall"
+                        muted: true
+                        elide: Text.ElideRight
+                        text: {
+                            let link = pcHome.online
+                                ? (pcHome.path === "relay"
+                                   ? (pcHome.rttMs >= 1 ? qsTr("Away · %1 ms").arg(pcHome.rttMs) : qsTr("Away"))
+                                   : (pcHome.rttMs >= 1 ? qsTr("Connected · %1 ms").arg(pcHome.rttMs) : qsTr("Connected")))
+                                : !pcHome.reconnect ? qsTr("Not reconnecting")
+                                : (pcHome.lastSeen > 0 ? qsTr("Offline · %1").arg(page.relativeTime(pcHome.lastSeen))
+                                                       : qsTr("Offline"))
+                            if (pcHome.online && pcHome.battery >= 0 && pcHome.feature("pc.battery").state === "available")
+                                link += " · " + (pcHome.charging ? qsTr("%1% · charging").arg(pcHome.battery)
+                                                                  : qsTr("%1%").arg(pcHome.battery))
+                            return link
+                        }
+                    }
+                }
+            }
+        }
+
+        Grid {
+            id: pcActions
+            width: parent.width
+            columns: width > 640 ? 3 : 2
+            spacing: 12
+            readonly property real tileWidth: (width - spacing * (columns - 1)) / columns
+
+            ActionTile {
+                width: pcActions.tileWidth
+                deviceOnline: pcHome.online
+                queueableWhenOffline: true
+                title: qsTr("Send files")
+                subtitle: ""
+                iconPath: Icons.send
+                feature: pcHome.feature("pc.files")
+                onClicked: pcFilePicker.open()
+                sideIcon: Icons.folder
+                sideLabel: qsTr("Send a folder")
+                onSideClicked: pcFolderPicker.open()
+            }
+            ActionTile {
+                width: pcActions.tileWidth
+                deviceOnline: pcHome.online
+                title: qsTr("Send clipboard")
+                subtitle: ""
+                iconPath: Icons.clipboard
+                feature: pcHome.feature("pc.clipboard")
+                onClicked: AppController.sendClipboard(pcHome.deviceId)
+            }
+            ActionTile {
+                width: pcActions.tileWidth
+                deviceOnline: pcHome.online
+                title: pcHome.ringing ? qsTr("Stop ringing") : qsTr("Ring PC")
+                subtitle: ""
+                iconPath: Icons.ring
+                feature: pcHome.feature("pc.ring")
+                active: pcHome.ringing
+                onClicked: AppController.ring(pcHome.deviceId, !pcHome.ringing)
+            }
+        }
+
+        Txt {
+            width: parent.width
+            role: "bodySmall"
+            muted: true
+            wrapMode: Text.WordWrap
+            visible: pcHome.feature("pc.clipboard").state === "available"
+            text: Preferences.autoClipboard
+                ? qsTr("What you copy here also goes to %1, and what you copy there comes here.").arg(pcHome.name)
+                : qsTr("Sync clipboard is off in Settings, so copies only go over with Send clipboard.")
+        }
+
+        TransfersCard { width: parent.width }
+
+        FileDialog {
+            id: pcFilePicker
+            title: qsTr("Send to %1").arg(pcHome.name)
+            fileMode: FileDialog.OpenFiles
+            onAccepted: TransferList.send(pcHome.deviceId, selectedFiles.map(url => url.toString()))
+        }
+        FolderDialog {
+            id: pcFolderPicker
+            title: qsTr("Send a folder to %1").arg(pcHome.name)
+            onAccepted: TransferList.send(pcHome.deviceId, [selectedFolder.toString()])
+        }
+    }
+
+    // Transfers are app-wide, so a phone's page and another PC's page show the same list.
+    component TransfersCard: Card {
+        visible: TransferList.count > 0
+        Column {
+            width: parent.width
+            spacing: 4
+            Item {
+                width: parent.width
+                height: Math.max(transfersHeader.height, clearTransfers.height)
+                Txt {
+                    id: transfersHeader
+                    anchors.verticalCenter: parent.verticalCenter
+                    role: "label"
+                    muted: true
+                    text: qsTr("Transfers")
+                }
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    Button {
+                        variant: "text"
+                        size: "sm"
+                        text: qsTr("Timeline")
+                        onClicked: AppController.currentPage = "timeline"
+                    }
+                    Button {
+                        id: clearTransfers
+                        visible: TransferList.count > TransferList.active
+                        variant: "text"
+                        size: "sm"
+                        text: qsTr("Clear finished")
+                        onClicked: TransferList.clearFinished()
+                    }
+                }
+            }
+            Column {
+                id: transferList
+                width: parent.width
+                move: Transition {
+                    enabled: !Theme.reduceMotion && !page.resizing
+                    NumberAnimation { properties: "y"; duration: 220; easing.type: Easing.OutCubic }
+                }
+                add: Transition {
+                    enabled: !Theme.reduceMotion && !page.resizing
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 200 }
+                }
+                Repeater {
+                    model: TransferList
+                    delegate: TransferItem { width: transferList.width }
+                }
+            }
+        }
+    }
+
     component ActionTile: Rectangle {
         id: tile
         property string title

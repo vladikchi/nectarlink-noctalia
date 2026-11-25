@@ -130,6 +130,8 @@ data class Device(
     val id: String,
     val name: String,
     val kind: app.nectarlink.core.DeviceKind,
+    /** "windows", "macos", "linux", "android", or what a newer device says. */
+    val os: String = "",
     val model: String?,
     val accent: UInt? = null,
     val pairedAt: Long,
@@ -147,6 +149,8 @@ data class Device(
     val storageEnabled: Boolean = false,
     /** Whether this PC may ask for this phone's microphone (on by default). */
     val micEnabled: Boolean = true,
+    /** Whether this PC may ask this phone to unlock it (off by default). */
+    val unlockEnabled: Boolean = false,
 ) {
     /** A paired phone or tablet rather than a PC. */
     val isAndroid: Boolean
@@ -187,8 +191,12 @@ data class CoreState(
     val notificationAccess: Boolean = false,
     /** Whether Android lets NectarLink reach the local network (Android 17). */
     val localNetwork: Boolean = true,
-    /** Whether the Elevated helper runs (wireless debugging). */
+    /** Whether the Elevated helper (`InputServer` via ADB, root, or Shizuku) runs. */
     val elevated: Boolean = false,
+    /** Whether Nectarlink Services completed a verified handshake and is currently connected. */
+    val romServiceAvailable: Boolean = false,
+    /** Bitmask of [NectarlinkServiceContract].CAP_* reported by the connected system service. */
+    val romServiceCapabilities: Long = 0L,
     /** Whether the user turned on control from the PC (the accessibility service). */
     val inputAccess: Boolean = false,
     /** Whether a paired PC tried to inject mouse/keyboard input while input access is off. */
@@ -247,6 +255,11 @@ data class CoreState(
     val localsendEnabled: Boolean = false,
     /** Whether staying connected over mobile data (LTE/5G) or relay when away from Wi-Fi is enabled. */
     val awayMode: Boolean = false,
+    /** Whether the phone has Wi-Fi, Ethernet, USB or a VPN; without one (and without
+     *  [awayMode]) it waits for one rather than trying to reach PCs (#397). */
+    val hasNetwork: Boolean = true,
+    /** Why the phone isn't looking for its PCs on the network it has, if it isn't (#397). */
+    val dialingPause: DialingPause? = null,
     /** Nearby LocalSend devices discovered on the LAN. */
     val localsendPeers: List<LocalSendPeer> = emptyList(),
     /** IDs of paired PCs currently typing on this phone without mirroring. */
@@ -255,6 +268,18 @@ data class CoreState(
     val activeMediaColor: UInt? = null,
 ) {
     fun device(id: String): Device? = devices.firstOrNull { it.id == id }
+
+    /** Whether [flag] is provided by normal Elevated or by the verified system service. */
+    fun hasElevatedCapability(flag: Long): Boolean =
+        elevated || (romServiceAvailable && (romServiceCapabilities and flag) == flag)
+
+    /** Whether Elevated setup UI should be hidden because the verified system service covers all core capabilities. */
+    val hideElevated: Boolean
+        get() = romServiceAvailable &&
+            app.nectarlink.services.client.NectarlinkServiceContract.hasAllRequiredCapabilities(
+                romServiceCapabilities,
+                android.os.Build.VERSION.SDK_INT,
+            )
 
     /**
      * Whether a connected PC has "Phone as speaker" on: its deck state lists
@@ -275,6 +300,7 @@ data class CoreState(
         paired: List<PairedDevice>,
         storageAllowed: Set<String> = emptySet(),
         micOff: Set<String> = emptySet(),
+        unlockAllowed: Set<String> = emptySet(),
     ): CoreState {
         val prevById = devices.associateBy { it.id }
         return copy(
@@ -285,6 +311,7 @@ data class CoreState(
                     deckState = prev?.deckState,
                     storageEnabled = if (p.id in storageAllowed) true else prev?.storageEnabled ?: false,
                     micEnabled = p.id !in micOff,
+                    unlockEnabled = p.id in unlockAllowed,
                 )
             }.sortedWith(deviceOrder),
         )
@@ -297,6 +324,9 @@ data class CoreState(
         update(id) { it.copy(micEnabled = enabled) }.copy(
             micRequestFrom = if (!enabled && micRequestFrom == id) null else micRequestFrom,
         )
+
+    fun withUnlockEnabled(id: String, enabled: Boolean): CoreState =
+        update(id) { it.copy(unlockEnabled = enabled) }
 
     fun withStorageEnabled(id: String, enabled: Boolean): CoreState =
         update(id) { it.copy(storageEnabled = enabled) }.copy(
@@ -421,15 +451,19 @@ data class CoreState(
         is Event.CallChanged,
         is Event.CallLogChanged,
         is Event.ContactsChanged,
+        is Event.DiagLogAsked,
+        is Event.ReportLogArrived,
         is Event.SmsChanged,
         is Event.PhoneToggles,
         is Event.Mirroring,
         is Event.StorageChanged,
         is Event.Webcam,
         is Event.PcAudioFrame,
+        is Event.CallAudioUplink,
         is Event.PcMirrorConfig,
         is Event.PcMirrorFrame,
         is Event.PcMirrorEnded,
+        is Event.PcMirrorCaptureFailed,
         -> this
     }
 
@@ -506,15 +540,19 @@ internal fun Event.affectsCoreState(): Boolean = when (this) {
     is Event.CallChanged,
     is Event.CallLogChanged,
     is Event.ContactsChanged,
+    is Event.DiagLogAsked,
+    is Event.ReportLogArrived,
     is Event.SmsChanged,
     is Event.PhoneToggles,
     is Event.Mirroring,
     is Event.StorageChanged,
     is Event.Webcam,
     is Event.PcAudioFrame,
+    is Event.CallAudioUplink,
     is Event.PcMirrorConfig,
     is Event.PcMirrorFrame,
     is Event.PcMirrorEnded,
+    is Event.PcMirrorCaptureFailed,
     -> false
     else -> true
 }
@@ -532,6 +570,7 @@ internal fun PairedDevice.toDevice() = Device(
     id = id,
     name = info.name,
     kind = info.kind,
+    os = info.os,
     model = info.model,
     accent = info.accent,
     pairedAt = pairedAt,
@@ -539,3 +578,12 @@ internal fun PairedDevice.toDevice() = Device(
     canWake = canWake,
     reconnect = reconnect,
 )
+
+/** Why the phone holds back from looking for its PCs on a network it has (#397). */
+enum class DialingPause {
+    /** Known networks only is on, and this isn't one where a PC was found. */
+    UnknownNetwork,
+
+    /** No PC was reachable for as long as Stop trying after allows. */
+    GaveUp,
+}

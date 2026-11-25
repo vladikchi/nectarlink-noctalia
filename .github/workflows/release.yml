@@ -3,7 +3,7 @@ name: Release
 
 on:
   push:
-    tags: ['v*\+noctalia.*']
+    tags: ['v*-nightly.*\+noctalia']
 
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+noctalia\.[0-9]+$ || "v$version" != "$GITHUB_REF_NAME" ]]; then
-            echo "::error::Expected a Noctalia tag matching Cargo.toml ($version), got $GITHUB_REF_NAME"
+          version=$(grep -m1 '^version = ' desktop/app/Cargo.toml | cut -d'"' -f2)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]+\+noctalia$ || "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::Expected a Noctalia tag matching the Desktop version ($version), got $GITHUB_REF_NAME"
             exit 1
           fi
 
@@ -63,5 +63,5 @@ jobs:
           sha256sum "${release_assets[@]}" > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "NectarLink для Noctalia ${version}" \
-            --notes "Linux x86-64: установщик, .deb, .rpm, AppImage и архив. См. [руководство](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/README.md) и [изменения](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/CHANGES.md). Проверены сборка, запуск пакетов и работа установщика в CI; проверка на реальном телефоне не проводилась."
+            --title "NectarLink for Noctalia ${version}" \
+            --notes "Linux x86-64 release based on NectarLink Nightly 12. Includes the installer, Debian and RPM packages, an AppImage, and a tarball. Use the official upstream Android app; this release does not include an APK. See the [installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/README.md). Packages and the installer are checked in CI; a physical phone is not part of those checks."

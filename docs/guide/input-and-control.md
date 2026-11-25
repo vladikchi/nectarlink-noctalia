@@ -11,6 +11,7 @@ NectarLink lets you control your PC from your phone and control your phone from 
 | Feature | Requirements |
 | :--- | :--- |
 | **Control PC from phone (Touchpad, Air mouse, Keyboard, Voice dictation, Presentation remote)** | `Standard` power level on Android. Per-phone **Remote mouse, keyboard & Deck** (`remote_input`) toggle enabled on the PC in **Settings › Devices** (off by default; the PC shows a one-time consent prompt the first time your phone asks). Air mouse requires a phone gyroscope sensor; Voice dictation requires Android **Microphone** permission (`RECORD_AUDIO`). |
+| **Gamepad** | The **Remote mouse, keyboard & Deck** toggle on the PC, as above. On Windows, the free [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) driver installed on the PC (many PCs already have it from DS4Windows or similar). On Linux, access to `/dev/uinput`, which the mouse and keyboard already use. Not on macOS yet. |
 | **Type on phone from PC keyboard (without mirroring)** | `Assist` (Android Accessibility Service) or `Elevated` (Wireless Debugging) on the phone. |
 | **`Deck` macro pad** | Per-phone **Remote mouse, keyboard & Deck** (`remote_input`) toggle enabled on the PC. Tiles that run custom PC shell commands also require the separate per-phone **Run Deck shell commands** (`commands`) toggle in PC **Settings › Devices** (off by default). |
 | **Phone controls on PC Home** | `Standard` for Media volume, Ringer mode (Ring/Vibrate), and Flashlight. **Do Not Disturb and silent mode** requires Android Notification Policy Access (**Settings › Permissions › Control from your PC**). **Screen brightness** requires Android Modify system settings. **Wi-Fi** and **Bluetooth** toggles require `Elevated` (which also grants DND and brightness permissions automatically). |
@@ -34,7 +35,8 @@ Tap **Control PC** on the Android Home screen. The first time you open it, click
 #### Air Mouse Mode
 
 - Hold your thumb on the center pad and tilt your phone in the air. NectarLink reads your phone's gyroscope with hand-tremor filtering to move the PC cursor accurately where you point.
-- Tap the pad while holding to left-click, and release the pad to park the cursor. (If your phone does not have a gyroscope sensor, NectarLink lets you know and suggests Touchpad mode.)
+- Tap the pad while holding to left-click, and release the pad to park the cursor. Tap with two fingers to right-click.
+- Drag two fingers on the pad to scroll, up and down or sideways. The cursor holds still while you scroll. (If your phone does not have a gyroscope sensor, NectarLink lets you know and suggests Touchpad mode.)
 
 #### Keyboard and Voice Dictation
 
@@ -57,6 +59,18 @@ With **Share PC screen to phone** and **Remote mouse, keyboard & Deck** on for t
 - **Keyboard** opens a box above the phone's keyboard. What you type goes to the PC as you type it, **Send** presses Enter, and the key beside it deletes.
 - The quality button changes the stream's resolution.
 
+#### Gamepad
+
+Tap the controller button at the top of **Control PC** to use your phone as a game controller. The phone turns sideways and the PC gets an Xbox controller that games see like a real one.
+
+- Two sticks, a d-pad, **A B X Y**, the bumpers and triggers, **Back**, **Home** and **Start**.
+- A stick starts wherever your thumb lands on its side of the screen. Tap it twice and hold to click it in.
+- Slide your thumb across **A B X Y** to go from one to the next without lifting it.
+- Several phones can each be a controller at once, up to four.
+- If you put the phone down or it loses the connection, the PC lets go of every button within a second.
+
+On Windows, if the PC doesn't have ViGEmBus yet, the Gamepad says so: install it on the PC, then tap **Try again**.
+
 ### 2. Typing on Your Phone from Your PC Keyboard (Without Mirroring)
 
 When your phone is sitting on a stand next to your monitor and you just want to type a quick message or search on the phone using your physical PC keyboard without opening a screen-mirroring window:
@@ -64,6 +78,17 @@ When your phone is sitting on a stand next to your monitor and you just want to 
 1. On PC **Home**, click **Type on phone** (or open the `Command Palette` with `Ctrl+Alt+Space` and select **Type on phone with PC keyboard**).
 2. While the **Type on phone** card is active on your PC, every keystroke you type (including letters, numbers, Unicode text, **Arrow keys**, **Backspace**, **Enter**, and `Ctrl+V` clipboard paste) goes straight into the focused text field on your phone.
 3. Your phone displays a top banner (**Typing from `<PC>`**) with a one-tap **Stop typing** button, and pressing **Escape** on your PC ends keyboard capture immediately.
+
+#### Your PC's mouse on the phone, over the screen edge (Windows)
+
+With the phone on a stand beside your monitor, the PC's mouse can go over the edge of the screen onto it, like a second screen, with a pointer of the phone's own.
+
+1. Turn on Elevated on the phone (Settings › Permissions on the phone).
+2. On the PC, open **Settings › Devices**, pick the phone, and set **Beside this PC** to **Left** or **Right**: the side of your desk it's on.
+3. Push the mouse past that edge of the screen. The phone shows a pointer where it came in, and the mouse and keyboard work there: click, scroll, type, Ctrl+C, Ctrl+X, Ctrl+A, and Ctrl+V types what's on the PC's clipboard. Esc is Back, the Windows key is Home, and a mouse's back button is Back.
+4. Move the pointer back past the phone's edge facing the PC to return. **Ctrl+Alt+Esc** brings the mouse back from anywhere, and it comes back by itself if the phone disconnects.
+
+While it's on the phone, Android's pointer acceleration is off (it's given back after), so the PC can follow the pointer. The PC's cursor waits in the middle of the screen it left.
 
 ### 3. `Deck`: Customizable Macro Pad and PC Audio Controller
 
@@ -102,12 +127,25 @@ When your phone is resting on a charger or desk stand, tap **Desk clock** on the
   - If you have another NectarLink device online on your home LAN while you are on mobile data (**Connect over mobile data**), NectarLink can also relay the wake request through your online home device.
   - Check **Settings › Connection & About › Wake from your phone** on your PC to verify whether your Windows network adapter has Wake on LAN enabled in Device Manager.
 
+#### Unlock the PC with the phone (Windows)
+
+When the PC is locked, pick **Unlock with phone** on the lock screen and touch the fingerprint sensor on your phone. Off by default.
+
+1. On the phone, in **Settings**, turn on **Unlock this PC with your fingerprint** under that PC. It needs Android 11 or newer with a fingerprint (or another strong biometric) set up.
+2. On the PC, in **Settings › Devices**, turn on **Unlock this PC with the phone** for that phone. Windows asks for an administrator once: this adds NectarLink's sign-in option to the lock screen.
+3. Type your Windows password there once and press **Set up**. The phone asks you to confirm with your fingerprint.
+
+Each unlock asks for your fingerprint on the phone, which names the PC and the account. It works while you're signed in and the PC is locked, not for the first sign-in after a restart, and only with the phone connected directly (the same network or USB), never through a relay. Your normal password and PIN keep working.
+
+How it's kept: the PC stores your password encrypted, and the key to it lives only on the phone, inside its secure hardware, where it needs your fingerprint for every use. A new fingerprint on the phone, turning the switch off on either side, or unpairing ends it; change your Windows password and you set it up again. Five failed tries in 15 minutes pause it for 15 minutes. Microsoft accounts that have no password (Windows Hello PIN only) can't use it.
+
 ## What the Options Do
 
 - **Remote mouse, keyboard & Deck** (`Settings › Devices` on PC, default: **Off**): Allows the selected phone to control the PC's mouse, keyboard, presentation remote, and standard `Deck` tiles.
 - **Run Deck shell commands** (`Settings › Devices` on PC, default: **Off**): Allows the selected phone to trigger `Deck` tiles that execute custom shell commands on the PC.
 - **Phone controls** (`Settings › Devices` on PC, default: **On**): Allows the PC to view and change the phone's volume, ringer, DND, flashlight, brightness, Wi-Fi, and Bluetooth.
 - **Lock, sleep & wake PC** (`Settings › Devices` on PC, default: **On**): Allows the selected phone to lock or sleep the PC and learn its MAC address for Wake-on-LAN.
+- **Beside this PC** (`Settings › Devices` on PC, Windows, default: **Off**): Which side of the PC the phone sits on, for the mouse to go over that edge of the screen onto it. One phone at a time.
 - **Touchpad speed** (`Settings › Features & Data › Control your PC` on Android, default: `1.0x`): Adjusts pointer sensitivity from `0.5x` to `2.5x`.
 
 ## Data and Privacy
@@ -118,5 +156,8 @@ When your phone is resting on a charger or desk stand, tap **Desk clock** on the
 
 ## Limits
 
+- **Gamepad on macOS**: a Mac only lets an app add a game controller with permission Apple grants, so the Gamepad isn't there on a Mac yet. The triggers are on or off, not pressed partway, and the phone doesn't rumble when a game asks the controller to.
+
+- **The mouse over the screen edge** is on Windows only for now, and needs Elevated on the phone. On Android versions that can't turn pointer acceleration off, the phone's pointer still speeds up with fast moves, so it can take a little more push at the edge to come back.
 - **Wake-on-LAN Hardware Requirements**: Waking a sleeping or powered-off PC over the network requires Wake-on-LAN to be enabled in your PC's BIOS/UEFI and in your network adapter's Windows Device Manager properties (**Power Management › Allow this device to wake the computer**). Most desktop Ethernet adapters support waking from both sleep (`S3`) and shutdown (`S5`), whereas many laptop Wi-Fi cards only support waking from low-power standby (`S0ix`) or sleep, not full shutdown.
 - **Wi-Fi and Bluetooth Toggles on Android 10+**: Starting in Android 10, regular apps cannot toggle Wi-Fi or Bluetooth directly. Those two toggles on PC Home require the `Elevated` power level on your phone.

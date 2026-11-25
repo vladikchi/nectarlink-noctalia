@@ -16,7 +16,6 @@ import android.provider.Settings
 import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.TextureView
-import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -482,6 +481,21 @@ private fun RailButton(
     }
 }
 
+/** A key in the full-screen overlay row: white text, its own description for TalkBack. */
+@Composable
+private fun OverlayKey(label: String, description: String = label, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+        modifier = Modifier
+            .height(36.dp)
+            .semantics { contentDescription = description },
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+    }
+}
+
 /** A button label on one line that shrinks to fit, rather than cut a word off, on narrow phones or with large fonts. */
 @Composable
 private fun FitLabel(text: String) {
@@ -546,6 +560,8 @@ fun PcMirrorView(
     val keyboardFocusRequester = remember { FocusRequester() }
 
     val mirrorConfig by core.pcMirrorConfig.collectAsStateWithLifecycle()
+    val failedPc by core.pcMirrorCaptureFailed.collectAsStateWithLifecycle()
+    val captureFailed = failedPc == pcId
     val activeConfig = mirrorConfig?.takeIf { it.pcId == pcId }
     val effectiveCodec = activeConfig?.codec ?: "h264"
 
@@ -563,6 +579,24 @@ fun PcMirrorView(
     var surface by remember { mutableStateOf<Surface?>(null) }
     var hasRenderedFrame by remember(pcId) { mutableStateOf(false) }
     var reconnectTick by remember { mutableIntStateOf(0) }
+    // Which of the PC's screens (#442); its main one until another is picked.
+    var displays by remember(pcId) { mutableStateOf<List<app.nectarlink.core.PcDisplay>>(emptyList()) }
+    var display by rememberSaveable(pcId) { mutableStateOf<Int?>(null) }
+    // Asked again once the picture arrives: before the PC allows this phone
+    // (or while the link is down) it lists none.
+    LaunchedEffect(pcId, watch, hasRenderedFrame) {
+        if (watch == null && displays.isEmpty()) displays = core.pcDisplays(pcId)
+    }
+    val screenIndex = displays.indexOfFirst { it.id.toInt() == display }.coerceAtLeast(0)
+    val showScreens = watch == null && displays.size > 1
+    val nextScreen = {
+        if (displays.size > 1) {
+            display = displays[(screenIndex + 1) % displays.size].id.toInt()
+            // Another screen can have another size: a fresh decoder, as for the quality.
+            reconnectTick++
+        }
+    }
+    var requestTick by remember(pcId) { mutableIntStateOf(0) }
 
     // Full-screen overlay & auto-rotate state
     var overlayVisible by remember { mutableStateOf(true) }
@@ -697,13 +731,11 @@ fun PcMirrorView(
 
     var appliedFullScreen by remember { mutableStateOf(false) }
 
-    // Apply orientation, keep-screen-on, and immersive system bars for full-screen vs portrait.
+    // Apply orientation and immersive system bars for full-screen vs portrait.
     LaunchedEffect(isFullScreen, autoRotateEnabled, suppressAutoEnterInLandscape, view) {
         val activity = context as? Activity ?: return@LaunchedEffect
         val window = activity.window ?: return@LaunchedEffect
         val controller = WindowCompat.getInsetsController(window, view)
-        view.keepScreenOn = true
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         if (isFullScreen) {
             appliedFullScreen = true
@@ -720,6 +752,10 @@ fun PcMirrorView(
             }
         }
     }
+
+    // On while the PC's screen is showing here. It used to set the window's flag and
+    // never clear it, so the phone stopped sleeping anywhere in the app afterwards.
+    app.nectarlink.android.ui.KeepScreenOn(hasRenderedFrame)
 
     // Restore previous requestedOrientation and system bars when leaving PcMirrorView.
     DisposableEffect(view) {
@@ -761,7 +797,7 @@ fun PcMirrorView(
     val showing = watch != null || lifecycleState.isAtLeast(Lifecycle.State.STARTED)
     var asked by remember(pcId) { mutableStateOf(false) }
 
-    LaunchedEffect(pcId, maxSize, bitrate, showing) {
+    LaunchedEffect(pcId, maxSize, bitrate, showing, requestTick, display) {
         hasRenderedFrame = false
         if (!showing) {
             if (asked) {
@@ -776,7 +812,7 @@ fun PcMirrorView(
             "PcMirrorView",
             "startPcMirror maxSize=$maxSize fps=30 bitrate=$bitrate",
         )
-        core.startPcMirror(pcId, maxSize = maxSize, fps = 30, bitrate = bitrate, watch = watch)
+        core.startPcMirror(pcId, maxSize = maxSize, fps = 30, bitrate = bitrate, watch = watch, display = display)
     }
 
     DisposableEffect(pcId) {
@@ -797,7 +833,9 @@ fun PcMirrorView(
         effectiveCodec,
         useSoftwareDecoder,
         reconnectTick,
+        captureFailed,
     ) {
+        if (captureFailed) return@LaunchedEffect
         val targetSurface = surface?.takeIf { it.isValid } ?: return@LaunchedEffect
         hasRenderedFrame = false
         val width = (activeConfig?.width ?: 1280).coerceAtLeast(64)
@@ -991,6 +1029,8 @@ fun PcMirrorView(
         if (highQuality) R.string.pc_mirror_quality_1080p else R.string.pc_mirror_quality_720p,
     )
     val qualityA11yLabel = stringResource(R.string.pc_mirror_quality_desc, qualityShortLabel)
+    val screenLabel = stringResource(R.string.pc_mirror_screen, screenIndex + 1)
+    val screenA11yLabel = stringResource(R.string.pc_mirror_screen_desc, screenIndex + 1, displays.size)
 
     // Unified Column so AndroidView(TextureView) stays in the exact same composition slot
     // across portrait and full-screen landscape transitions.
@@ -1309,7 +1349,7 @@ fun PcMirrorView(
                     )
                 }
 
-                if (!hasRenderedFrame) {
+                if (!hasRenderedFrame || captureFailed) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1318,16 +1358,27 @@ fun PcMirrorView(
                             .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(16.dp))
                             .padding(horizontal = 20.dp, vertical = 16.dp),
                     ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(28.dp),
-                            strokeWidth = 2.5.dp,
-                            color = Color.White,
-                        )
-                        Text(
-                            text = stringResource(R.string.pc_mirror_connecting, pcName),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White,
-                        )
+                        if (captureFailed) {
+                            Text(
+                                text = stringResource(R.string.pc_mirror_capture_failed),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                            )
+                            TextButton(onClick = { requestTick++ }) {
+                                Text(stringResource(R.string.action_try_again))
+                            }
+                        } else {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(28.dp),
+                                strokeWidth = 2.5.dp,
+                                color = Color.White,
+                            )
+                            Text(
+                                text = stringResource(R.string.pc_mirror_connecting, pcName),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                            )
+                        }
                     }
                 }
 
@@ -1355,7 +1406,7 @@ fun PcMirrorView(
             // live there, always shown, and never cover the PC's screen.
             if (useRails) {
                 // One tile size for both sides, from the longer one.
-                val tiles = if (touchpadSensitivity != null) 6 else 5
+                val tiles = maxOf(if (touchpadSensitivity != null) 6 else 5, if (showScreens) 6 else 5)
                 FullScreenRail(width = railWidth, tiles = tiles, modifier = Modifier.align(Alignment.CenterStart)) { h ->
                     if (touchpadSensitivity != null) {
                         RailButton(touchpadLabel, h, selected = touchpadMode) { touchpadMode = !touchpadMode }
@@ -1373,6 +1424,9 @@ fun PcMirrorView(
                     RailButton(qualityShortLabel, h, description = qualityA11yLabel) {
                         highQuality = !highQuality
                         reconnectTick++
+                    }
+                    if (showScreens) {
+                        RailButton(screenLabel, h, description = screenA11yLabel) { nextScreen() }
                     }
                     RailTile(
                         height = h,
@@ -1465,6 +1519,27 @@ fun PcMirrorView(
                                     maxLines = 1,
                                 )
                             }
+                            // The same keys as the side rails in landscape (#306).
+                            OverlayKey(escLabel, escDescription) {
+                                bumpOverlay()
+                                core.remoteKey(pcId, "escape", onStatus = onStatus)
+                            }
+                            OverlayKey(copyLabel) {
+                                bumpOverlay()
+                                core.remoteKey(pcId, "copy", onStatus = onStatus)
+                            }
+                            OverlayKey(pasteLabel) {
+                                bumpOverlay()
+                                core.remoteKey(pcId, "paste", onStatus = onStatus)
+                            }
+                            OverlayKey(switchWindowLabel) {
+                                bumpOverlay()
+                                core.remoteKey(pcId, "tab", listOf("alt"), onStatus)
+                            }
+                            OverlayKey(undoLabel) {
+                                bumpOverlay()
+                                core.remoteKey(pcId, "undo", onStatus = onStatus)
+                            }
                             if (touchpadSensitivity != null) {
                                 TextButton(
                                     onClick = {
@@ -1491,6 +1566,21 @@ fun PcMirrorView(
                                         style = MaterialTheme.typography.labelLarge,
                                         maxLines = 1,
                                     )
+                                }
+                            }
+                            if (showScreens) {
+                                TextButton(
+                                    onClick = {
+                                        bumpOverlay()
+                                        nextScreen()
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .semantics { contentDescription = screenA11yLabel },
+                                ) {
+                                    Text(screenLabel, style = MaterialTheme.typography.labelLarge, maxLines = 1)
                                 }
                             }
                             TextButton(
@@ -1652,6 +1742,15 @@ fun PcMirrorView(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                 ) {
                     FitLabel(keyboardLabel)
+                }
+                if (showScreens) {
+                    OutlinedButton(
+                        onClick = nextScreen,
+                        modifier = Modifier.semantics { contentDescription = screenA11yLabel },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                    ) {
+                        FitLabel(screenLabel)
+                    }
                 }
                 OutlinedButton(
                     onClick = {

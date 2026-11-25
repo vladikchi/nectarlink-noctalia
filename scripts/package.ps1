@@ -48,7 +48,8 @@ if (-not $version) { throw "can't read the version from Cargo.toml" }
 $numeric = ($version -split '[-+]')[0]
 # Their fourth number orders builds of one version, as Android's version code
 # does: a nightly 1.2.3-nightly.N is N, the release 999, after its nightlies.
-$build = if ($version -match '-nightly\.(\d+)$') { [int]$Matches[1] } elseif ($version -notmatch '-') { 999 } else { 0 }
+# A canary (+canary.<commit>) is its nightly's number.
+$build = if ($version -match '-nightly\.(\d+)(\+canary\.[0-9a-f]+)?$') { [int]$Matches[1] } elseif ($version -notmatch '-') { 999 } else { 0 }
 if ($build -lt 0 -or $build -gt 999) { throw "nightly number in $version must be 1 to 998" }
 
 # ---- Target Architecture & Build Paths ----
@@ -102,16 +103,19 @@ if (-not $SkipBuild) {
     if ($isArm64) {
         $env:QMAKE = Join-Path $arm64ToolDir "qmake6.exe"
         if (-not (Test-Path $env:QMAKE)) { $env:QMAKE = Join-Path $arm64ToolDir "qmake.exe" }
-        Invoke-Native "the build" { cargo build --locked --release --target aarch64-pc-windows-msvc -p nectarlink-desktop -p nectarlink-vcam }
+        Invoke-Native "the build" { cargo build --locked --release --target aarch64-pc-windows-msvc -p nectarlink-desktop -p nectarlink-mcp -p nectarlink-vcam -p nectarlink-credprov }
     } else {
         $env:PATH = "$(Join-Path $targetKit 'bin');$env:PATH"
-        Invoke-Native "the build" { cargo build --locked --release -p nectarlink-desktop -p nectarlink-vcam }
+        Invoke-Native "the build" { cargo build --locked --release -p nectarlink-desktop -p nectarlink-mcp -p nectarlink-vcam -p nectarlink-credprov }
     }
 }
 $exe = Join-Path $targetDir 'nectarlink-desktop.exe'
 if (-not (Test-Path $exe)) { throw "no release build at $exe" }
 $vcamDll = Join-Path $targetDir 'nectarlink_vcam.dll'
 if (-not (Test-Path $vcamDll)) { throw "no release build at $vcamDll" }
+# Unlock with phone: the credential provider, registered only when turned on.
+$credprovDll = Join-Path $targetDir 'nectarlink_credprov.dll'
+if (-not (Test-Path $credprovDll)) { throw "no release build at $credprovDll" }
 
 # ---- Stage ----
 Step "Stage"
@@ -135,7 +139,12 @@ if (Test-Path $stage) {
 }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $exe $stage
+# What AI agents run (Settings > AI agents), next to the app so its setup lines find it.
+$agentExe = Join-Path $targetDir 'nectarlink-agent.exe'
+if (-not (Test-Path $agentExe)) { throw "no release build at $agentExe" }
+Copy-Item $agentExe $stage
 Copy-Item $vcamDll $stage
+Copy-Item $credprovDll $stage
 
 Invoke-Native "windeployqt" {
     $deployArgs = @(

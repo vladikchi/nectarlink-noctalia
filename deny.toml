@@ -34,8 +34,11 @@ confidence-threshold = 0.9
 # never end up in the MPL core by accident.
 exceptions = [
     { crate = "nectarlink-cli", allow = ["GPL-3.0-or-later"] },
+    { crate = "nectarlink-mcp", allow = ["GPL-3.0-or-later"] },
     { crate = "nectarlink-desktop", allow = ["GPL-3.0-or-later"] },
     { crate = "nectarlink-vcam", allow = ["GPL-3.0-or-later"] },
+    { crate = "nectarlink-credprov", allow = ["GPL-3.0-or-later"] },
+    { crate = "nectarlink-pam-unlock", allow = ["GPL-3.0-or-later"] },
     { crate = "xtask", allow = ["GPL-3.0-or-later"] },
     { crate = "s1-qt-rust", allow = ["GPL-3.0-or-later"] },
 ]

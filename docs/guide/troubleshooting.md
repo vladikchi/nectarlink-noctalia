@@ -80,6 +80,8 @@ Many banking apps refuse to run while **Developer options**, USB or Wireless Deb
 
 If an app checks before NectarLink notices it, tap **Add shortcut** next to it and open it from that home screen shortcut: NectarLink pauses first, then opens the app.
 
+Some apps only mind the accessibility service, and crash or close even when opened from the app drawer. With `Elevated` set up, turn on **Assist only while a PC uses the phone** in the same section: Assist is then on only while a PC shows the phone's screen, an app window, or types on it, and off again about 15 seconds after. That's all `Elevated` still needs Assist for (pressing Send in chat apps, and typing letters outside the basic Latin set).
+
 Some banking apps also refuse to run on a phone that was ever rooted (on Samsung phones, a tripped Knox flag). NectarLink can't change that.
 
 ## 5. Troubleshooting USB Auto-Pair and `On USB` Transport
@@ -89,12 +91,13 @@ If plugging your phone into your PC with a USB cable does not trigger USB auto-p
 1. **Check the USB cable**: Use a USB cable that carries data (some charging-only cables lack data wires).
 2. **Enable USB debugging on the phone**: Open **Android Settings › Developer options** and turn on **USB debugging**.
 3. **Approve the RSA key prompt on the phone**: Wake your phone screen when plugging it into the PC, check **Always allow from this computer**, and tap **Allow** on Android's **Allow USB debugging?** dialog.
+4. **Check adb in the Connection Doctor**: The PC reaches a phone on a cable through Android's `adb`. The Doctor says whether it's running, with a **Start adb** button when it isn't, and whether it's missing. NectarLink finds `adb` from Android Studio's SDK folder, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or your `PATH`; if there's none, install Google's platform-tools.
 
 ## 6. Troubleshooting Screen Mirroring and Audio
 
 ### Mirroring Is View-Only (Mouse Clicks Do Nothing)
 
-- At the `Standard` power level, Android does not allow apps to inject touch or key events into other apps. To control your phone with your PC mouse and keyboard during mirroring, enable either **`Assist`** (**Settings › Permissions › Control from your PC › Use your PC's mouse and keyboard**) or **`Elevated`** (**Real touch and keys (Wireless debugging)**) on your phone.
+- At the `Standard` power level, Android does not allow apps to inject touch or key events into other apps. To control your phone with your PC mouse and keyboard during mirroring, enable either **`Assist`** (**Settings › Permissions › Control from your PC › Use your PC's mouse and keyboard**) or **`Elevated`** (the **Elevated** card there) on your phone.
 - **On Xiaomi, Redmi and POCO phones with `Elevated`:** if the picture works but clicks and typing do nothing, and no banner asks you to turn on control, open **Developer options** and turn on **USB debugging (Security settings)**. The phone blocks simulated input without it.
 
 ### Mirror Window Shows a Black Screen
@@ -119,6 +122,8 @@ If plugging your phone into your PC with a USB cable does not trigger USB auto-p
 
 - By design, a PC cannot turn on your phone's camera silently. Look at your phone and tap the **`<PC>` wants to use your camera** notification (or open NectarLink on your phone and tap **Webcam › Start webcam**).
 
-## 8. Inspecting Diagnostic Logs
+## 8. Reporting a Problem
 
-If you need to report a bug, open **Settings › Connection & About** on your PC and click **Open logs** (next to the NectarLink version row) to open the local log directory in File Explorer. NectarLink never logs notification text, SMS message bodies, or clipboard contents to its log files.
+On your PC, open **Settings › Connection & About** and click **Report a problem** (also at the bottom of the `Connection Doctor`). Pick what it's about, say what happened, and NectarLink adds what helps us find the cause: app and system versions, what the Doctor checked, how features have been doing, recent crashes and the recent activity log. You see the whole report before anything leaves your PC, and you can leave any part out. **Send** files it as an issue for you and tells you its number, with no GitHub account needed; if the PC is offline, it goes out by itself later. **Open on GitHub** opens a new issue with the short parts filled in and copies the report to paste into it. Reports are public on GitHub.
+
+The report holds no names, messages, files, numbers or addresses from NectarLink: the log is written that way from the start ([privacy](privacy-and-security.md)). **Open logs** next to it opens the log folder itself.

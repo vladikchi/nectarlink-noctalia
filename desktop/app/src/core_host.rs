@@ -45,6 +45,18 @@ pub fn try_data_dir() -> Option<&'static std::path::Path> {
     HOST.get().map(|h| h.data_dir.as_path())
 }
 
+/// Whether phones on a USB cable are looked for through adb: not when the
+/// user turned Use USB debugging off (#439). NECTARLINK_NO_ADB=1 keeps a
+/// development copy from reaching phones plugged in over USB, unless
+/// NECTARLINK_ADB_ONLY_SERIAL explicitly restricts ADB to an Android emulator.
+pub fn adb_enabled() -> bool {
+    let only_emulator =
+        std::env::var("NECTARLINK_ADB_ONLY_SERIAL").is_ok_and(|s| s.trim().starts_with("emulator-"));
+    only_emulator
+        || (crate::settings::usb_debugging()
+            && std::env::var_os("NECTARLINK_NO_ADB").is_none_or(|v| v != "1"))
+}
+
 /// The node, once it has started.
 pub fn node() -> Option<Node> {
     HOST.get()?.node.get().cloned()
@@ -105,13 +117,27 @@ pub fn compute_capabilities(
 ) -> Vec<String> {
     let mut caps = vec![
         "pc.power".into(),
+        // Another PC's clipboard lands here (#432); phones already send theirs.
+        "clip.write".into(),
         nectarlink_core::PHOTOS_SHOW.into(),
         nectarlink_core::CAMERA_CONTINUITY.into(),
         nectarlink_core::CALLS_SHOW.into(),
         nectarlink_core::CONTACTS_SHOW.into(),
         nectarlink_core::SMS_SHOW.into(),
         nectarlink_core::TOGGLES_SHOW.into(),
+        nectarlink_core::MIRROR_VIEW.into(),
+        nectarlink_core::MIRROR_LISTEN.into(),
+        nectarlink_core::MIRROR_LISTEN_ASK.into(),
+        nectarlink_core::MIC_LISTEN.into(),
+        nectarlink_core::RECORDER.into(),
     ];
+    #[cfg(target_os = "macos")]
+    {
+        caps.push(nectarlink_core::PC_AUDIO.into());
+        caps.push(nectarlink_core::STORAGE_MOUNT.into());
+        caps.push(nectarlink_core::STORAGE_READ.into());
+        caps.push(nectarlink_core::STORAGE_WRITE.into());
+    }
     #[cfg(any(windows, target_os = "linux"))]
     {
         caps.push(nectarlink_core::PC_WAKE.into());
@@ -119,11 +145,9 @@ pub fn compute_capabilities(
         caps.push(nectarlink_core::STORAGE_MOUNT.into());
         caps.push(nectarlink_core::STORAGE_READ.into());
         caps.push(nectarlink_core::STORAGE_WRITE.into());
-        caps.push(nectarlink_core::MIRROR_VIEW.into());
-        caps.push(nectarlink_core::MIRROR_LISTEN.into());
         caps.push(nectarlink_core::DECK_ACTIONS.into());
         caps.push(nectarlink_core::PC_AUDIO.into());
-        caps.push(nectarlink_core::RECORDER.into());
+        caps.push(nectarlink_core::PC_SHUTDOWN.into());
         // Only while hibernation is on: Windows can turn it off (#355).
         if crate::win::shell::can_hibernate() {
             caps.push(nectarlink_core::PC_HIBERNATE.into());
@@ -149,7 +173,12 @@ pub fn compute_capabilities(
                 caps.push(nectarlink_core::MEDIA_STREAM.into());
             }
         }
-        caps.push(nectarlink_core::MIC_LISTEN.into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if crate::win::vcam::is_available() {
+            caps.push(nectarlink_core::WEBCAM_VIRTUAL.into());
+        }
     }
     #[cfg(any(windows, target_os = "linux"))]
     let mut pc_mirror_enabled = crate::pc_mirror::is_active();
@@ -175,6 +204,9 @@ pub fn compute_capabilities(
     #[cfg(any(windows, target_os = "linux"))]
     if pc_mirror_enabled && crate::pc_mirror::is_capture_available() {
         caps.push(nectarlink_core::MIRROR_CAPTURE.into());
+        // A phone viewing this PC picks which screen (#442).
+        #[cfg(windows)]
+        caps.push(nectarlink_core::MIRROR_DISPLAYS.into());
     }
     #[cfg(windows)]
     let input_available = true;
@@ -184,9 +216,22 @@ pub fn compute_capabilities(
     if remote_input_enabled && input_available {
         caps.push(nectarlink_core::MIRROR_INPUT.into());
         caps.push(nectarlink_core::INPUT_INJECT.into());
+        if crate::gamepad::is_supported() {
+            caps.push(nectarlink_core::INPUT_GAMEPAD.into());
+        }
     }
     if crate::win::vcam::is_registered() {
         caps.push(nectarlink_core::WEBCAM_ADDON_VCAM.into());
+    }
+    // Unlock with phone: only once the credential provider is in place.
+    #[cfg(windows)]
+    if crate::win::unlock::is_registered() {
+        caps.push(nectarlink_core::unlock::PC.into());
+        crate::win::unlock::serve();
+    }
+    #[cfg(target_os = "linux")]
+    if crate::win::phone_unlock::available() {
+        caps.push(nectarlink_protocol::messages::linux_unlock::CAP_PC.into());
     }
     caps
 }
@@ -201,27 +246,42 @@ pub fn refresh_capabilities() {
     });
 }
 
+/// How many times a start that failed on the network is tried again, with
+/// the wait before each: at sign-in the network may still be coming up (#466).
+const START_RETRIES: [Duration; 3] =
+    [Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30)];
+
 async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     let host = host();
     let wake = crate::win::wol::query_wake_status();
-    let mut config = NodeConfig::new(&data_dir, this_device(), env!("CARGO_PKG_VERSION"));
-    config.downloads_dir = Some(downloads_dir());
-    // NECTARLINK_NO_ADB=1 keeps a development copy from reaching phones plugged in over USB,
-    // unless NECTARLINK_ADB_ONLY_SERIAL explicitly restricts ADB to an Android emulator.
-    let only_emulator =
-        std::env::var("NECTARLINK_ADB_ONLY_SERIAL").is_ok_and(|s| s.trim().starts_with("emulator-"));
-    let adb_disabled = !only_emulator && std::env::var_os("NECTARLINK_NO_ADB").is_some_and(|v| v == "1");
-    config.adb_server = (!adb_disabled).then_some(nectarlink_core::DEFAULT_ADB_ADDR);
-    let settings = crate::settings::Settings::load(&data_dir);
-    config.away_mode = settings.away_mode;
-    #[cfg(target_os = "linux")]
-    {
-        config.network_interface = Some(settings.network_interface);
+    let config = || {
+        let mut config = NodeConfig::new(&data_dir, this_device(), env!("CARGO_PKG_VERSION"));
+        config.downloads_dir = Some(downloads_dir());
+        config.adb_server = adb_enabled().then_some(nectarlink_core::DEFAULT_ADB_ADDR);
+        let settings = crate::settings::Settings::load(&data_dir);
+        config.away_mode = settings.away_mode;
+        #[cfg(target_os = "linux")]
+        {
+            config.network_interface = Some(settings.network_interface);
+        }
+        // This PC's own players, for phones (crate::win::media_sessions).
+        config.capabilities = compute_capabilities(None);
+        config
+    };
+    let first = config();
+    let initial_caps = first.capabilities.clone();
+    let mut started = Node::start(first, platform.clone()).await;
+    for wait in START_RETRIES {
+        match &started {
+            Err(e @ nectarlink_core::Error::Network(_)) => {
+                tracing::warn!(error = %e, retry_in_s = wait.as_secs(), "core couldn't start; trying again");
+                tokio::time::sleep(wait).await;
+                started = Node::start(config(), platform.clone()).await;
+            }
+            _ => break,
+        }
     }
-    // This PC's own players, for phones (crate::win::media_sessions).
-    config.capabilities = compute_capabilities(None);
-    let initial_caps = config.capabilities.clone();
-    let node = match Node::start(config, platform).await {
+    let node = match started {
         Ok(node) => node,
         Err(e) => {
             tracing::error!(error = %e, "core failed to start");
@@ -240,24 +300,23 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     node.set_wake_info(wake.info.clone()).await;
     // Subscribe before reading the initial state so no event is missed.
     let mut events = node.events();
-    let devices = node.paired_devices().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "can't list paired devices");
-        Vec::new()
-    });
+    let devices = paired_snapshot(&node);
+    let initial_devices = devices.as_deref().unwrap_or_default();
     // A device that never connected hasn't told us what it can do; its
     // features stay "unknown" (not "locked") until its first hello.
-    let matrices: Vec<_> = devices
+    let matrices: Vec<_> = initial_devices
         .iter()
         .filter(|d| !matches!(d.link, LinkState::Offline { last_seen: None }))
         .filter_map(|d| node.capabilities(d.id).ok())
         .collect();
     let toggles: Vec<_> =
-        devices.iter().filter_map(|d| node.phone_toggles(d.id).map(|t| (d.id, t))).collect();
+        initial_devices.iter().filter_map(|d| node.phone_toggles(d.id).map(|t| (d.id, t))).collect();
     let send_queue = node.send_queue(None).unwrap_or_default();
     let status = CoreStatus::Ready { device_id: node.device_id(), name: this_device().name };
     crate::clipboard::apply_history_setting(&node);
     let mut saved_settings = crate::settings::Settings::load(&data_dir);
-    let walkthrough_reconciled = saved_settings.reconcile_walkthrough_for_paired_devices(devices.len());
+    let walkthrough_reconciled =
+        devices.as_ref().is_some_and(|d| saved_settings.reconcile_walkthrough_for_paired_devices(d.len()));
     if walkthrough_reconciled {
         let _ = saved_settings.save(&data_dir);
     }
@@ -267,7 +326,7 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     });
     let _ = host.node.set(node);
     host.hub.update(|s| {
-        let mut changes = s.set_devices(devices);
+        let mut changes = devices.map_or(Changes::NONE, |devices| s.set_devices(devices));
         for m in matrices {
             changes |= s.set_matrix(m);
         }
@@ -302,7 +361,10 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
                 was_active = false;
                 continue;
             }
-            let active = crate::win::input::is_user_active_within_ms(30_000);
+            // Active quiets the phone's own notification sounds, since this PC
+            // shows them: not while its pop-ups are paused (#384).
+            let active =
+                crate::win::input::is_user_active_within_ms(30_000) && !crate::notifications::paused();
             let should_send = active != was_active
                 || (active && last_sent_at.elapsed() >= std::time::Duration::from_secs(30));
             if should_send {
@@ -324,77 +386,101 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
         }
     });
 
+    // What the UI was given, so after a lag it gets only what it missed.
+    let mut given = nectarlink_core::Resync::new();
     loop {
         match events.recv().await {
             Ok(event) => {
-                if matches!(
-                    &event,
-                    nectarlink_core::NodeEvent::QueueChanged
-                        | nectarlink_core::NodeEvent::QueueDroppedOnUnpair { .. }
-                ) && let Some(node) = self::node()
-                {
-                    let items = node.send_queue(None).unwrap_or_default();
-                    host.hub.update(|s| s.set_send_queue(items));
-                }
-                if let nectarlink_core::NodeEvent::QueueDroppedOnUnpair { peer_name, dropped_count, .. } =
-                    &event
-                    && *dropped_count > 0
-                {
-                    crate::bridge::app::show_message(tr!(
-                        "CoreHost",
-                        "Dropped %1 queued item(s) for %2 (device unpaired).",
-                        dropped_count,
-                        peer_name
-                    ));
-                }
-                crate::notifications::apply(&event);
-                crate::media::on_event(&event);
-                crate::notifications::update_toasts(&event);
-                crate::clipboard::on_event(&event);
-                crate::photos::on_event(&event);
-                crate::photo_backup::on_event(&event);
-                crate::continuity_camera::on_event(&event);
-                crate::calls::on_event(&event);
-                crate::messages::on_event(&event);
-                crate::mirror::on_event(&event);
-                crate::pc_mirror::on_event(&event);
-                crate::remote::on_event(&event);
-                crate::transfers::on_event(&event);
-                crate::send_to::on_event(&event);
-                crate::battery::on_event(&event);
-                crate::update_relay::on_event(&event);
-                crate::storage::on_event(&event);
-                crate::webcam::on_event(&event);
-                crate::phone_mic::on_event(&event);
-                crate::automations::on_event(&event);
-                crate::bridge::app::on_home_event(&event);
+                given.note(&event);
+                dispatch(host, &event);
             }
             Err(RecvError::Lagged(missed)) => {
                 // Resynchronize what can be re-read; transient events are lost.
                 tracing::warn!(missed, "UI fell behind core events; resyncing");
-                let devices =
-                    host.node.get().map(|n| n.paired_devices().unwrap_or_default()).unwrap_or_default();
+                let devices = host.node.get().and_then(paired_snapshot);
                 let toggles: Vec<_> = host
                     .node
                     .get()
                     .map(|n| {
-                        devices.iter().filter_map(|d| n.phone_toggles(d.id).map(|t| (d.id, t))).collect()
+                        devices
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|d| n.phone_toggles(d.id).map(|t| (d.id, t)))
+                            .collect()
                     })
                     .unwrap_or_default();
                 let send_queue =
                     host.node.get().map(|n| n.send_queue(None).unwrap_or_default()).unwrap_or_default();
                 host.hub.update(|s| {
-                    let mut changes = s.set_devices(devices);
+                    let mut changes = devices.map_or(Changes::NONE, |devices| s.set_devices(devices));
                     for (id, t) in toggles {
                         changes |= s.set_toggles(id, Some(t));
                     }
                     changes |= s.set_send_queue(send_queue);
                     changes
                 });
+                // Transfers, rings and pairing only ever come as events.
+                if let Some(node) = host.node.get() {
+                    for event in given.missed(node.latest_state()) {
+                        dispatch(host, &event);
+                    }
+                }
             }
             Err(RecvError::Closed) => return,
         }
     }
+}
+
+fn paired_snapshot(node: &Node) -> Option<Vec<nectarlink_core::PairedDevice>> {
+    node.paired_devices().inspect_err(|e| tracing::warn!(error = %e, "can't list paired devices")).ok()
+}
+
+/// Hands one core event to everything in the app that follows it.
+fn dispatch(host: &CoreHost, event: &nectarlink_core::NodeEvent) {
+    if matches!(
+        event,
+        nectarlink_core::NodeEvent::QueueChanged | nectarlink_core::NodeEvent::QueueDroppedOnUnpair { .. }
+    ) && let Some(node) = self::node()
+    {
+        let items = node.send_queue(None).unwrap_or_default();
+        host.hub.update(|s| s.set_send_queue(items));
+    }
+    if let nectarlink_core::NodeEvent::QueueDroppedOnUnpair { peer_name, dropped_count, .. } = event
+        && *dropped_count > 0
+    {
+        crate::bridge::app::show_message(tr!(
+            "CoreHost",
+            "Dropped %1 queued item(s) for %2 (device unpaired).",
+            dropped_count,
+            peer_name
+        ));
+    }
+    crate::notifications::apply(event);
+    crate::media::on_event(event);
+    crate::notifications::update_toasts(event);
+    crate::clipboard::on_event(event);
+    crate::photos::on_event(event);
+    crate::photo_backup::on_event(event);
+    crate::continuity_camera::on_event(event);
+    crate::calls::on_event(event);
+    crate::messages::on_event(event);
+    crate::mirror::on_event(event);
+    crate::pc_mirror::on_event(event);
+    crate::remote::on_event(event);
+    crate::transfers::on_event(event);
+    crate::send_to::on_event(event);
+    crate::battery::on_event(event);
+    crate::update_relay::on_event(event);
+    crate::storage::on_event(event);
+    crate::webcam::on_event(event);
+    crate::phone_mic::on_event(event);
+    crate::report_requests::on_event(event);
+    crate::automations::on_event(event);
+    crate::agents::on_event(event);
+    #[cfg(windows)]
+    crate::win::pointer_hooks::on_event(event);
+    crate::bridge::app::on_home_event(event);
 }
 
 /// Where files from phones go: `Downloads\Nectarlink`.
@@ -452,27 +538,15 @@ mod tests {
     fn macos_advertises_only_supported_capabilities() {
         let caps = compute_capabilities(None);
         // Ensure unsupported features on macOS are never advertised
-        assert!(!caps.contains(&"mirror.view".into()), "macOS must not advertise mirror.view");
-        assert!(!caps.contains(&"mirror.listen".into()), "macOS must not advertise mirror.listen");
+        assert!(caps.contains(&nectarlink_core::MIRROR_VIEW.into()), "macOS must advertise mirror.view");
+        assert!(caps.contains(&nectarlink_core::MIRROR_LISTEN.into()), "macOS must advertise mirror.listen");
         assert!(!caps.contains(&"media.control".into()), "macOS must not advertise media.control");
-        assert!(
-            !caps.contains(&nectarlink_core::STORAGE_MOUNT.into()),
-            "macOS must not advertise storage.mount"
+        assert_eq!(
+            caps.contains(&nectarlink_core::WEBCAM_VIRTUAL.into()),
+            crate::win::vcam::is_available(),
+            "macOS must advertise camera.virtual only when the virtual camera extension is available"
         );
-        assert!(
-            !caps.contains(&nectarlink_core::STORAGE_READ.into()),
-            "macOS must not advertise storage.read"
-        );
-        assert!(
-            !caps.contains(&nectarlink_core::STORAGE_WRITE.into()),
-            "macOS must not advertise storage.write"
-        );
-        assert!(
-            !caps.contains(&nectarlink_core::WEBCAM_VIRTUAL.into()),
-            "macOS must not advertise camera.virtual"
-        );
-        assert!(!caps.contains(&nectarlink_core::PC_AUDIO.into()), "macOS must not advertise pc.audio");
-        assert!(!caps.contains(&nectarlink_core::RECORDER.into()), "macOS must not advertise recorder");
+        assert!(caps.contains(&nectarlink_core::RECORDER.into()), "macOS must advertise recorder");
         assert!(
             !caps.contains(&nectarlink_core::DECK_ACTIONS.into()),
             "macOS must not advertise deck.actions"
@@ -481,7 +555,7 @@ mod tests {
             !caps.contains(&nectarlink_core::MEDIA_STREAM.into()),
             "macOS must not advertise media.stream"
         );
-        assert!(!caps.contains(&nectarlink_core::MIC_LISTEN.into()), "macOS must not advertise mic.listen");
+        assert!(caps.contains(&nectarlink_core::MIC_LISTEN.into()), "macOS must advertise mic.listen");
         assert!(!caps.contains(&nectarlink_core::PC_WAKE.into()), "macOS must not advertise pc.wake");
 
         // Ensure supported features on macOS are advertised
@@ -492,5 +566,9 @@ mod tests {
         assert!(caps.contains(&nectarlink_core::CONTACTS_SHOW.into()));
         assert!(caps.contains(&nectarlink_core::SMS_SHOW.into()));
         assert!(caps.contains(&nectarlink_core::TOGGLES_SHOW.into()));
+        assert!(caps.contains(&nectarlink_core::PC_AUDIO.into()));
+        assert!(caps.contains(&nectarlink_core::STORAGE_MOUNT.into()));
+        assert!(caps.contains(&nectarlink_core::STORAGE_READ.into()));
+        assert!(caps.contains(&nectarlink_core::STORAGE_WRITE.into()));
     }
 }

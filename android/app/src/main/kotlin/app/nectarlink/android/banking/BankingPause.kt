@@ -70,6 +70,26 @@ object BankingPause {
 
     fun isPaused(context: Context): Boolean = prefs(context).getBoolean(PAUSED, false)
 
+    /**
+     * Waits until the chosen apps change. With none chosen there's nothing to
+     * watch for, so the service waits here instead of checking every 15 s.
+     */
+    suspend fun awaitAppsChange(context: Context) {
+        val changed = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || key == APPS) changed.trySend(Unit)
+        }
+        val prefs = prefs(context)
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        try {
+            // Apps chosen just before the listener was there: no need to wait.
+            if (apps(context).isNotEmpty()) return
+            changed.receive()
+        } finally {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
     /** The banking apps the user chose, by package. */
     fun apps(context: Context): Set<String> = prefs(context).getStringSet(APPS, emptySet()).orEmpty().toSet()
 
@@ -163,6 +183,8 @@ object BankingPause {
         context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
         // Elevated waited while paused; with debugging back it starts again.
         Elevated.onNetworkChanged()
+        // Assist came back as Pause found it; off again if only a PC needs it.
+        AssistOnDemand.reconcile(context)
     }
 
     /** At process start: a pause left over from before (a crash, a reboot) with nothing to wait for ends now. */

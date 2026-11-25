@@ -349,8 +349,12 @@ pub const DEVICE_TOGGLES: &[(&str, bool)] = &[
     ("notifications", true),
     ("messages", true),
     ("calls", true),
+    // A call's sound on a PC (`call.audio`), with `calls` on too.
+    ("call_audio", true),
     ("contacts", true),
     ("clipboard", true),
+    // Taking that device's clipboard here, with `clipboard` on too (#453).
+    ("clipboard_receive", true),
     ("files", true),
     ("media", true),
     ("photos", true),
@@ -371,6 +375,8 @@ pub const DEVICE_TOGGLES: &[(&str, bool)] = &[
     ("commands", false),
     // Browsing the PC's files from anywhere is opt-in.
     ("remote_files", false),
+    // Unlocking the PC with the phone's fingerprint is opt-in on both sides.
+    ("unlock", false),
 ];
 
 /// The default for a toggle, or `None` if no such toggle exists.
@@ -401,6 +407,7 @@ pub fn compute(device: DeviceId, inputs: MatrixInputs<'_>) -> CapabilityMatrix {
         _ => None,
     };
     let android_pair = local.os == "android" && peer.os == "android";
+    let desktop_pair = local.role() == Some(Role::Desktop) && peer.role() == Some(Role::Desktop);
     let run = |list: &'static [FeatureDef], applies: Option<(&DeviceFacts, &DeviceFacts)>| {
         list.iter()
             .map(|def| {
@@ -426,6 +433,7 @@ pub fn compute(device: DeviceId, inputs: MatrixInputs<'_>) -> CapabilityMatrix {
     // other device (and its Android version).
     let mut features = run(FEATURES, pc_pair);
     features.extend(run(ANDROID_PAIR_FEATURES, android_pair.then_some((peer, local))));
+    features.extend(run(DESKTOP_PAIR_FEATURES, desktop_pair.then_some((peer, local))));
     let features = features.into_iter().collect();
     CapabilityMatrix { device, features }
 }
@@ -560,7 +568,12 @@ fn summarize(requires: &[Requirement], ctx: &Context<'_>) -> Summary {
 /// of the feature works even if the rest never will); else Unsupported if
 /// something can't be met on this pair; else Locked with the easiest upgrade.
 fn evaluate(def: &FeatureDef, ctx: &Context<'_>) -> FeatureState {
-    let full = summarize(def.requires, ctx);
+    let requires = if def.id == "device.unlock" && ctx.desktop.os == "linux" {
+        LINUX_UNLOCK_REQUIREMENTS
+    } else {
+        def.requires
+    };
+    let full = summarize(requires, ctx);
     if full.met {
         return FeatureState::Available;
     }
@@ -648,8 +661,42 @@ pub const ANDROID_PAIR_FEATURES: &[FeatureDef] = &[
         partial: None,
     },
 ];
+/// What two PCs do for each other (#432), from this PC's side: the other
+/// one's battery, ringing it, and sending it the clipboard and files. Like
+/// [`ANDROID_PAIR_FEATURES`], the requirements name the other PC.
+pub const DESKTOP_PAIR_FEATURES: &[FeatureDef] = &[
+    FeatureDef {
+        id: "pc.battery",
+        group: FeatureGroup::Device,
+        requires: &[peer("device.battery")],
+        partial: None,
+    },
+    FeatureDef {
+        id: "pc.ring",
+        group: FeatureGroup::Device,
+        requires: &[peer("device.ring")],
+        partial: None,
+    },
+    FeatureDef {
+        id: "pc.clipboard",
+        group: FeatureGroup::Clipboard,
+        requires: &[peer("clip.write"), DeviceToggle("clipboard")],
+        partial: None,
+    },
+    FeatureDef {
+        id: "pc.files",
+        group: FeatureGroup::Files,
+        requires: &[peer("files.transfer"), DeviceToggle("files")],
+        partial: None,
+    },
+];
 const ASSIST: Unlock = Unlock::Power(PowerLevel::Assist);
 const UPDATE: Unlock = Unlock::UpdateApp;
+const LINUX_UNLOCK_REQUIREMENTS: &[Requirement] = &[
+    phone(crate::linux_unlock::KEY, UPDATE),
+    desktop(crate::linux_unlock::PC, UPDATE),
+    DeviceToggle(crate::unlock::TOGGLE),
+];
 
 /// Every feature, in display order. Capability IDs are listed in
 /// docs/protocol/capabilities.md.
@@ -668,6 +715,12 @@ pub const FEATURES: &[FeatureDef] = &[
         partial: None,
     },
     FeatureDef {
+        id: "device.unlock",
+        group: FeatureGroup::Device,
+        requires: &[phone("unlock.key", UPDATE), desktop("unlock.pc", UPDATE), DeviceToggle("unlock")],
+        partial: None,
+    },
+    FeatureDef {
         id: "device.pc_actions",
         group: FeatureGroup::Device,
         requires: &[desktop("pc.power", UPDATE), DeviceToggle("pc_actions")],
@@ -677,6 +730,12 @@ pub const FEATURES: &[FeatureDef] = &[
         id: "device.pc_hibernate",
         group: FeatureGroup::Device,
         requires: &[desktop("pc.power.hibernate", UPDATE), DeviceToggle("pc_actions")],
+        partial: None,
+    },
+    FeatureDef {
+        id: "device.pc_shutdown",
+        group: FeatureGroup::Device,
+        requires: &[desktop("pc.power.shutdown", UPDATE), DeviceToggle("pc_actions")],
         partial: None,
     },
     FeatureDef {
@@ -834,6 +893,17 @@ pub const FEATURES: &[FeatureDef] = &[
         partial: None,
     },
     FeatureDef {
+        id: "calls.audio",
+        group: FeatureGroup::Calls,
+        requires: &[
+            phone("call.control", Unlock::Permission(Permission::Phone)),
+            phone("call.audio", ELEVATED),
+            DeviceToggle("calls"),
+            DeviceToggle("call_audio"),
+        ],
+        partial: None,
+    },
+    FeatureDef {
         id: "contacts.read",
         group: FeatureGroup::Calls,
         requires: &[
@@ -943,6 +1013,24 @@ pub const FEATURES: &[FeatureDef] = &[
             limit: "mirroring.limit.audio_some_apps",
         }),
     },
+    // Uninstalling a phone app from the PC (D349).
+    FeatureDef {
+        id: "mirroring.app_uninstall",
+        group: FeatureGroup::Mirroring,
+        requires: &[phone("mirror.apps.uninstall", ELEVATED), DeviceToggle("mirroring")],
+        partial: None,
+    },
+    // Started from the phone (#398).
+    FeatureDef {
+        id: "mirroring.sound_from_phone",
+        group: FeatureGroup::Mirroring,
+        requires: &[
+            phone("mirror.sound", UPDATE),
+            desktop("mirror.listen.ask", UPDATE),
+            DeviceToggle("mirroring"),
+        ],
+        partial: None,
+    },
     // The phone's sound on its own, played by the PC without a window.
     FeatureDef {
         id: "mirroring.sound",
@@ -1017,6 +1105,12 @@ pub const FEATURES: &[FeatureDef] = &[
         id: "input.remote",
         group: FeatureGroup::Input,
         requires: &[desktop("input.inject", UPDATE)],
+        partial: None,
+    },
+    FeatureDef {
+        id: "input.gamepad",
+        group: FeatureGroup::Input,
+        requires: &[desktop("input.gamepad", UPDATE)],
         partial: None,
     },
     FeatureDef {
@@ -1331,12 +1425,13 @@ mod tests {
     }
 
     #[test]
-    fn pairs_without_a_phone_and_a_desktop_are_unsupported() {
+    fn two_pcs_get_only_the_pc_pair_features() {
         let m = matrix_with(&pc(), &pc(), &HashMap::new());
         assert!(
             m.features
-                .values()
-                .all(|s| *s == FeatureState::Unsupported { reason: UnsupportedReason::DeviceKinds })
+                .iter()
+                .filter(|(id, _)| !id.starts_with("pc."))
+                .all(|(_, s)| *s == FeatureState::Unsupported { reason: UnsupportedReason::DeviceKinds })
         );
     }
 
@@ -1376,6 +1471,32 @@ mod tests {
         assert_eq!(f.android_release(), Some(12));
         let f = facts(DeviceKind::Phone, "android", "beta", PowerLevel::Basic, &[]);
         assert_eq!(f.android_release(), None);
+    }
+
+    #[test]
+    fn linux_unlock_requires_linux_capabilities_and_local_consent() {
+        let phone = facts(DeviceKind::Phone, "android", "16", PowerLevel::Basic, &[crate::linux_unlock::KEY]);
+        let linux = facts(
+            DeviceKind::Desktop,
+            "linux",
+            "test",
+            PowerLevel::NotApplicable,
+            &[crate::linux_unlock::PC],
+        );
+        let legacy = facts(DeviceKind::Phone, "android", "16", PowerLevel::Basic, &[crate::unlock::KEY]);
+        let status = |peer, toggles| {
+            compute(
+                DeviceId([0; 32]),
+                MatrixInputs { local: &linux, peer, paths: &[ConnectionPath::Lan], toggles },
+            )
+            .features["device.unlock"]
+        };
+        let disabled = HashMap::new();
+        let enabled = HashMap::from([(crate::unlock::TOGGLE.to_owned(), true)]);
+
+        assert!(matches!(status(&phone, &enabled), FeatureState::Available));
+        assert!(matches!(status(&phone, &disabled), FeatureState::Locked { .. }));
+        assert!(matches!(status(&legacy, &enabled), FeatureState::Locked { .. }));
     }
 
     #[test]
@@ -1463,6 +1584,58 @@ mod tests {
             MatrixInputs { local: &tablet, peer: &phone, paths: &paths, toggles: &off },
         );
         assert!(matches!(no_clip.state("pair.clipboard"), Some(FeatureState::Locked { .. })));
+    }
+
+    #[test]
+    fn two_pcs_get_the_pc_pair_features() {
+        // What every PC offers (BASE_CAPABILITIES and the desktop app's own).
+        let caps: Vec<&str> =
+            PC.iter().copied().chain(["device.battery", "device.ring", "clip.write"]).collect();
+        let windows = facts(DeviceKind::Desktop, "windows", "10.0.26200", PowerLevel::NotApplicable, &caps);
+        let mac = facts(DeviceKind::Laptop, "macos", "15.0", PowerLevel::NotApplicable, &caps);
+        let paths = [ConnectionPath::Lan];
+        let on_windows = compute(
+            DeviceId([3; 32]),
+            MatrixInputs { local: &windows, peer: &mac, paths: &paths, toggles: &HashMap::new() },
+        );
+        for id in ["pc.battery", "pc.ring", "pc.clipboard", "pc.files"] {
+            assert_eq!(on_windows.state(id), Some(FeatureState::Available), "{id}");
+        }
+        // Phone features and phone-pair features don't apply between PCs.
+        for id in ["device.find_phone", "clipboard.pc_to_phone", "pair.clipboard"] {
+            assert_eq!(
+                on_windows.state(id),
+                Some(FeatureState::Unsupported { reason: UnsupportedReason::DeviceKinds }),
+                "{id}"
+            );
+        }
+        // Off for the other PC: locked behind its toggle.
+        let off = HashMap::from([("clipboard".to_owned(), false)]);
+        let no_clip = compute(
+            DeviceId([3; 32]),
+            MatrixInputs { local: &windows, peer: &mac, paths: &paths, toggles: &off },
+        );
+        assert!(matches!(no_clip.state("pc.clipboard"), Some(FeatureState::Locked { .. })));
+        // An older PC that doesn't take clipboards yet: an update unlocks it.
+        let old: Vec<&str> = caps.iter().copied().filter(|c| *c != "clip.write").collect();
+        let old_mac = facts(DeviceKind::Laptop, "macos", "15.0", PowerLevel::NotApplicable, &old);
+        let with_old = compute(
+            DeviceId([3; 32]),
+            MatrixInputs { local: &windows, peer: &old_mac, paths: &paths, toggles: &HashMap::new() },
+        );
+        assert!(matches!(
+            with_old.state("pc.clipboard"),
+            Some(FeatureState::Locked { upgrade }) if upgrade.action == UpgradeAction::UpdateApp(Role::Desktop)
+        ));
+    }
+
+    #[test]
+    fn a_phone_and_a_pc_have_no_pc_pair_features() {
+        let matrix = matrix(&facts(DeviceKind::Phone, "android", "16", PowerLevel::Basic, BASIC_PHONE));
+        assert_eq!(
+            matrix.state("pc.files"),
+            Some(FeatureState::Unsupported { reason: UnsupportedReason::DeviceKinds })
+        );
     }
 
     #[test]

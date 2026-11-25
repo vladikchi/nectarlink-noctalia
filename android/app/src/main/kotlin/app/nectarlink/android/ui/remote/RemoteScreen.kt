@@ -16,7 +16,6 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -141,18 +140,20 @@ fun RemoteScreen(
     val view = LocalView.current
     val context = LocalContext.current
 
-    // Keep the phone's screen on while controlling the PC, and release any
-    // held laser/button when leaving.
+    // Keep the phone's screen on while controlling the PC (for a while after each
+    // touch), and release any held laser/button when leaving.
+    app.nectarlink.android.ui.KeepScreenOn(device.online && app.nectarlink.android.ui.rememberTouchedRecently())
     DisposableEffect(view, device.id) {
-        val window = (context as? Activity)?.window
-        val prevKeepOn = view.keepScreenOn
-        view.keepScreenOn = true
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
-            view.keepScreenOn = prevKeepOn
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             core.remoteLaser(device.id, false)
         }
+    }
+
+    // The Gamepad takes the whole screen while it's open (#442).
+    var gamepadOpen by rememberSaveable(device.id) { mutableStateOf(false) }
+    if (gamepadOpen && device.has("input.gamepad")) {
+        GamepadScreen(device = device, core = core, onClose = { gamepadOpen = false })
+        return
     }
 
     var mode by rememberSaveable(initialMode) { mutableStateOf(initialMode) }
@@ -231,6 +232,15 @@ fun RemoteScreen(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
+                if (device.has("input.gamepad")) {
+                    IconButton(onClick = { gamepadOpen = true }) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_gamepad),
+                            contentDescription = stringResource(R.string.gamepad_open),
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
                 Surface(
                     shape = CircleShape,
                     color = if (device.online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
@@ -869,12 +879,19 @@ private fun AirMouseView(
                 .pointerInput(pcId, hasGyro) {
                     val tapSlop = viewConfiguration.touchSlop
                     val tapTimeoutMs = 240L
+                    val toReference = TOUCHPAD_REFERENCE_DENSITY / density
 
                     awaitEachGesture {
                         awaitFirstDown(requireUnconsumed = false)
                         val downTime = System.currentTimeMillis()
                         var maxPointers = 1
                         var totalMoved = 0f
+                        // Two fingers dragging scroll, up and down or sideways (#442),
+                        // like on the touchpad; the pointer holds still meanwhile.
+                        var scrolled = false
+                        var twoFingerMoved = 0f
+                        var scrollAccumX = 0f
+                        var scrollAccumY = 0f
 
                         filter.reset()
                         aimOffset = Offset.Zero
@@ -884,16 +901,39 @@ private fun AirMouseView(
                             val event = awaitPointerEvent()
                             val changes = event.changes
                             var pressedCount = 0
+                            var sumDx = 0f
+                            var sumDy = 0f
                             for (i in 0 until changes.size) {
                                 val c = changes[i]
                                 if (c.pressed) {
                                     pressedCount++
                                     val d = c.positionChange()
                                     totalMoved += hypot(d.x, d.y)
+                                    sumDx += d.x
+                                    sumDy += d.y
                                 }
                             }
                             if (pressedCount == 0) break
                             if (pressedCount > maxPointers) maxPointers = pressedCount
+                            // Aim with one finger only: a second one stills the pointer.
+                            padHeld = hasGyro && pressedCount == 1 && !scrolled
+
+                            if (pressedCount >= 2) {
+                                val avgDx = sumDx / pressedCount
+                                val avgDy = sumDy / pressedCount
+                                twoFingerMoved += hypot(avgDx, avgDy)
+                                if (!scrolled && twoFingerMoved > tapSlop) scrolled = true
+                                if (scrolled) {
+                                    scrollAccumX += avgDx * toReference
+                                    scrollAccumY += avgDy * toReference
+                                    if (abs(scrollAccumX) >= 18f || abs(scrollAccumY) >= 18f) {
+                                        core.remoteScroll(pcId, -(scrollAccumX / 48f), -(scrollAccumY / 36f), fast = true)
+                                        scrollAccumX = 0f
+                                        scrollAccumY = 0f
+                                    }
+                                }
+                                for (i in 0 until changes.size) changes[i].consume()
+                            }
                         }
 
                         padHeld = false
@@ -901,7 +941,7 @@ private fun AirMouseView(
                         aimOffset = Offset.Zero
 
                         val elapsed = System.currentTimeMillis() - downTime
-                        if (elapsed <= tapTimeoutMs && totalMoved <= tapSlop * 1.5f) {
+                        if (!scrolled && elapsed <= tapTimeoutMs && totalMoved <= tapSlop * 1.5f) {
                             if (maxPointers == 1) {
                                 core.remoteButton(pcId, "left", "click", onStatus)
                             } else if (maxPointers == 2) {

@@ -75,6 +75,8 @@ impl Changes {
     pub const MIC: Changes = Changes(1 << 29);
     /// Photo backup settings or progress (kept by crate::photo_backup).
     pub const PHOTO_BACKUP: Changes = Changes(1 << 30);
+    /// Installing the phone app over USB (kept by crate::phone_install).
+    pub const PHONE_INSTALL: Changes = Changes(1 << 31);
 
     pub fn is_empty(self) -> bool {
         self.0 == 0
@@ -208,9 +210,44 @@ pub struct HistoryEntry {
     pub removed_at: i64,
 }
 
-/// How long history is kept, and how much of it.
-pub const HISTORY_MS: i64 = 24 * 3600 * 1000;
-pub const MAX_HISTORY: usize = 300;
+/// How many days history is kept: the user's choice (#442), one of
+/// [`HISTORY_DAY_CHOICES`]; a day unless they picked another.
+static HISTORY_DAYS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+/// What Settings offers.
+pub const HISTORY_DAY_CHOICES: [u32; 4] = [1, 3, 7, 30];
+/// How much history a day of it holds at most; longer history holds more.
+const HISTORY_PER_DAY: usize = 300;
+/// The most history kept however long it lasts, so the file stays small.
+const MAX_HISTORY_EVER: usize = 3000;
+
+/// One of the choices, or a day for anything else (a value from a newer version, say).
+fn valid_history_days(days: u32) -> u32 {
+    if HISTORY_DAY_CHOICES.contains(&days) { days } else { 1 }
+}
+
+/// Keeps history for `days` from now on.
+pub fn set_history_days(days: u32) {
+    HISTORY_DAYS.store(valid_history_days(days), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn history_days() -> u32 {
+    HISTORY_DAYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How long history is kept, in milliseconds.
+#[cfg(test)]
+pub fn history_ms() -> i64 {
+    days_ms(history_days())
+}
+
+fn days_ms(days: u32) -> i64 {
+    i64::from(days) * 24 * 3600 * 1000
+}
+
+/// How much history `days` of it holds.
+fn max_history_for(days: u32) -> usize {
+    (HISTORY_PER_DAY * days as usize).min(MAX_HISTORY_EVER)
+}
 
 /// A reply sent from this PC to a notification, shown under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +280,8 @@ pub const MAX_NOTIFICATIONS: usize = 200;
 #[derive(Debug, Default)]
 pub struct AppState {
     pub status: Option<CoreStatus>,
+    /// The core successfully loaded its initial paired-device list.
+    pub paired_devices_ready: bool,
     /// Paired devices, in pairing order.
     pub devices: Vec<DeviceView>,
     pub discovered: Vec<DiscoveredDevice>,
@@ -273,6 +312,8 @@ pub struct AppState {
     /// for those that aren't shown normally.
     pub app_names: BTreeMap<String, String>,
     pub app_rules: BTreeMap<String, AppRule>,
+    /// Advances only when the set of hidden apps changes, including Hide → Show.
+    pub notification_visibility_revision: u64,
     /// Apps whose notification groups are currently expanded in the feed.
     pub expanded_apps: BTreeSet<String>,
     /// Most recently dismissed notification(s) for in-feed undo.
@@ -348,6 +389,7 @@ impl AppState {
 
     /// Replaces the device list (at startup, from the core's store).
     pub fn set_devices(&mut self, devices: Vec<PairedDevice>) -> Changes {
+        self.paired_devices_ready = true;
         self.devices = devices.into_iter().map(DeviceView::from).collect();
         self.sort_devices();
         Changes::DEVICES
@@ -576,6 +618,9 @@ impl AppState {
             | NodeEvent::Call { .. }
             | NodeEvent::CallLogChanged { .. }
             | NodeEvent::ContactsChanged { .. }
+            // crate::report_requests
+            | NodeEvent::DiagLogAsked { .. }
+            | NodeEvent::DiagLog { .. }
             | NodeEvent::SmsChanged { .. }
             | NodeEvent::Mirroring { .. }
             | NodeEvent::MirrorNotice { .. }
@@ -587,6 +632,7 @@ impl AppState {
             | NodeEvent::Webcam { .. }
             | NodeEvent::Mic { .. }
             | NodeEvent::PcAudioFrame { .. }
+            | NodeEvent::CallAudioUplink { .. }
             | NodeEvent::CameraCaptureRequested { .. }
             | NodeEvent::CameraCaptureCancelled { .. }
             // The updater acts on it (update_relay); nothing shows.
@@ -797,6 +843,9 @@ impl AppState {
     }
 
     pub fn set_app_rule(&mut self, app: &str, rule: AppRule) -> Changes {
+        if (self.app_rule(app) == AppRule::Hidden) != (rule == AppRule::Hidden) {
+            self.notification_visibility_revision = self.notification_visibility_revision.wrapping_add(1);
+        }
         let changed = match rule {
             AppRule::Show => self.app_rules.remove(app).is_some(),
             rule => self.app_rules.insert(app.to_owned(), rule) != Some(rule),
@@ -892,11 +941,17 @@ impl AppState {
         Changes::HISTORY
     }
 
-    /// Drops history older than a day, and beyond the most kept.
+    /// Drops history older than the user keeps it (a day unless they chose
+    /// longer), and beyond the most kept.
     pub fn prune_history(&mut self, now: i64) -> Changes {
+        self.prune_history_for(now, history_days())
+    }
+
+    fn prune_history_for(&mut self, now: i64, days: u32) -> Changes {
         let before = self.history.len();
-        self.history.retain(|h| now - h.removed_at < HISTORY_MS);
-        self.history.truncate(MAX_HISTORY);
+        let keep = days_ms(days);
+        self.history.retain(|h| now - h.removed_at < keep);
+        self.history.truncate(max_history_for(days));
         if self.history.len() == before { Changes::NONE } else { Changes::HISTORY }
     }
 
@@ -1498,6 +1553,27 @@ mod tests {
     }
 
     #[test]
+    fn history_lasts_as_long_as_chosen() {
+        let phone = DeviceId([1; 32]);
+        let mut s = AppState { history_enabled: true, ..AppState::default() };
+        s.apply(&NodeEvent::NotificationsReset { device: phone, items: vec![note("a", 10)] });
+        s.apply(&NodeEvent::NotificationRemoved { device: phone, key: "a".into() });
+        let two_days_on = s.history[0].removed_at + days_ms(2);
+        // Kept for three days: still there after two.
+        assert_eq!(s.prune_history_for(two_days_on, 3), Changes::NONE);
+        assert_eq!(s.history.len(), 1);
+        // Down to a day: gone.
+        assert!(s.prune_history_for(two_days_on, 1).intersects(Changes::HISTORY));
+        assert!(s.history.is_empty());
+        // Longer history holds more, up to a limit; unknown choices keep a day.
+        assert_eq!(max_history_for(1), HISTORY_PER_DAY);
+        assert_eq!(max_history_for(7), 7 * HISTORY_PER_DAY);
+        assert_eq!(max_history_for(30), MAX_HISTORY_EVER);
+        assert_eq!(valid_history_days(5), 1);
+        assert_eq!(valid_history_days(30), 30);
+    }
+
+    #[test]
     fn gone_notifications_are_kept_for_a_day() {
         let phone = DeviceId([1; 32]);
         let mut s = AppState { history_enabled: true, ..AppState::default() };
@@ -1514,7 +1590,7 @@ mod tests {
         assert_eq!(s.history.iter().map(|h| h.notification.key.as_str()).collect::<Vec<_>>(), ["b", "a"]);
 
         // Old entries go.
-        let later = s.history[0].removed_at + HISTORY_MS + 1;
+        let later = s.history[0].removed_at + history_ms() + 1;
         assert!(s.prune_history(later).intersects(Changes::HISTORY));
         assert!(s.history.is_empty());
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Installs NectarLink for Noctalia on Linux and shows each step
+# Installs NectarLink on Linux, with everything it needs, and shows each step
 # as it goes:
 #
 #   curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
@@ -103,7 +103,7 @@ admin() {
 
 usage() {
     cat <<EOF
-Installs NectarLink for Noctalia on Linux.
+Installs NectarLink on Linux, with everything it needs.
 
   curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sh
   curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sh -s -- [options]
@@ -177,7 +177,7 @@ find_user() {
 
 check_system() {
     step "Checking this computer"
-    [ "$(uname -s)" = "Linux" ] || fail "NectarLink for Noctalia is only packaged for Linux."
+    [ "$(uname -s)" = "Linux" ] || fail "this installer is for Linux." "On Windows, download the installer from https://github.com/$REPO/releases/latest"
 
     ARCH="$(uname -m)"
     case "$ARCH" in
@@ -233,22 +233,14 @@ check_system() {
     fi
 }
 
-# Fetches $1 to file $2. Pass "progress" for the package download.
+# Fetches $1 to file $2.
 fetch() {
     if [ -n "${NECTARLINK_ASSETS_DIR:-}" ]; then
         cp "$NECTARLINK_ASSETS_DIR/${1##*/}" "$2"
     elif has curl; then
-        if [ "${3:-}" = progress ] && [ -t 2 ]; then
-            curl -fL --progress-bar --retry 3 -o "$2" "$1"
-        else
-            curl -fsSL --retry 3 -o "$2" "$1"
-        fi
+        curl -fsSL --retry 3 -o "$2" "$1"
     elif has wget; then
-        if [ "${3:-}" = progress ] && [ -t 2 ]; then
-            wget --progress=bar:force:noscroll -O "$2" "$1"
-        else
-            wget -q -O "$2" "$1"
-        fi
+        wget -q -O "$2" "$1"
     else
         fail "this needs curl or wget to download NectarLink." "Install one of them and run this again."
     fi
@@ -266,14 +258,12 @@ find_release() {
         done
     else
         fetch "https://api.github.com/repos/$REPO/releases/latest" "$WORK/release.json" \
-            || fail "couldn't find the latest NectarLink for Noctalia release." \
-                "Check your internet connection and https://github.com/$REPO/releases."
+            || fail "couldn't reach GitHub to find the latest release." "Check the internet connection and try again."
         VERSION="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' "$WORK/release.json" | head -n 1)"
     fi
     [ -n "$VERSION" ] || fail "couldn't tell which version is the latest."
     BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
-    # Releases publish URL-safe filenames. Local test bundles retain the
-    # filenames emitted by the package builders.
+    # Public release asset filenames use '-' in place of the tag's '+'.
     asset_version="$VERSION"
     if [ -z "${NECTARLINK_ASSETS_DIR:-}" ]; then
         asset_version="$(printf '%s' "$VERSION" | tr '+' '-')"
@@ -289,7 +279,7 @@ find_release() {
 download() {
     step "Downloading $ASSET"
     say "From $BASE_URL"
-    fetch "$BASE_URL/$ASSET" "$WORK/$ASSET" progress || fail "couldn't download $ASSET." \
+    fetch "$BASE_URL/$ASSET" "$WORK/$ASSET" || fail "couldn't download $ASSET." \
         "If this release has no such file yet, try --package tarball."
     fetch "$BASE_URL/SHA256SUMS.txt" "$WORK/SHA256SUMS.txt" || fail "couldn't download SHA256SUMS.txt to check the download."
     size="$(du -h "$WORK/$ASSET" | cut -f1)"
@@ -502,8 +492,9 @@ setup_firewall() {
 finish() {
     printf '\n%sNectarLink %s is ready.%s\n' "$BOLD" "$VERSION" "$RESET"
     echo "Open it from your app menu, or run nectarlink-desktop. Then install the"
-    echo "Android app and pairing (upstream): https://github.com/thtbee/nectarlink#get-started"
-    echo "It updates itself from now on. If it was already open, quit and open it again."
+    echo "Android app and pair: https://github.com/$REPO#get-started"
+    echo "It checks for updates itself and asks before installing one. If it was"
+    echo "already open, quit and open it again."
 }
 
 uninstall() {

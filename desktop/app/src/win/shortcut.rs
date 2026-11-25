@@ -7,8 +7,8 @@ use windows::{
     Win32::{
         System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, IPersistFile},
         UI::Shell::{
-            FOLDERID_PublicDesktop, FOLDERID_Recent, FOLDERID_SendTo, IShellLinkW, KF_FLAG_DEFAULT,
-            SHGetKnownFolderPath, ShellLink,
+            FOLDERID_Desktop, FOLDERID_PublicDesktop, FOLDERID_Recent, FOLDERID_SendTo, IShellLinkW,
+            KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink,
         },
     },
     core::{HSTRING, Interface},
@@ -27,6 +27,12 @@ pub struct Shortcut {
 
 /// Writes (or replaces) a shortcut at `path`, with the target's own icon.
 pub fn write(path: &Path, shortcut: &Shortcut) -> windows::core::Result<()> {
+    write_with_icon(path, shortcut, None)
+}
+
+/// [`write`], with the icon from `icon` (an `.ico`) when given.
+pub fn write_with_icon(path: &Path, shortcut: &Shortcut, icon: Option<&Path>) -> windows::core::Result<()> {
+    let icon = icon.map_or_else(|| shortcut.target.clone(), Path::to_path_buf);
     with_com(|| {
         // SAFETY: plain COM calls on a live ShellLink object; the strings
         // outlive the calls.
@@ -35,7 +41,7 @@ pub fn write(path: &Path, shortcut: &Shortcut) -> windows::core::Result<()> {
             link.SetPath(&HSTRING::from(shortcut.target.as_os_str()))?;
             link.SetArguments(&HSTRING::from(shortcut.arguments.as_str()))?;
             link.SetDescription(&HSTRING::from(shortcut.description.as_str()))?;
-            link.SetIconLocation(&HSTRING::from(shortcut.target.as_os_str()), 0)?;
+            link.SetIconLocation(&HSTRING::from(icon.as_os_str()), 0)?;
             link.cast::<IPersistFile>()?.Save(&HSTRING::from(path.as_os_str()), true)
         }
     })
@@ -84,6 +90,11 @@ pub fn send_to_dir() -> Option<PathBuf> {
     known_folder(&FOLDERID_SendTo)
 }
 
+/// This user's desktop.
+pub fn desktop_dir() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Desktop)
+}
+
 /// The desktop every user of the PC sees, where setup puts its shortcut.
 pub fn public_desktop_dir() -> Option<PathBuf> {
     known_folder(&FOLDERID_PublicDesktop)
@@ -94,7 +105,7 @@ pub fn recent_dir() -> Option<PathBuf> {
     known_folder(&FOLDERID_Recent)
 }
 
-fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+pub(crate) fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     // SAFETY: the returned string is freed with CoTaskMemFree as documented.
     unsafe {
         let path = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;

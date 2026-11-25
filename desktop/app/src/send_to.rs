@@ -213,6 +213,7 @@ pub fn handle(request: Request) {
         Request::Send { device, paths } => send(device, paths),
         Request::Share { files, url, text } => share(files, url, text),
         Request::TaskNotify { device, task } => task_notify(device, task),
+        Request::OpenDialer { number } => crate::bridge::app::open_dialer(None, &number),
         Request::Task { action } => crate::bridge::app::handle_jump_task(&action),
     }
 }
@@ -330,7 +331,7 @@ fn task_notify(device: Option<String>, task: nectarlink_core::TaskNotify) {
                 };
                 for d in targets {
                     if let Err(e) = node.task_notify(Some(d.id), task.clone()).await {
-                        tracing::debug!(device = %d.id, error = %e, "task.notify wasn't delivered");
+                        tracing::debug!(device = %d.id.short(), error = %e, "task.notify wasn't delivered");
                     }
                 }
             }

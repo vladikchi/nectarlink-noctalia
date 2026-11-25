@@ -5,7 +5,8 @@
 # install.sh install and remove them in clean containers, as root on Ubuntu
 # 24.04, Fedora 40 and Arch, and as a user without sudo.
 #
-# Needs dpkg-deb, rpmbuild, readelf and docker (or podman: DOCKER=podman).
+# Needs dpkg-deb, rpmbuild, readelf, Qt lrelease, Python 3 and docker
+# (or podman: DOCKER=podman).
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ mkdir -p "${DIST}" "${WORK}/qt"/{lib,plugins,qml}
 
 # A private Qt that's empty, so the packages need no Qt from the system.
 cp /bin/true "${WORK}/nectarlink-desktop"
+printf '%s\n' 'stale catalogue' > "${WORK}/nectarlink_xx.qm"
 cat > "${WORK}/qmake" <<EOF
 #!/bin/sh
 case "\$2" in
@@ -32,6 +34,17 @@ export BIN_PATH="${WORK}/nectarlink-desktop" QMAKE="${WORK}/qmake" OUT_DIR="${DI
 "${SCRIPT_DIR}/build-deb.sh" >/dev/null
 "${SCRIPT_DIR}/build-rpm.sh" >/dev/null
 "${SCRIPT_DIR}/build-tarball.sh" >/dev/null
+# A clean build must generate and ship Brazilian Portuguese, rather than
+# depend on .qm files left over from a previous release build.
+dpkg-deb -x "${DIST}/nectarlink_9.9.9_$(dpkg --print-architecture).deb" "${WORK}/deb-content"
+test -s "${WORK}/deb-content/usr/share/nectarlink/nectarlink_pt_BR.qm"
+test ! -e "${WORK}/deb-content/usr/share/nectarlink/nectarlink_xx.qm"
+tar -tzf "${DIST}/Nectarlink-9.9.9-linux-$(uname -m).tar.gz" > "${WORK}/tar-content"
+grep -q '/share/nectarlink/nectarlink_pt_BR.qm$' "${WORK}/tar-content"
+if grep -q '/nectarlink_xx.qm$' "${WORK}/tar-content"; then
+    echo "error: stale catalogue was included in the tarball" >&2
+    exit 1
+fi
 cp "${SCRIPT_DIR}/install.sh" "${DIST}/install.sh"
 (cd "${DIST}" && sha256sum ./*.deb ./*.rpm ./*.tar.gz | sed 's| \./| |' > SHA256SUMS.txt)
 chmod -R a+rX "${WORK}"
@@ -55,7 +68,11 @@ ROOT_ROUND_TRIP='
     nectarlink-desktop --version >/dev/null
     test -f /etc/udev/rules.d/70-nectarlink-uinput.rules
     sh /dist/install.sh --uninstall
-    ! command -v nectarlink-desktop
+    hash -r
+    if command -v nectarlink-desktop; then
+        echo "nectarlink-desktop is still installed" >&2
+        exit 1
+    fi
     ! test -e /etc/udev/rules.d/70-nectarlink-uinput.rules'
 
 check deb docker.io/library/ubuntu:24.04 "${ROOT_ROUND_TRIP}"
@@ -71,6 +88,12 @@ check home-folder docker.io/library/ubuntu:24.04 '
 check bad-checksum docker.io/library/ubuntu:24.04 '
     mkdir /tampered && cp /dist/* /tampered/
     echo tampered >> /tampered/nectarlink_9.9.9_amd64.deb
-    ! NECTARLINK_ASSETS_DIR=/tampered sh /tampered/install.sh
+    if NECTARLINK_ASSETS_DIR=/tampered sh /tampered/install.sh > /tmp/tampered.log 2>&1; then
+        cat /tmp/tampered.log
+        echo "installer accepted a tampered package" >&2
+        exit 1
+    fi
+    cat /tmp/tampered.log
+    grep -F "match SHA256SUMS.txt; it may be damaged or tampered with." /tmp/tampered.log
     ! command -v nectarlink-desktop'
 echo "All install.sh checks passed."

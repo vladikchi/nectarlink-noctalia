@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -98,7 +99,9 @@ import app.nectarlink.android.ui.webcam.WebcamScreen
 import app.nectarlink.android.webcam.WebcamService
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     @Volatile
@@ -125,12 +128,21 @@ class MainActivity : ComponentActivity() {
             (application as NectarlinkApplication).core.refreshNotificationAccess()
         }
 
+    /** The star ask was posted as the app opened: the Discord card waits for another time. */
+    private var starAskedNow = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val core = (application as NectarlinkApplication).core
         val preferences = Preferences(this)
-        StarNotification.onAppOpened(this)
+        // One ask at a time: the Discord card waits while the star ask is new.
+        starAskedNow = StarNotification.onAppOpened(this)
+        runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            preferences.armCommunityInvite(updated = info.lastUpdateTime > info.firstInstallTime)
+        }
+        lifecycleScope.launch { WhatsNew.onAppOpened(this@MainActivity) }
 
         // Notifications (transfers, calls, requests from PCs) and, on Android
         // 17, the local network, without which no PC can be reached.
@@ -178,6 +190,7 @@ class MainActivity : ComponentActivity() {
                         state = state,
                         appearance = appearance,
                         preferences = preferences,
+                        starAskedNow = starAskedNow,
                         requestedRemotePc = requestedRemotePc,
                         requestedRemoteMode = requestedRemoteMode,
                         onRemoteConsumed = { requestedRemotePc = null },
@@ -233,11 +246,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Preferences.applyHideFromRecents(this, Preferences.isHideFromRecents(this))
         // Back from Settings, maybe with notification access changed.
         val app = application as NectarlinkApplication
         if (app.core.state.value.status is CoreStatus.Ready) {
             app.core.refreshNotificationAccess()
         }
+        // Opened after the phone stopped looking for its PCs: look again (#397).
+        app.core.retryReconnecting()
         if (app.updater.enabled) {
             // Back from allowing installs: the update the user started carries on.
             app.updater.onAppResumed()
@@ -349,6 +365,7 @@ private sealed interface ScreenRoute {
     data class Failed(val message: String) : ScreenRoute
     data object Walkthrough : ScreenRoute
     data object FeaturesGuide : ScreenRoute
+    data object Report : ScreenRoute
     data object Pairing : ScreenRoute
     data class Webcam(val pcId: String) : ScreenRoute
     data class Recorder(val pcId: String) : ScreenRoute
@@ -364,6 +381,7 @@ private fun App(
     state: CoreState,
     appearance: Appearance,
     preferences: Preferences,
+    starAskedNow: Boolean,
     requestedRemotePc: String?,
     requestedRemoteMode: RemoteMode,
     onRemoteConsumed: () -> Unit,
@@ -383,6 +401,25 @@ private fun App(
     var manualWalkthroughOpen by rememberSaveable { mutableStateOf(false) }
     var activeFirstRunWalkthrough by rememberSaveable { mutableStateOf(false) }
     var featuresGuideOpen by rememberSaveable { mutableStateOf(false) }
+    var reportOpen by rememberSaveable { mutableStateOf(false) }
+    var crashCard by remember { mutableStateOf<app.nectarlink.core.CrashCard?>(null) }
+    var crashSend by remember { mutableStateOf(app.nectarlink.android.ui.settings.CrashSend.Idle) }
+    var crashFixedIn by remember { mutableStateOf<String?>(null) }
+    val crashScope = rememberCoroutineScope()
+    val crashReady = state.status is CoreStatus.Ready
+    LaunchedEffect(crashReady) {
+        if (crashReady) {
+            crashCard = withContext(Dispatchers.IO) {
+                runCatching { app.nectarlink.core.crashCard(app.nectarlink.android.BuildConfig.VERSION_NAME) }.getOrNull()
+            }
+            // Already fixed in a newer version? Then the card offers the update.
+            if (crashCard != null) {
+                crashFixedIn = withContext(Dispatchers.IO) {
+                    runCatching { app.nectarlink.android.diag.Reports.knownFix() }.getOrNull()
+                }
+            }
+        }
+    }
     var pendingHighlightTarget by rememberSaveable { mutableStateOf<GuideHighlightTarget?>(null) }
     var remotePcId by rememberSaveable { mutableStateOf<String?>(null) }
     var remoteInitialMode by rememberSaveable { mutableStateOf(RemoteMode.Touchpad) }
@@ -529,6 +566,7 @@ private fun App(
         state.status is CoreStatus.Failed -> ScreenRoute.Failed(state.status.message)
         showWalkthrough -> ScreenRoute.Walkthrough
         featuresGuideOpen -> ScreenRoute.FeaturesGuide
+        reportOpen -> ScreenRoute.Report
         pairing || state.pairing != PairingState.Idle -> ScreenRoute.Pairing
         webcamDevice != null -> ScreenRoute.Webcam(webcamDevice.id)
         recordDevice != null -> ScreenRoute.Recorder(recordDevice.id)
@@ -688,6 +726,17 @@ private fun App(
                     )
                 }
             }
+            ScreenRoute.Report -> {
+                Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+                    app.nectarlink.android.ui.settings.ReportScreen(
+                        state = state,
+                        onAsk = core::reportAsk,
+                        reportLogs = core.reportLogs,
+                        onBack = { reportOpen = false },
+                        modifier = Modifier.fillMaxSize().padding(padding),
+                    )
+                }
+            }
             ScreenRoute.Pairing -> {
                 BackHandler(enabled = pairing || state.devices.isNotEmpty()) { core.resetPairing(); pairing = false }
                 PairingScreen(state, actions, cancellable = pairing || state.devices.isNotEmpty()) { pairing = false }
@@ -821,9 +870,13 @@ private fun App(
                     val touchpadSensitivity by preferences.touchpadSensitivity.collectAsStateWithLifecycle()
                     val suggestClipboardActions by preferences.suggestClipboardActions.collectAsStateWithLifecycle()
                     val volumeKeysControlPc by preferences.volumeKeysControlPc.collectAsStateWithLifecycle()
+                    val pcSoundBufferMs by preferences.pcSoundBufferMs.collectAsStateWithLifecycle()
+                    val quietWhileUsingPc by preferences.quietWhileUsingPc.collectAsStateWithLifecycle()
+                    val hideFromRecents by preferences.hideFromRecents.collectAsStateWithLifecycle()
                     val backgroundServiceEnabled by preferences.backgroundServiceEnabled.collectAsStateWithLifecycle()
                     val startWithoutAsking by app.nectarlink.android.service.PcAutoStart.pcs(context).collectAsStateWithLifecycle()
                     val hiveInviteShown by preferences.hiveInviteShown.collectAsStateWithLifecycle()
+                    val communityInviteShown by preferences.communityInviteShown.collectAsStateWithLifecycle()
                     val saveableStateHolder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
 
                     // Only apply top scaffold padding here so LazyColumns in HomeScreen/SettingsScreen
@@ -859,12 +912,61 @@ private fun App(
                             Tab.Home -> saveableStateHolder.SaveableStateProvider("tab_home") {
                                 HomeScreen(
                                     state = state,
+                                    crashCard = crashCard?.let { card ->
+                                        {
+                                            val context = LocalContext.current
+                                            app.nectarlink.android.ui.settings.CrashCardView(
+                                                send = crashSend,
+                                                fixedIn = crashFixedIn,
+                                                onUpdate = {
+                                                    (context.applicationContext as app.nectarlink.android.NectarlinkApplication).updater.checkNow()
+                                                    app.nectarlink.core.crashCardDone()
+                                                    crashCard = null
+                                                },
+                                                onSend = {
+                                                    crashSend = app.nectarlink.android.ui.settings.CrashSend.Sending
+                                                    crashScope.launch {
+                                                        val sent = withContext(Dispatchers.IO) {
+                                                            runCatching {
+                                                                app.nectarlink.android.diag.Reports.sendCrash(context, card, state.devices)
+                                                            }.getOrDefault(false)
+                                                        }
+                                                        crashSend = if (sent) {
+                                                            app.nectarlink.android.ui.settings.CrashSend.Sent
+                                                        } else {
+                                                            app.nectarlink.android.ui.settings.CrashSend.Failed
+                                                        }
+                                                        if (sent) {
+                                                            app.nectarlink.core.crashCardDone()
+                                                            kotlinx.coroutines.delay(2500)
+                                                            crashCard = null
+                                                        }
+                                                    }
+                                                },
+                                                onLookFirst = {
+                                                    app.nectarlink.core.crashCardDone()
+                                                    crashCard = null
+                                                    reportOpen = true
+                                                },
+                                                onNotNow = {
+                                                    app.nectarlink.core.crashCardDone()
+                                                    crashCard = null
+                                                },
+                                                onOff = {
+                                                    app.nectarlink.core.crashCardOff()
+                                                    crashCard = null
+                                                },
+                                            )
+                                        }
+                                    },
                                     onRing = core::ring,
                                     onStopRinging = core::stopRinging,
                                     onPairNew = { pairing = true },
                                     onRefresh = core::refresh,
                                     onPower = core::pcPower,
                                     onHibernate = core::pcHibernate,
+                                    onShutdown = core::pcShutdown,
+                                    onPhoneSoundOnPc = core::askPcForPhoneSound,
                                     onWake = core::wake,
                                     onSetReconnect = core::setReconnect,
                                     onRemote = { id ->
@@ -950,6 +1052,12 @@ private fun App(
                                         preferences.update { it.copy(theme = "hive") }
                                     },
                                     onDismissHiveInvite = preferences::answerHiveInvite,
+                                    showCommunityInvite = communityInviteShown && !starAskedNow,
+                                    onJoinDiscord = {
+                                        preferences.answerCommunityInvite(joined = true)
+                                        Link.open(context, Link.DISCORD)
+                                    },
+                                    onDismissCommunityInvite = { preferences.answerCommunityInvite(joined = false) },
                                     backgroundServiceEnabled = backgroundServiceEnabled,
                                     onTurnOnBackgroundService = {
                                         preferences.updateBackgroundServiceEnabled(true)
@@ -993,6 +1101,8 @@ private fun App(
                                     updater = (context.applicationContext as NectarlinkApplication).updater,
                                     onSetStorageEnabled = core::setStorageEnabled,
                                     onSetMicEnabled = core::setMicEnabled,
+                                    onSetUnlockEnabled = core::setUnlockEnabled,
+                                    onSetClipboardAccepted = core::setClipboardAccepted,
                                     startWithoutAsking = startWithoutAsking,
                                     onSetStartWithoutAsking = { pc, on -> app.nectarlink.android.service.PcAutoStart.set(context, pc, on) },
                                     onAddSafFolder = core::addSafFolder,
@@ -1003,6 +1113,12 @@ private fun App(
                                     onSetSuggestClipboardActions = preferences::updateSuggestClipboardActions,
                                     volumeKeysControlPc = volumeKeysControlPc,
                                     onSetVolumeKeysControlPc = preferences::updateVolumeKeysControlPc,
+                                    pcSoundBufferMs = pcSoundBufferMs,
+                                    onSetPcSoundBufferMs = preferences::updatePcSoundBufferMs,
+                                    quietWhileUsingPc = quietWhileUsingPc,
+                                    onSetQuietWhileUsingPc = preferences::updateQuietWhileUsingPc,
+                                    hideFromRecents = hideFromRecents,
+                                    onSetHideFromRecents = preferences::updateHideFromRecents,
                                     backgroundServiceEnabled = backgroundServiceEnabled,
                                     onToggleBackgroundService = { enabled ->
                                         preferences.updateBackgroundServiceEnabled(enabled)
@@ -1029,6 +1145,7 @@ private fun App(
                                     onOpenFeaturesGuide = {
                                         featuresGuideOpen = true
                                     },
+                                    onReportProblem = { reportOpen = true },
                                     highlightTarget = pendingHighlightTarget,
                                     onHighlightConsumed = { pendingHighlightTarget = null },
                                     modifier = Modifier.fillMaxSize(),

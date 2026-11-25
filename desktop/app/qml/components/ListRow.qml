@@ -7,6 +7,8 @@ import app.nectarlink
 Item {
     id: row
     property string iconPath
+    // A solid icon (a brand mark) instead of a stroke one.
+    property bool iconFilled: false
     property string title
     property string description
     property bool stackBelow: false
@@ -24,6 +26,7 @@ Item {
         anchors.left: parent.left
         anchors.verticalCenter: row.stackTrailing ? texts.verticalCenter : parent.verticalCenter
         path: row.iconPath
+        filled: row.iconFilled
         color: Theme.surfaceContentVariant
     }
     Column {
@@ -54,8 +57,10 @@ Item {
     }
     Item {
         id: trailingSlot
-        anchors.left: row.stackTrailing ? texts.left : undefined
-        anchors.right: row.stackTrailing ? undefined : parent.right
+        // Placed by x, not by swapping anchors: a left anchor that a binding
+        // turned off could stay on, so a row that stopped stacking stretched
+        // across and its control sat over the title.
+        x: row.stackTrailing ? texts.x : row.width - width
         y: row.stackTrailing ? (texts.y + texts.implicitHeight + 10) : Math.round((row.height - height) / 2)
         width: childrenRect.width
         height: childrenRect.height

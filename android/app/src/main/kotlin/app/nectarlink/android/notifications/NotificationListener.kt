@@ -40,7 +40,9 @@ class NotificationListener : NotificationListenerService() {
             val ranking = runCatching { currentRanking }.getOrNull()
             limiter.clear()
             sent.clear()
-            val items = snapshot.mapNotNull { reader.read(it, ranking, update = false) }
+            val (calls, others) = snapshot.partition { core.appCalls.isAppCall(it) }
+            calls.forEach(::reportCall)
+            val items = others.mapNotNull { reader.read(it, ranking, update = false) }
             sent.addAll(items.map { it.key })
             core.notificationAccessChanged(true, items)
         }
@@ -58,6 +60,14 @@ class NotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification, rankingMap: RankingMap?) {
         val key = sbn.key
         work {
+            // A call in another app goes to PCs as a call, not a notification (#434).
+            if (core.appCalls.isAppCall(sbn)) {
+                reportCall(sbn)
+                if (sent.remove(key)) core.notificationRemoved(key)
+                return@work
+            }
+            // A call's notification that stopped being one ("Call ended") ends it.
+            core.appCalls.removed(sbn)
             val notification = reader.read(sbn, rankingMap, update = key in sent)
             if (notification == null) {
                 // Something we mirrored may have turned into something we don't
@@ -74,9 +84,14 @@ class NotificationListener : NotificationListenerService() {
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         val key = sbn.key
         work {
+            core.appCalls.removed(sbn)
             limiter.cancel(key)
             if (sent.remove(key)) core.notificationRemoved(key)
         }
+    }
+
+    private fun reportCall(sbn: StatusBarNotification) {
+        core.appCalls.posted(sbn, reader.callerName(sbn), { reader.callerPhoto(sbn) }, reader.appName(sbn.packageName))
     }
 
     override fun onDestroy() {
@@ -99,9 +114,10 @@ class NotificationListener : NotificationListenerService() {
         }
     }
 
-    internal fun applyHostHints(suppressPhoneEffects: Boolean) {
+    internal fun applyHostHints(pcActive: Boolean) {
+        val quiet = pcActive && app.nectarlink.android.ui.Preferences.isQuietWhileUsingPc(this)
         runCatching {
-            requestListenerHints(if (suppressPhoneEffects) HINT_HOST_DISABLE_NOTIFICATION_EFFECTS else 0)
+            requestListenerHints(if (quiet) HINT_HOST_DISABLE_NOTIFICATION_EFFECTS else 0)
         }
     }
 
@@ -143,9 +159,10 @@ class NotificationListener : NotificationListenerService() {
 
         /**
          * Updates whether the user is actively using a paired PC (`pc_active`
-         * toggle). When active, Android's `HINT_HOST_DISABLE_NOTIFICATION_EFFECTS`
-         * suppresses redundant phone notification sound/vibration effects while
-         * still delivering notifications to the PC.
+         * toggle). When active and the user turned on "Quiet while you use the
+         * PC", Android's `HINT_HOST_DISABLE_NOTIFICATION_EFFECTS` silences the
+         * phone's own notification sound and vibration; notifications still
+         * reach the PC either way.
          */
         fun setPcActive(active: Boolean) {
             mainHandler.removeCallbacks(expirePcActive)
@@ -157,6 +174,11 @@ class NotificationListener : NotificationListenerService() {
                 pcActiveUntilMs = 0L
                 instance?.applyHostHints(false)
             }
+        }
+
+        /** Applies the quiet setting again after it changed. */
+        fun refreshHostHints() {
+            instance?.applyHostHints(isPcActive())
         }
 
         /** Whether the user granted notification access to this app. */

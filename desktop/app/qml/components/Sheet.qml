@@ -32,6 +32,14 @@ Item {
         }
     }
 
+    MouseArea {
+        anchors.fill: parent
+        enabled: sheet.opened
+        acceptedButtons: Qt.NoButton
+        hoverEnabled: true
+        onWheel: (wheel) => wheel.accepted = true
+    }
+
     Rectangle {
         id: scrim
         anchors.fill: parent
@@ -64,7 +72,9 @@ Item {
         Behavior on scale { enabled: !Theme.reduceMotion; SpringAnimation { spring: Theme.springStandard; damping: Theme.dampingStandard } }
         clip: true
 
+        ScrollRail { flick: sheetFlick }
         Flickable {
+            id: sheetFlick
             anchors.fill: parent
             anchors.margins: 24
             contentWidth: width

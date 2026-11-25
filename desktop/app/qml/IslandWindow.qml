@@ -7,7 +7,7 @@ import app.nectarlink
 // Dynamic Island-style floating pill anchored at the top-center of the primary
 // monitor (340×40px compact, expanding smoothly to 380×88px on hover or incoming call).
 // Stays hidden when idle and surfaces live activity:
-//   1. Incoming / active phone call (caller name + Answer / Mute / Speaker / Hang up)
+//   1. Incoming / active phone call (caller name + Answer / Mute / On PC / Hang up)
 //   2. File transfer in progress (circular progress ring + transfer title & speed)
 //   3. Active media playback on Phone or PC (album art + scrolling song title + Play/Pause & Next)
 Window {
@@ -32,6 +32,13 @@ Window {
     readonly property real areaX: workArea && workArea.width ? workArea.x / dpr : Screen.virtualX
     readonly property real areaY: workArea && workArea.height ? workArea.y / dpr : Screen.virtualY
     readonly property real areaW: workArea && workArea.width ? workArea.width / dpr : availW
+
+    // Where it sits along the top (#472): "left", "center" or "right".
+    readonly property string position: Preferences.nectarIslandPosition
+    // Always dark, or the app's own light or dark (#325).
+    readonly property bool light: Preferences.nectarIslandLook === "theme" && !Theme.dark
+    readonly property color ink: light ? Theme.surfaceContent : "#FFFFFF"
+    function wash(alpha) { return light ? Qt.rgba(0, 0, 0, alpha * 0.7) : Qt.rgba(1, 1, 1, alpha) }
 
     // ---- Track active media across all rows of MediaList (Phone + This PC) ----
     property string mediaDeviceId: ""
@@ -77,7 +84,9 @@ Window {
 
     // ---- Transient notification toast (only when a new phone notification arrives) ----
     property bool notificationToastActive: false
-    property int lastNotificationCount: NotificationList.count
+    // Taken once, not bound: a binding could catch up before onCountChanged
+    // runs, and the first notification after starting wouldn't show.
+    property int lastNotificationCount: 0
     Timer {
         id: notificationToastTimer
         interval: 4200
@@ -166,20 +175,42 @@ Window {
         }
     }
 
-    function recomputeMedia() {
-        let best = null
-        const count = mediaRepeater.count
-        for (let i = 0; i < count; i++) {
+    // The source picked with the switch button (#472), as "device|player".
+    property string mediaPick: ""
+    // How many sources are playing, to offer the switch.
+    property int mediaSources: 0
+
+    // Playing players: phones', and this PC's own when that's on (#472).
+    function playingMedia() {
+        const playing = []
+        for (let i = 0; i < mediaRepeater.count; i++) {
             const item = mediaRepeater.itemAt(i)
-            if (!item) continue
-            // Only surface phone media in Nectar Island (never PC-local media, which is already on the PC)
-            if (item.deviceId === "local") continue
-            if (item.playing) {
-                if (!best || !best.playing) {
-                    best = item
-                }
-            }
+            if (!item || !item.playing) continue
+            if (item.deviceId === "local" && !Preferences.nectarIslandPcMedia) continue
+            playing.push(item)
         }
+        return playing
+    }
+
+    function mediaKey(item) { return item.deviceId + "|" + item.playerId }
+
+    // Shows the next playing source.
+    function nextMediaSource() {
+        const playing = playingMedia()
+        if (playing.length < 2) return
+        const at = playing.findIndex(item => mediaKey(item) === mediaDeviceId + "|" + mediaPlayerId)
+        mediaPick = mediaKey(playing[(at + 1) % playing.length])
+        recomputeMedia()
+    }
+
+    function recomputeMedia() {
+        const playing = playingMedia()
+        mediaSources = playing.length
+        // The one picked while it plays, else a phone's, else this PC's.
+        const best = playing.find(item => mediaKey(item) === mediaPick)
+            || playing.find(item => item.deviceId !== "local")
+            || playing[0]
+            || null
         if (best) {
             mediaDeviceId = best.deviceId
             mediaPlayerId = best.playerId
@@ -240,7 +271,7 @@ Window {
         return Qt.locale().toString(b / (1024 * 1024), "f", 1) + " MB/s"
     }
 
-    readonly property bool hasMediaCandidate: mediaPlaying && mediaDeviceId !== "local" && mediaTitle.length > 0
+    readonly property bool hasMediaCandidate: mediaPlaying && mediaTitle.length > 0
     readonly property string mode: {
         if (Preferences.nectarIslandCalls && PhoneCall.active) return "call"
         if (Preferences.nectarIslandTransfers && (TransferList.active > 0 || transferJustFinished)) return "transfer"
@@ -263,7 +294,8 @@ Window {
             // Coming back while kept: the window is already up, so drop in here.
             if (keptForMinutes && visible && !Theme.reduceMotion)
                 dropInAnim.restart()
-            keptForMinutes = onWayland
+            // Not on Niri: there an empty window still catches clicks (D511).
+            keptForMinutes = onWayland && !AppController.onNiri
         } else if (keptForMinutes) {
             keepTimer.restart()
         }
@@ -290,6 +322,7 @@ Window {
     }
 
     Component.onCompleted: {
+        lastNotificationCount = NotificationList.count
         Qt.callLater(() => {
             recomputeMedia()
             recomputeTransfer()
@@ -304,6 +337,7 @@ Window {
                 Qt.callLater(() => AppController.styleShelfWindow())
             }
         }
+        function onNectarIslandPcMediaChanged() { islandWin.recomputeMedia() }
     }
 
     readonly property bool expanded: pillHover.hovered || (Preferences.nectarIslandCalls && PhoneCall.active && PhoneCall.ringing)
@@ -311,7 +345,8 @@ Window {
     readonly property real pillHeight: expanded ? 88 : 40
     width: 400
     height: 104
-    x: areaX + Math.round((areaW - width) / 2)
+    x: position === "left" ? areaX + 6
+        : (position === "right" ? areaX + areaW - width - 6 : areaX + Math.round((areaW - width) / 2))
     y: areaY + 8
 
     readonly property string primaryLabel: {
@@ -327,7 +362,11 @@ Window {
         if (mode === "media")
             return mediaTitle.length > 0 ? mediaTitle : (mediaApp.length > 0 ? mediaApp : qsTr("Now playing"))
         if (mode === "notification")
-            return qsTr("%1 phone notification(s)").arg(NotificationList.count)
+            return NotificationList.latestTitle.length > 0
+                ? NotificationList.latestTitle
+                : (NotificationList.latestApp.length > 0
+                    ? NotificationList.latestApp
+                    : qsTr("%1 phone notification(s)").arg(NotificationList.count))
         if (mode === "waiting")
             return qsTr("%1 waiting").arg(TransferList.waitingCount)
         return DeviceList.count > 0
@@ -335,11 +374,35 @@ Window {
             : qsTr("Nectar Island · Ready")
     }
 
+    // The call's clock, ticking once a second while a call is shown.
+    property real callNow: Date.now()
+    Timer {
+        interval: 1000
+        repeat: true
+        running: islandWin.visible && islandWin.mode === "call" && PhoneCall.since > 0
+        triggeredOnStart: true
+        onTriggered: islandWin.callNow = Date.now()
+    }
+    readonly property string callClock: {
+        if (PhoneCall.since <= 0) return ""
+        const s = Math.max(0, Math.floor((callNow - PhoneCall.since) / 1000))
+        const h = Math.floor(s / 3600)
+        const m = Math.floor((s % 3600) / 60)
+        const ss = String(s % 60).padStart(2, "0")
+        return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":" + ss : m + ":" + ss
+    }
+
     readonly property string secondaryLabel: {
         if (mode === "call") {
             if (PhoneCall.ringing) return qsTr("Incoming call")
-            if (PhoneCall.held) return qsTr("On hold")
-            return PhoneCall.number.length > 0 ? PhoneCall.number : qsTr("Call in progress")
+            // How long, where the sound is, and whether the other side hears this end.
+            const parts = []
+            if (callClock.length > 0) parts.push(callClock)
+            if (PhoneCall.held) parts.push(qsTr("On hold"))
+            if (PhoneCall.app.length > 0) parts.push(PhoneCall.app)
+            parts.push(PhoneCall.callAudio ? qsTr("On PC") : qsTr("On phone"))
+            if (PhoneCall.controls) parts.push(PhoneCall.muted ? qsTr("Mic off") : qsTr("Mic on"))
+            return parts.join(" · ")
         }
         if (mode === "transfer") {
             if (transferJustFinished && TransferList.active === 0)
@@ -360,8 +423,13 @@ Window {
                 ? (base + " · " + qsTr("%1 waiting").arg(TransferList.waitingCount))
                 : base
         }
-        if (mode === "notification")
-            return qsTr("Click to view in NectarLink")
+        if (mode === "notification") {
+            if (NotificationList.latestApp.length === 0)
+                return qsTr("Click to view in NectarLink")
+            return NotificationList.count > 1
+                ? qsTr("%1 · %n notification(s)", "", NotificationList.count).arg(NotificationList.latestApp)
+                : NotificationList.latestApp
+        }
         if (mode === "waiting") {
             return DeviceList.count > 0
                 ? qsTr("Will send when %1 is back").arg(DeviceList.deviceNameAt(0))
@@ -472,16 +540,22 @@ Window {
             id: pillBg
             anchors.top: parent.top
             anchors.topMargin: 2
-            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenter: islandWin.position === "left" || islandWin.position === "right" ? undefined : parent.horizontalCenter
+            anchors.left: islandWin.position === "left" ? parent.left : undefined
+            anchors.right: islandWin.position === "right" ? parent.right : undefined
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
             width: islandWin.pillWidth
             height: islandWin.pillHeight
             radius: height / 2
             // Authentic deep Dynamic Island obsidian surface with crisp specular glass border
-            color: Qt.rgba(0.05, 0.055, 0.075, Theme.glass ? 0.92 : 0.96)
+            color: islandWin.light
+                ? Theme.surfaceContainerHigh
+                : Qt.rgba(0.05, 0.055, 0.075, Theme.glass ? 0.92 : 0.96)
             border.width: 1
             border.color: islandWin.mode === "call"
                 ? Qt.rgba(0.29, 0.87, 0.50, 0.55)
-                : Qt.rgba(1, 1, 1, 0.18)
+                : islandWin.wash(0.18)
             clip: true
 
             Behavior on width {
@@ -573,7 +647,7 @@ Window {
                             preferredRendererType: Shape.CurveRenderer
 
                             ShapePath {
-                                strokeColor: Qt.rgba(1, 1, 1, 0.16)
+                                strokeColor: islandWin.wash(0.16)
                                 fillColor: "transparent"
                                 strokeWidth: 2.6
                                 capStyle: ShapePath.RoundCap
@@ -602,7 +676,7 @@ Window {
                             width: 11; height: 11
                             path: !islandWin.transferJustFinished ? Icons.send
                                 : (islandWin.transferFailed ? Icons.close : Icons.check)
-                            color: islandWin.transferJustFinished ? islandWin.transferEndColor : "#FFFFFF"
+                            color: islandWin.transferJustFinished ? islandWin.transferEndColor : islandWin.ink
                         }
                     }
 
@@ -616,6 +690,7 @@ Window {
                             : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.22)
                         Icon {
                             anchors.centerIn: parent
+                            visible: !(islandWin.mode === "notification" && appIcon14.status === Image.Ready)
                             width: 14; height: 14
                             path: islandWin.mode === "call"
                                 ? Icons.call
@@ -623,6 +698,14 @@ Window {
                                     ? Icons.bell
                                     : (islandWin.mode === "waiting" ? Icons.send : Icons.phone))
                             color: islandWin.mode === "call" ? "#4ADE80" : Theme.primary
+                        }
+                        RoundedImage {
+                            id: appIcon14
+                            anchors.fill: parent
+                            radius: 13
+                            visible: islandWin.mode === "notification" && status === Image.Ready
+                            source: islandWin.mode === "notification" ? NotificationList.latestIcon : ""
+                            sourceSize: Qt.size(96, 96)
                         }
                     }
                 }
@@ -633,6 +716,37 @@ Window {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 4
+
+                    // A call in progress: where its sound is, the microphone, and how long.
+                    Row {
+                        id: compactCallStatus
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+                        visible: islandWin.mode === "call" && !PhoneCall.ringing
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: islandWin.secondaryLabel
+                        Icon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 12; height: 12
+                            path: PhoneCall.callAudio ? Icons.desktop : Icons.phone
+                            color: PhoneCall.callAudio ? "#4ADE80" : islandWin.wash(0.7)
+                        }
+                        Icon {
+                            visible: PhoneCall.controls
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 12; height: 12
+                            path: PhoneCall.muted ? Icons.micOff : Icons.mic
+                            color: PhoneCall.muted ? "#EF4444" : islandWin.wash(0.7)
+                        }
+                        Txt {
+                            visible: text.length > 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            role: "label"
+                            size: 12
+                            color: PhoneCall.held ? "#FBBF24" : islandWin.wash(0.85)
+                            text: islandWin.callClock
+                        }
+                    }
 
                     // Animated 3-bar equalizer in media mode
                     Row {
@@ -675,12 +789,12 @@ Window {
                         width: 24; height: 24
                         radius: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        color: cPlayHover.hovered ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(1, 1, 1, 0.08)
+                        color: cPlayHover.hovered ? islandWin.wash(0.18) : islandWin.wash(0.08)
                         Icon {
                             anchors.centerIn: parent
                             width: 12; height: 12
                             path: islandWin.mediaPlaying ? Icons.pause : Icons.play
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                         }
                         HoverHandler { id: cPlayHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -699,12 +813,12 @@ Window {
                         width: 24; height: 24
                         radius: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        color: cNextHover.hovered ? Qt.rgba(1, 1, 1, 0.18) : "transparent"
+                        color: cNextHover.hovered ? islandWin.wash(0.18) : "transparent"
                         Icon {
                             anchors.centerIn: parent
                             width: 12; height: 12
                             path: Icons.skipNext
-                            color: Qt.rgba(1, 1, 1, 0.85)
+                            color: islandWin.wash(0.85)
                         }
                         HoverHandler { id: cNextHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -751,7 +865,7 @@ Window {
                         role: "label"
                         size: 12
                         weight: Font.DemiBold
-                        color: "#FFFFFF"
+                        color: islandWin.ink
                         elide: compactTitleClip.shouldMarquee ? Text.ElideNone : Text.ElideRight
                         text: compactTitleMetrics.text
 
@@ -830,7 +944,7 @@ Window {
                             anchors.fill: parent
                             preferredRendererType: Shape.CurveRenderer
                             ShapePath {
-                                strokeColor: Qt.rgba(1, 1, 1, 0.16)
+                                strokeColor: islandWin.wash(0.16)
                                 fillColor: "transparent"
                                 strokeWidth: 3.4
                                 capStyle: ShapePath.RoundCap
@@ -858,7 +972,7 @@ Window {
                             anchors.centerIn: parent
                             size: 10
                             weight: Font.Bold
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                             text: islandWin.transferJustFinished
                                 ? (islandWin.transferFailed ? "!" : "100%")
                                 : (Math.round(islandWin.activeTransferProgress * 100) + "%")
@@ -874,6 +988,7 @@ Window {
                             : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.22)
                         Icon {
                             anchors.centerIn: parent
+                            visible: !(islandWin.mode === "notification" && appIcon22.status === Image.Ready)
                             width: 22; height: 22
                             path: islandWin.mode === "call"
                                 ? Icons.call
@@ -881,6 +996,14 @@ Window {
                                     ? Icons.bell
                                     : (islandWin.mode === "waiting" ? Icons.send : Icons.phone))
                             color: islandWin.mode === "call" ? "#4ADE80" : Theme.primary
+                        }
+                        RoundedImage {
+                            id: appIcon22
+                            anchors.fill: parent
+                            radius: 24
+                            visible: islandWin.mode === "notification" && status === Image.Ready
+                            source: islandWin.mode === "notification" ? NotificationList.latestIcon : ""
+                            sourceSize: Qt.size(96, 96)
                         }
                     }
                 }
@@ -899,7 +1022,7 @@ Window {
                         role: "title"
                         size: 13
                         weight: Font.DemiBold
-                        color: "#FFFFFF"
+                        color: islandWin.ink
                         elide: Text.ElideRight
                         text: islandWin.primaryLabel
                     }
@@ -908,7 +1031,7 @@ Window {
                         width: parent.width
                         role: "caption"
                         size: 11
-                        color: Qt.rgba(1, 1, 1, 0.68)
+                        color: islandWin.wash(0.68)
                         elide: Text.ElideRight
                         text: islandWin.secondaryLabel
                     }
@@ -919,7 +1042,7 @@ Window {
                         width: parent.width
                         height: 3.5
                         radius: 1.75
-                        color: Qt.rgba(1, 1, 1, 0.16)
+                        color: islandWin.wash(0.16)
 
                         Rectangle {
                             height: parent.height
@@ -962,15 +1085,32 @@ Window {
                     Rectangle {
                         visible: islandWin.mode === "call" && !PhoneCall.ringing && PhoneCall.controls
                         width: 30; height: 30; radius: 15
-                        color: PhoneCall.muted ? Qt.rgba(1, 1, 1, 0.26) : Qt.rgba(1, 1, 1, 0.12)
+                        color: PhoneCall.muted ? islandWin.wash(0.26) : islandWin.wash(0.12)
                         Icon {
                             anchors.centerIn: parent
                             width: 14; height: 14
                             path: PhoneCall.muted ? Icons.micOff : Icons.mic
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                         }
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                         TapHandler { onTapped: PhoneCall.setMute(!PhoneCall.muted) }
+                    }
+
+                    // The call's sound on this PC (call.audio), lit while it's here.
+                    Rectangle {
+                        visible: islandWin.mode === "call" && !PhoneCall.ringing && PhoneCall.callAudioAvailable
+                        width: 30; height: 30; radius: 15
+                        color: PhoneCall.callAudio ? islandWin.wash(0.26) : islandWin.wash(0.12)
+                        Accessible.role: Accessible.Button
+                        Accessible.name: PhoneCall.callAudio ? qsTr("Back to phone") : qsTr("On PC")
+                        Icon {
+                            anchors.centerIn: parent
+                            width: 14; height: 14
+                            path: Icons.desktop
+                            color: islandWin.ink
+                        }
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: PhoneCall.moveCallAudio(!PhoneCall.callAudio) }
                     }
 
                     Rectangle {
@@ -987,17 +1127,34 @@ Window {
                         TapHandler { onTapped: PhoneCall.end() }
                     }
 
-                    // ---- Media controls: Previous, Play/Pause, Next ----
+                    // ---- Media controls: Switch source, Previous, Play/Pause, Next ----
+                    Rectangle {
+                        visible: islandWin.mode === "media" && islandWin.mediaSources > 1
+                        width: 28; height: 28; radius: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: expSwitchHover.hovered ? islandWin.wash(0.20) : "transparent"
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Switch to the next player")
+                        Icon {
+                            anchors.centerIn: parent
+                            width: 13; height: 13
+                            path: islandWin.mediaDeviceId === "local" ? Icons.phone : Icons.desktop
+                            color: islandWin.wash(0.85)
+                        }
+                        HoverHandler { id: expSwitchHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: islandWin.nextMediaSource() }
+                    }
+
                     Rectangle {
                         visible: islandWin.mode === "media" && islandWin.mediaCanPrev
                         width: 28; height: 28; radius: 14
                         anchors.verticalCenter: parent.verticalCenter
-                        color: expPrevHover.hovered ? Qt.rgba(1, 1, 1, 0.20) : Qt.rgba(1, 1, 1, 0.08)
+                        color: expPrevHover.hovered ? islandWin.wash(0.20) : islandWin.wash(0.08)
                         Icon {
                             anchors.centerIn: parent
                             width: 13; height: 13
                             path: Icons.skipPrevious
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                         }
                         HoverHandler { id: expPrevHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -1031,12 +1188,12 @@ Window {
                         visible: islandWin.mode === "media" && islandWin.mediaCanNext
                         width: 28; height: 28; radius: 14
                         anchors.verticalCenter: parent.verticalCenter
-                        color: expNextHover.hovered ? Qt.rgba(1, 1, 1, 0.20) : Qt.rgba(1, 1, 1, 0.08)
+                        color: expNextHover.hovered ? islandWin.wash(0.20) : islandWin.wash(0.08)
                         Icon {
                             anchors.centerIn: parent
                             width: 13; height: 13
                             path: Icons.skipNext
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                         }
                         HoverHandler { id: expNextHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -1049,12 +1206,12 @@ Window {
                         visible: islandWin.mode === "transfer" && !islandWin.transferJustFinished && islandWin.activeTransferId.length > 0
                         width: 28; height: 28; radius: 14
                         anchors.verticalCenter: parent.verticalCenter
-                        color: expCancelHover.hovered ? Qt.rgba(1, 0.3, 0.3, 0.28) : Qt.rgba(1, 1, 1, 0.10)
+                        color: expCancelHover.hovered ? Qt.rgba(1, 0.3, 0.3, 0.28) : islandWin.wash(0.10)
                         Icon {
                             anchors.centerIn: parent
                             width: 13; height: 13
                             path: Icons.close
-                            color: "#FFFFFF"
+                            color: islandWin.ink
                         }
                         HoverHandler { id: expCancelHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {

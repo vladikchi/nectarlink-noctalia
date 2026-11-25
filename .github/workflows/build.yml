@@ -120,6 +120,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: Use the Desktop package version for Noctalia builds
+        if: env.VERSION == '' && (inputs.linux_only || github.event_name == 'workflow_dispatch')
+        run: |
+          version=$(grep -m1 '^version = ' desktop/app/Cargo.toml | cut -d'"' -f2)
+          test -n "$version"
+          printf 'NECTARLINK_DESKTOP_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
       - name: Set the version
         if: env.VERSION != ''
         run: bash .github/scripts/set-version.sh "$VERSION"
@@ -177,7 +183,11 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           FFMPEG_SOURCE_CACHE: ${{ runner.temp }}/ffmpeg-sources
         run: |
+          export VERSION="${NECTARLINK_DESKTOP_VERSION:-$VERSION}"
           cargo build --release --locked -p nectarlink-desktop
+          if [[ -n "${NECTARLINK_DESKTOP_VERSION:-}" ]]; then
+            test "$(target/release/nectarlink-desktop --version)" = "nectarlink-desktop $VERSION"
+          fi
           bash ./desktop/packaging/linux/build-ffmpeg-backends.sh
           ./desktop/packaging/linux/build-deb.sh
           ./desktop/packaging/linux/build-rpm.sh

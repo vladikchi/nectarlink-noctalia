@@ -20,6 +20,7 @@ Separating task-oriented workflows from implementation internals keeps everyday 
 ### Setup and Foundations
 
 - [Getting Started](getting-started.md): System requirements, installing on Windows 11 and Android, the first-run walkthrough, pairing methods (QR code, 6-digit nearby code, USB auto-pair), and choosing an Android power level (`Standard`, `Assist`, or `Elevated`).
+- [Linux Phone Unlock](linux-phone-unlock.md) covers biometric enrollment and setup for Linux-PAM screen lockers.
 
 ### Everyday Features
 
@@ -36,6 +37,7 @@ Separating task-oriented workflows from implementation internals keeps everyday 
 - [Cameras and Audio](cameras-and-audio.md): Using your phone as a Windows webcam (`NectarLink Webcam` virtual camera add-on), lens and zoom controls, Continuity Camera for capturing photos and scanning documents with corner crop and black-and-white enhancement, using your phone as a low-latency wireless speaker for PC audio, and recording voice notes with timestamped markers.
 - [Input and Control](input-and-control.md): Controlling your PC from your phone (touchpad, gyroscope air mouse, keyboard with modifier bar, voice dictation, presentation remote with laser pointer), typing on your phone from your PC keyboard, the `Deck` macro pad, phone system controls on PC Home, Desk Mode stand display, and Lock, Sleep, and Wake-on-LAN actions.
 - [Desktop Surfaces and Automation](desktop-surfaces.md): The slide-out `Shelf` edge panel, Flick to send gestures, `Nectar Island` top-of-screen activity pill, the searchable cross-device `Timeline`, the global `Command Palette` (`Ctrl+Alt+Space`), rich `Handoff` for links, maps, videos, and documents, `notify-when` task completion alerts, trigger-action automations, the local HTTP API, and the command-line client.
+- [AI agents](ai-agents.md): Let Claude Code, Codex, Cursor and other AI assistants on your PC use NectarLink, with the permissions you choose and your approval for anything sensitive.
 
 ### Configuration, Privacy, and Support
 
@@ -55,7 +57,7 @@ NectarLink uses consistent terms across the PC app, the Android app, and this gu
 | `paired device` | A phone or PC that has completed pairing and is stored in your local trust store. Only a `paired device` can open an encrypted NectarLink session with your device. |
 | `Standard` | The default Android power level. It uses ordinary Android runtime permissions and notification listener access, requiring no accessibility service and no developer options. |
 | `Assist` | The second Android power level. It adds NectarLink's Android Accessibility Service (**Use your PC's mouse and keyboard** under **Control from your PC**) so your PC mouse and keyboard can tap, swipe, scroll, and type during screen mirroring without developer setup. |
-| `Elevated` | The third Android power level (**Real touch and keys** under **Control from your PC**). It uses Android's built-in Wireless Debugging (or USB `adb`) to run a local shell helper (`UID 2000`, no root). It enables real-time touch dragging, gamepad input, `app window` streaming, automatic background phone-to-PC clipboard sync, sensitive notification OTP detection on Android 15+, Wi-Fi and Bluetooth toggles, and in-call mute/hold/speaker controls. |
+| `Elevated` | The third Android power level (the **Elevated** card under **Control from your PC**). It uses Android's built-in Wireless Debugging (or USB `adb`, Shizuku or root) to run a local shell helper (`UID 2000`, no root). It enables real-time touch dragging, gamepad input, `app window` streaming, automatic background phone-to-PC clipboard sync, sensitive notification OTP detection on Android 15+, Wi-Fi and Bluetooth toggles, and in-call mute/hold/speaker controls. |
 | `mirror` | A live video and audio stream of your phone's primary screen inside a dedicated window on your PC (or, with **Share PC screen to phone**, your PC's screen on your phone). |
 | `app window` | A single Android application streamed to its own independent window on your PC using an Android virtual display (`Elevated` on Android 11+), running alongside whatever is on the phone's physical screen. |
 | `Deck` | A customizable button grid on your phone that acts as a macro pad and live audio controller for your PC. |

@@ -23,6 +23,8 @@ import androidx.core.content.IntentCompat
 import app.nectarlink.android.NectarlinkApplication
 import app.nectarlink.android.R
 import app.nectarlink.android.elevated.AppDisplay
+import app.nectarlink.android.elevated.ElevatedDisplayStream
+import app.nectarlink.services.client.NectarlinkServiceContract
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -53,7 +55,7 @@ class MirrorService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private var projection: MediaProjection? = null
     private var encoder: ScreenEncoder? = null
-    @Volatile private var elevatedSocket: java.net.Socket? = null
+    @Volatile private var elevatedSocket: ElevatedDisplayStream? = null
     /** Opening the helper's screen stream (off the main thread), before [elevatedSocket] is set. */
     @Volatile private var elevatedStarting = false
     private var elevatedDisplayListener: android.hardware.display.DisplayManager.DisplayListener? = null
@@ -222,7 +224,7 @@ class MirrorService : Service() {
     }
 
     /** Resizes the helper's picture when the phone's screen turns. */
-    private fun watchDisplay(socket: java.net.Socket, request: MirrorRequest, initW: Int, initH: Int) {
+    private fun watchDisplay(socket: ElevatedDisplayStream, request: MirrorRequest, initW: Int, initH: Int) {
         if (elevatedSocket !== socket) return
         var curW = initW
         var curH = initH
@@ -236,14 +238,7 @@ class MirrorService : Service() {
                     curH = nh
                     val sock = elevatedSocket ?: return
                     Thread {
-                        runCatching {
-                            synchronized(sock) {
-                                sock.getOutputStream().apply {
-                                    write("R $nw $nh $ndpi\n".toByteArray())
-                                    flush()
-                                }
-                            }
-                        }
+                        sock.resize(nw, nh, ndpi)
                     }.start()
                 }
             }
@@ -261,7 +256,7 @@ class MirrorService : Service() {
         pc: String,
         pcName: String,
         request: MirrorRequest,
-        socket: java.net.Socket,
+        socket: ElevatedDisplayStream,
     ) {
         val stream = runCatching { core.mirrorOpen(pc) }.getOrElse {
             Log.w(TAG, "can't stream to the PC", it)
@@ -271,7 +266,7 @@ class MirrorService : Service() {
         if (request.audio && SoundCapture.canCapture(this@MirrorService)) startSound(core, pc)
         var gotConfig = false
         try {
-            val input = java.io.DataInputStream(socket.getInputStream().buffered(1 shl 16))
+            val input = java.io.DataInputStream(socket.inputStream.buffered(1 shl 16))
             while (elevatedSocket === socket) {
                 val length = input.readInt()
                 if (length < 9 || length > 16 * 1024 * 1024) break
@@ -325,15 +320,34 @@ class MirrorService : Service() {
     }
 
     private fun requestElevatedKeyframe() {
-        val sock = elevatedSocket ?: return
-        runCatching {
-            synchronized(sock) {
-                sock.getOutputStream().apply {
-                    write("K\n".toByteArray())
-                    flush()
-                }
-            }
+        elevatedSocket?.requestKeyframe()
+    }
+
+    /** The phone's own rotation settings before the PC turned it, to put back. */
+    private var ownRotation: Pair<Int, Int>? = null
+
+    /** Holds the screen in landscape or portrait while it's mirrored. */
+    private fun holdRotation(landscape: Boolean) {
+        if (!app.nectarlink.android.elevated.Elevated.running) return
+        val resolver = contentResolver
+        if (ownRotation == null) {
+            ownRotation = Pair(
+                android.provider.Settings.System.getInt(resolver, android.provider.Settings.System.ACCELEROMETER_ROTATION, 1),
+                android.provider.Settings.System.getInt(resolver, android.provider.Settings.System.USER_ROTATION, 0),
+            )
         }
+        val elevated = app.nectarlink.android.elevated.Elevated
+        elevated.runCommand("settings put system accelerometer_rotation 0")
+        elevated.runCommand("settings put system user_rotation ${if (landscape) 1 else 0}")
+    }
+
+    /** Lets the phone's own rotation take over again. */
+    private fun releaseRotation() {
+        val (auto, rotation) = ownRotation ?: return
+        ownRotation = null
+        val elevated = app.nectarlink.android.elevated.Elevated
+        elevated.runCommand("settings put system user_rotation ${rotation.coerceIn(0, 3)}")
+        elevated.runCommand("settings put system accelerometer_rotation ${if (auto != 0) 1 else 0}")
     }
 
     private fun applyPower() {
@@ -342,7 +356,11 @@ class MirrorService : Service() {
             elevatedScreen = elevatedSocket != null,
             sound = sound != null,
         )
-        StreamPower.set(this, StreamPower.SCREEN, active, stayAwake, screenOff)
+        // Only the helper's own display keeps drawing with the panel off; a
+        // screen-capture mirror would freeze on its last frame (#520), so the
+        // panel stays on and the phone is only kept awake.
+        val panelOff = screenOff && elevatedSocket != null
+        StreamPower.set(this, StreamPower.SCREEN, active, stayAwake || screenOff, panelOff)
     }
 
     /** The sound, on a stream of its own; the screen goes on without it if it can't. */
@@ -360,7 +378,10 @@ class MirrorService : Service() {
         }
         main.post {
             val running = projection
-            if ((running == null && !app.nectarlink.android.elevated.Elevated.running) || pcId != pc) {
+            if ((running == null &&
+                    !app.nectarlink.android.elevated.Elevated.hasCapability(NectarlinkServiceContract.CAP_DEVICE_AUDIO)) ||
+                pcId != pc
+            ) {
                 stream.end()
                 endSharing()
                 return@post
@@ -407,6 +428,7 @@ class MirrorService : Service() {
     }
 
     private fun stopSharing() {
+        releaseRotation()
         stayAwake = false
         screenOff = false
         soundOnly = false
@@ -433,6 +455,7 @@ class MirrorService : Service() {
     }
 
     override fun onDestroy() {
+        releaseRotation()
         stopSharing()
         scope.cancel()
         super.onDestroy()
@@ -489,7 +512,11 @@ class MirrorService : Service() {
          * the Elevated shell helper, without a `MediaProjection` consent prompt.
          */
         fun startElevated(context: Context, request: MirrorRequest): Boolean {
-            if (!app.nectarlink.android.elevated.Elevated.running || current != null) return false
+            if (!app.nectarlink.android.elevated.Elevated.hasCapability(NectarlinkServiceContract.CAP_SCREEN_MIRROR) ||
+                current != null
+            ) {
+                return false
+            }
             val intent = Intent(context, MirrorService::class.java)
                 .putExtra(EXTRA_PC, request.pcId)
                 .putExtra(EXTRA_ELEVATED, true)
@@ -550,6 +577,12 @@ class MirrorService : Service() {
          */
         internal fun streaming(screen: Boolean, elevatedScreen: Boolean, sound: Boolean): Boolean =
             screen || elevatedScreen || sound
+
+        /** The PC turned the mirrored screen (#473); needs Elevated. */
+        fun rotate(pcId: String, landscape: Boolean) {
+            val service = current ?: return
+            service.main.post { if (service.pcId == pcId) service.holdRotation(landscape) }
+        }
 
         fun setPower(pcId: String, stayAwake: Boolean, screenOff: Boolean) {
             val service = current ?: return

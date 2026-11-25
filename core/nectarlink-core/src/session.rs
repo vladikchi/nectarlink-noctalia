@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
+use iroh::endpoint::{Connection, PathEventStream, RecvStream, SendStream, VarInt};
 use nectarlink_protocol::{
     DeviceId, Envelope, ErrorCode, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolError, messages::*,
     negotiate_version, read_frame, write_frame,
@@ -31,10 +31,20 @@ pub(crate) mod wake;
 
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often each side pings the other for the round-trip time and to catch
-/// a peer that stopped answering. A link that dropped is QUIC's to notice
-/// (`IDLE_TIMEOUT` in node.rs); pinging every 2.5 s kept phones awake.
+/// How often the round-trip time shown for a peer is brought up to date.
+/// A link that dropped is QUIC's to notice too (`IDLE_TIMEOUT` in node.rs).
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// How often each side looks for a sign of life from the other. Packets that
+/// arrived since the last look, QUIC's keepalives included, are one, so a
+/// healthy link sends no pings of its own: those only added packets to what
+/// QUIC already sends. A window with nothing is probed with a ping, as
+/// before. It must be clearly longer than QUIC's keep-alive interval
+/// (`KEEP_ALIVE_INTERVAL` in node.rs): a keepalive comes a little after 5 s,
+/// and a window of exactly 5 s sometimes caught none and pinged for nothing.
+/// A peer that's gone is found in about 11.5 to 18.5 s (one silent window,
+/// then the 3 s ping and its 1.5 s retry), as before.
+const EVIDENCE_WINDOW: Duration = Duration::from_secs(7);
+const _: () = assert!(EVIDENCE_WINDOW.as_millis() >= crate::node::KEEP_ALIVE_INTERVAL.as_millis() + 2000);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(3000);
 const HEARTBEAT_RETRY_TIMEOUT: Duration = Duration::from_millis(1500);
 const OUTBOX_CAPACITY: usize = 256;
@@ -88,8 +98,31 @@ pub(crate) fn is_tailnet_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Returns true if `ip` is on a network of this place only: a private or link-local
+/// IPv4 address, a link-local or unique-local IPv6 one, or loopback. Unlike
+/// [`is_lan_ip`], tailnet addresses and carrier CGNAT (`100.64.0.0/10`) don't count:
+/// they reach a device anywhere, over mobile data too.
+pub(crate) fn is_private_lan_ip(ip: std::net::IpAddr) -> bool {
+    if is_tailnet_ip(ip) {
+        return false;
+    }
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unique_local(),
+    }
+}
+
+/// Returns true if `a` and `b` are on the same subnet as far as can be told without
+/// the interface's prefix: the same `/64` for IPv6, the same `/24` for IPv4.
+pub(crate) fn is_same_subnet(a: std::net::IpAddr, b: std::net::IpAddr) -> bool {
+    match (a.to_canonical(), b.to_canonical()) {
+        (std::net::IpAddr::V4(a), std::net::IpAddr::V4(b)) => a.octets()[..3] == b.octets()[..3],
+        (std::net::IpAddr::V6(a), std::net::IpAddr::V6(b)) => is_same_ipv6_subnet(a, b),
+        _ => false,
+    }
+}
+
 /// Returns true if two IPv6 addresses share the same `/64` subnet prefix.
-#[cfg(test)]
 pub(crate) fn is_same_ipv6_subnet(a: std::net::Ipv6Addr, b: std::net::Ipv6Addr) -> bool {
     a.segments()[..4] == b.segments()[..4]
 }
@@ -163,6 +196,36 @@ async fn check_versions(
 
 /// A live session. Cheap to share; dropping the last handle does not close
 /// the connection (call [`Session::close`]).
+/// Runs a session's end once its task is over, normally or by a panic: cancels its
+/// work, fails the requests still waiting, then `on_end`.
+///
+/// A task dropped unfinished without a panic means the runtime is shutting down: then
+/// only its work is cancelled, since `on_end` starts more work, which can't run then.
+struct SessionEnd<F: FnOnce(Arc<Session>)> {
+    session: Option<Arc<Session>>,
+    on_end: Option<F>,
+    finished: bool,
+}
+
+impl<F: FnOnce(Arc<Session>)> Drop for SessionEnd<F> {
+    fn drop(&mut self) {
+        let (Some(s), Some(on_end)) = (self.session.take(), self.on_end.take()) else { return };
+        s.cancel.cancel();
+        // Fail any requests still waiting for a reply.
+        s.pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let panicked = std::thread::panicking();
+        if !self.finished && !panicked {
+            return;
+        }
+        if panicked {
+            tracing::error!(peer = %s.peer.short(), "session ended by a panic");
+        } else {
+            tracing::debug!(peer = %s.peer.short(), "session ended");
+        }
+        on_end(s);
+    }
+}
+
 pub(crate) struct Session {
     pub peer: DeviceId,
     /// Who opened the connection; used to resolve duplicate connections.
@@ -173,6 +236,8 @@ pub(crate) struct Session {
     pending: Mutex<HashMap<u64, oneshot::Sender<Envelope>>>,
     next_id: AtomicU64,
     rtt_ms: AtomicU32,
+    /// Heartbeat pings sent on this session ([`Node::heartbeat_pings`]).
+    pub(crate) heartbeat_pings: std::sync::atomic::AtomicU64,
     pub(crate) started: Instant,
     last_rx_ms: AtomicU64,
     usb_bridge_ports: Arc<Mutex<HashMap<u16, DeviceId>>>,
@@ -185,6 +250,34 @@ pub(crate) struct Session {
     /// PC that's still locked says so again when it reconnects.
     notifications_held: std::sync::atomic::AtomicBool,
     pub(crate) cancel: CancellationToken,
+}
+
+struct PendingReply<'a> {
+    session: &'a Session,
+    id: u64,
+    sent: bool,
+    cancel_unlock: bool,
+}
+
+impl Drop for PendingReply<'_> {
+    fn drop(&mut self) {
+        let unanswered = self.session.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        if unanswered.is_some()
+            && self.sent
+            && self.cancel_unlock
+            && let Ok(cancel) = Envelope::new(types::LINUX_UNLOCK_CANCEL, &self.id)
+            && let Err(mpsc::error::TrySendError::Full(cancel)) = self.session.outbox.try_send(cancel)
+        {
+            let outbox = self.session.outbox.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = outbox.send(cancel).await;
+                });
+            } else {
+                self.session.close(CLOSE_NORMAL, b"phone unlock cancelled");
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Session {
@@ -214,6 +307,7 @@ impl Session {
             .iter()
             .find(|p| p.is_selected())
             .map_or(0, |p| p.rtt().as_millis().min(u128::from(u32::MAX)) as u32);
+        // (`transport_rtt_ms` reads the same, once the session exists.)
         let (outbox, outbox_rx) = mpsc::channel(OUTBOX_CAPACITY);
         let session = Arc::new(Session {
             peer,
@@ -224,6 +318,7 @@ impl Session {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             rtt_ms: AtomicU32::new(initial_rtt),
+            heartbeat_pings: std::sync::atomic::AtomicU64::new(0),
             started: Instant::now(),
             last_rx_ms: AtomicU64::new(0),
             usb_bridge_ports: shared.usb_bridge_ports.clone(),
@@ -238,6 +333,9 @@ impl Session {
         let s = session.clone();
         tokio::spawn(async move {
             let cancel = s.cancel.clone();
+            // Ends the session however this task ends: normally, or by a panic in one of
+            // its parts, which would otherwise leave a dead session registered as live.
+            let mut end = SessionEnd { session: Some(s.clone()), on_end: Some(on_end), finished: false };
             tokio::select! {
                 _ = cancel.cancelled() => {}
                 _ = writer(send, outbox_rx) => {}
@@ -247,11 +345,7 @@ impl Session {
                 _ = datagrams(&s, &weak) => {}
                 _ = s.conn.closed() => {}
             }
-            cancel.cancel();
-            // Fail any requests still waiting for a reply.
-            s.pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            tracing::debug!(peer = %s.peer.short(), "session ended");
-            on_end(s);
+            end.finished = true;
         });
         session
     }
@@ -272,7 +366,7 @@ impl Session {
         self.last_rx_ms.load(Ordering::Relaxed) > since_ms
     }
 
-    fn is_usb_addr(&self, addr: &std::net::SocketAddr) -> bool {
+    pub(crate) fn is_usb_addr(&self, addr: &std::net::SocketAddr) -> bool {
         addr.ip().to_canonical().is_loopback()
             && self.usb_bridge_ports.lock().unwrap_or_else(|e| e.into_inner()).get(&addr.port())
                 == Some(&self.peer)
@@ -330,6 +424,24 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// The address of the path the connection uses now, when that's a direct IP path
+    /// (not a relay, not the USB tunnel). `None` while no path is selected.
+    pub(crate) fn selected_direct_addr(&self) -> Option<std::net::SocketAddr> {
+        self.selected_ip_path().filter(|(_, usb)| !usb).map(|(addr, _)| addr)
+    }
+
+    /// The selected direct address and whether it belongs to this peer's USB bridge.
+    pub(crate) fn selected_ip_path(&self) -> Option<(std::net::SocketAddr, bool)> {
+        let paths = self.conn.paths();
+        let selected = paths.iter().find(|p| p.is_selected())?;
+        let addr = direct_ip_addr(selected.remote_addr())?;
+        Some((addr, self.is_usb_addr(&addr)))
+    }
+
+    pub(crate) fn path_events(&self) -> PathEventStream {
+        self.conn.path_events()
     }
 
     /// The peer's direct IP addresses currently in use, for reconnecting later.
@@ -405,10 +517,11 @@ impl Session {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
-        let mut sent = false;
+        let cancel_unlock = matches!(env.t.as_str(), types::LINUX_UNLOCK_ENROLL | types::LINUX_UNLOCK_SIGN);
+        let mut pending = PendingReply { session: self, id, sent: false, cancel_unlock };
         let result = match tokio::time::timeout(timeout, async {
             self.send(env.with_id(id)).await?;
-            sent = true;
+            pending.sent = true;
             rx.await.map_err(|_| Error::Offline)
         })
         .await
@@ -416,8 +529,7 @@ impl Session {
             Ok(inner) => inner,
             Err(_) => Err(Error::Timeout),
         };
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        (result, sent)
+        (result, pending.sent)
     }
 
     /// Closes the connection with an application code.
@@ -480,8 +592,16 @@ async fn writer(mut send: SendStream, mut outbox: mpsc::Receiver<Envelope>) {
     let _ = send.finish();
 }
 
+fn direct_ip_addr(addr: &iroh::TransportAddr) -> Option<std::net::SocketAddr> {
+    match addr {
+        iroh::TransportAddr::Ip(addr) => Some(*addr),
+        _ => None,
+    }
+}
+
 async fn reader(session: &Arc<Session>, mut recv: RecvStream, shared: &Weak<Shared>) {
     let background = Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_RPCS));
+    let unlock_cleanup = Arc::new(tokio::sync::Semaphore::new(1));
     loop {
         let frame = match read_frame(&mut recv).await {
             Ok(Some(frame)) => {
@@ -518,7 +638,14 @@ async fn reader(session: &Arc<Session>, mut recv: RecvStream, shared: &Weak<Shar
         if is_background_rpc(&env.t) {
             // Waiting for a slot would hold up heartbeats behind slow
             // requests, so past the limit a request is turned away instead.
-            let Ok(permit) = background.clone().try_acquire_owned() else {
+            // An opt-out must reach the phone even when unrelated background requests are full.
+            let permits =
+                if env.t == types::LINUX_UNLOCK_FORGET && matches!(env.body(), Ok(LinuxUnlockForget::All)) {
+                    &unlock_cleanup
+                } else {
+                    &background
+                };
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
                 tracing::warn!(peer = %session.peer.short(), t = %env.t, "too many requests at once");
                 if env.id.is_some() {
                     let reply = Envelope::error(ErrorCode::Busy, "too many requests at once");
@@ -526,14 +653,21 @@ async fn reader(session: &Arc<Session>, mut recv: RecvStream, shared: &Weak<Shar
                 }
                 continue;
             };
+            let unlock = match crate::linux_unlock::prepare_background(&shared, session, &env) {
+                Ok(unlock) => unlock,
+                Err(reply) => {
+                    let _ = session.send(reply.reply_to(env.id)).await;
+                    continue;
+                }
+            };
             let session = session.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle(&shared, &session, env).await {
+                if let Err(e) = handle(&shared, &session, env, unlock).await {
                     tracing::warn!(peer = %session.peer.short(), error = %e, "failed to handle message");
                 }
                 drop(permit);
             });
-        } else if let Err(e) = handle(&shared, session, env).await {
+        } else if let Err(e) = handle(&shared, session, env, None).await {
             tracing::warn!(peer = %session.peer.short(), error = %e, "failed to handle message");
         }
     }
@@ -570,11 +704,22 @@ fn is_background_rpc(t: &str) -> bool {
             | types::STORAGE_RENAME
             | types::STORAGE_DELETE
             | types::WAKE_RELAY
+            // The phone's owner answers a biometric prompt.
+            | types::UNLOCK_ENROLL
+            | types::UNLOCK_REQUEST
+            | types::LINUX_UNLOCK_ENROLL
+            | types::LINUX_UNLOCK_SIGN
+            | types::LINUX_UNLOCK_FORGET
     )
 }
 
 /// Handles one incoming message that isn't a reply.
-async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: Envelope) -> Result<()> {
+async fn handle(
+    shared: &Arc<Shared>,
+    session: &Arc<Session>,
+    env: Envelope,
+    unlock: Option<crate::linux_unlock::Incoming>,
+) -> Result<()> {
     let peer = session.peer;
     match env.t.as_str() {
         types::PING => {
@@ -647,12 +792,15 @@ async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: Envelope) -> 
             && crate::actions::handle(shared, session, &env).await? => {}
         t if t.starts_with("clip.") && crate::clipboard::handle(shared, session, &env).await? => {}
         t if t.starts_with("photos.") && crate::photos::handle(shared, session, &env).await? => {}
+        t if t.starts_with("call.audio.") && crate::call_audio::handle(shared, session, &env).await? => {}
         t if t.starts_with("call.") && crate::calls::handle(shared, session, &env).await? => {}
         t if t.starts_with("contacts.") && crate::contacts::handle(shared, session, &env).await? => {}
         t if t.starts_with("sms.") && crate::sms::handle(shared, session, &env).await? => {}
-        t if t.starts_with("mirror.") && crate::mirror::handle(shared, session, &env).await? => {}
+        t if (t.starts_with("mirror.") || t.starts_with("pointer."))
+            && crate::mirror::handle(shared, session, &env).await? => {}
         t if t.starts_with("webcam.") && crate::webcam::handle(shared, session, &env).await? => {}
         t if t.starts_with("mic.") && crate::mic::handle(shared, session, &env).await? => {}
+        t if t.starts_with("diag.") && crate::diag_ask::handle(shared, session, &env).await? => {}
         t if t.starts_with("elevated.usb") && crate::elevated_usb::handle(shared, session, &env).await? => {}
         t if t.starts_with("camera.capture.")
             && crate::continuity_camera::handle(shared, session, &env).await? => {}
@@ -661,38 +809,42 @@ async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: Envelope) -> 
         t if (t.starts_with("deck.") || t == types::PC_AUDIO_SET)
             && crate::deck::handle(shared, session, &env).await? => {}
         t if t.starts_with("storage.") && crate::storage::handle(shared, session, &env).await? => {}
+        t if t.starts_with("unlock.linux.v1.")
+            && crate::linux_unlock::handle(shared, session, &env, unlock).await? => {}
+        t if t.starts_with("unlock.") && crate::unlock::handle(shared, session, &env).await? => {}
         t if (t == types::FILES_RESUME || t == types::FILES_CANCEL)
             && crate::transfer::handle_control(shared, peer, &env).await? => {}
         types::WAKE_RELAY => {
             let req = env.body::<WakeRelay>().ok();
             let shared_clone = shared.clone();
-            let known = tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || {
                 // Only for a PC paired with this device, by an address it gave as its own.
                 let info = req.as_ref().and_then(|r| known_wake_info(&shared_clone, &r.mac));
-                let known = info.is_some();
-                if let (Some(req), Some(info)) = (req, info) {
-                    // Only to a subnet that PC gave as its own; anything else goes
-                    // to this network's broadcast, never to an address a peer picks.
-                    let bcast = req
-                        .broadcast
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|b| info.broadcasts.iter().any(|own| own.trim() == *b))
-                        .and_then(|b| b.parse().ok());
-                    let _ = wake::send_magic_packet(req.mac, bcast);
-                }
-                known
+                let (Some(req), Some(info)) = (req, info) else { return Err(ErrorCode::Denied) };
+                // Only to a subnet that PC gave as its own; anything else goes
+                // to this network's broadcast, never to an address a peer picks.
+                let bcast = req
+                    .broadcast
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| info.broadcasts.iter().any(|own| own.trim() == *b))
+                    .and_then(|b| b.parse().ok());
+                wake::send_magic_packet(req.mac, bcast).map_err(|_| ErrorCode::Internal)
             })
             .await
-            .unwrap_or(false);
-            if !known {
+            .unwrap_or(Err(ErrorCode::Internal));
+            if matches!(&result, Err(ErrorCode::Denied)) {
                 tracing::debug!(peer = %peer.short(), "refusing to wake an address no paired PC gave");
+            } else if result.is_err() {
+                tracing::debug!("couldn't send Wake-on-LAN packet");
             }
             if env.id.is_some() {
-                let reply = if known {
-                    Envelope::empty(types::OK)
-                } else {
-                    Envelope::error(ErrorCode::Denied, "not a paired PC's wake address")
+                let reply = match result {
+                    Ok(()) => Envelope::empty(types::OK),
+                    Err(ErrorCode::Denied) => {
+                        Envelope::error(ErrorCode::Denied, "not a paired PC's wake address")
+                    }
+                    Err(code) => Envelope::error(code, "couldn't send Wake-on-LAN packet"),
                 };
                 session.send(reply.reply_to(env.id)).await?;
             }
@@ -795,10 +947,16 @@ pub(crate) async fn probe_after_network_change(shared: &Arc<Shared>, session: &A
 
 async fn heartbeat(session: &Arc<Session>, shared: &Weak<Shared>) {
     let started = Instant::now();
-    let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    let mut interval = tokio::time::interval(EVIDENCE_WINDOW);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let rtt_every = (HEARTBEAT_INTERVAL.as_millis() / EVIDENCE_WINDOW.as_millis()).max(1) as u64;
+    let mut ticks: u64 = 0;
+    let mut last_received = received_bytes(session);
     loop {
         interval.tick().await;
+        ticks += 1;
+        // Every look: a session that moved off the LAN while that isn't
+        // allowed closes, whether or not anything is sent.
         if let Some(shared_arc) = shared.upgrade()
             && !shared_arc.is_connection_allowed(&session.conn)
         {
@@ -806,42 +964,83 @@ async fn heartbeat(session: &Arc<Session>, shared: &Weak<Shared>) {
             session.close(CLOSE_NORMAL, b"away mode disabled");
             return;
         }
-        let sent_at = Instant::now();
         let received = received_bytes(session);
-        let ts = sent_at.duration_since(started).as_millis() as u64;
-        let Ok(ping) = Envelope::new(types::PING, &Ping { ts }) else { continue };
-        match session.request(ping, HEARTBEAT_TIMEOUT).await {
-            Ok(reply) if reply.t == types::PONG => {
-                if let Some(shared_arc) = shared.upgrade() {
-                    let rtt = sent_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
-                    let previous = session.rtt_ms.swap(rtt, Ordering::Relaxed);
-                    if previous.abs_diff(rtt) >= 5 {
-                        shared_arc.publish_online(session);
-                    }
-                }
+        // The first look checks the new session end to end; after that, the
+        // peer's packets arriving are enough, and only silence is probed.
+        let alive_on_its_own = ticks > 1 && received > last_received;
+        last_received = received;
+        if alive_on_its_own {
+            if ticks.is_multiple_of(rtt_every)
+                && let Some(rtt) = transport_rtt_ms(session)
+            {
+                set_rtt(session, shared, rtt);
             }
-            Ok(_) => {}
-            Err(_) if session.rx_since(sent_at) => {}
-            // No answer, but the peer's packets are arriving: a slow link is full
-            // of what's being sent, and the answer is queued behind it.
-            Err(_) if received_bytes(session) > received => {}
-            Err(e) => {
-                // Retry once; if still unreachable and no frames arrived, close.
-                let retry_ts = started.elapsed().as_millis() as u64;
-                let alive = if let Ok(retry_ping) = Envelope::new(types::PING, &Ping { ts: retry_ts }) {
-                    matches!(session.request(retry_ping, HEARTBEAT_RETRY_TIMEOUT).await, Ok(r) if r.t == types::PONG)
-                        || session.rx_since(sent_at)
-                } else {
-                    session.rx_since(sent_at)
-                };
-                if !alive && received_bytes(session) <= received {
-                    tracing::info!(peer = %session.peer.short(), error = %e, "heartbeat timed out; closing dead session");
-                    session.close(CLOSE_NORMAL, b"heartbeat timeout");
-                    return;
-                }
+            continue;
+        }
+        if !probe(session, shared, started).await {
+            return;
+        }
+        last_received = received_bytes(session);
+    }
+}
+
+/// Pings the peer, and once more if no answer came. Returns false after
+/// closing a session that's gone: no answer and nothing at all arrived.
+async fn probe(session: &Arc<Session>, shared: &Weak<Shared>, started: Instant) -> bool {
+    let sent_at = Instant::now();
+    let received = received_bytes(session);
+    let ts = sent_at.duration_since(started).as_millis() as u64;
+    let Ok(ping) = Envelope::new(types::PING, &Ping { ts }) else { return true };
+    session.heartbeat_pings.fetch_add(1, Ordering::Relaxed);
+    match session.request(ping, HEARTBEAT_TIMEOUT).await {
+        Ok(reply) if reply.t == types::PONG => {
+            let rtt = sent_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            set_rtt(session, shared, rtt);
+            true
+        }
+        Ok(_) => true,
+        Err(_) if session.rx_since(sent_at) => true,
+        // No answer, but the peer's packets are arriving: a slow link is full
+        // of what's being sent, and the answer is queued behind it.
+        Err(_) if received_bytes(session) > received => true,
+        Err(e) => {
+            // Retry once; if still unreachable and no frames arrived, close.
+            let retry_ts = started.elapsed().as_millis() as u64;
+            let alive = if let Ok(retry_ping) = Envelope::new(types::PING, &Ping { ts: retry_ts }) {
+                matches!(session.request(retry_ping, HEARTBEAT_RETRY_TIMEOUT).await, Ok(r) if r.t == types::PONG)
+                    || session.rx_since(sent_at)
+            } else {
+                session.rx_since(sent_at)
+            };
+            if !alive && received_bytes(session) <= received {
+                tracing::info!(peer = %session.peer.short(), error = %e, "heartbeat timed out; closing dead session");
+                session.close(CLOSE_NORMAL, b"heartbeat timeout");
+                return false;
             }
+            true
         }
     }
+}
+
+/// Keeps the round-trip time, and tells the app when it moved by 5 ms or more.
+fn set_rtt(session: &Arc<Session>, shared: &Weak<Shared>, rtt: u32) {
+    let previous = session.rtt_ms.swap(rtt, Ordering::Relaxed);
+    if previous.abs_diff(rtt) >= 5
+        && let Some(shared_arc) = shared.upgrade()
+    {
+        shared_arc.publish_online(session);
+    }
+}
+
+/// QUIC's smoothed round-trip time on the path in use, end to end over the
+/// relay too, refreshed by every acknowledgement (keepalives included).
+fn transport_rtt_ms(session: &Session) -> Option<u32> {
+    session
+        .conn
+        .paths()
+        .iter()
+        .find(|p| p.is_selected())
+        .map(|p| p.rtt().as_millis().min(u128::from(u32::MAX)) as u32)
 }
 
 /// All that has arrived on this connection, acknowledgements included:
@@ -852,8 +1051,56 @@ fn received_bytes(session: &Session) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_lan_ip, is_lan_peer_ip, is_same_ipv6_subnet, is_tailnet_ip, pcm_frame_ok};
+    use super::{
+        is_lan_ip, is_lan_peer_ip, is_private_lan_ip, is_same_ipv6_subnet, is_same_subnet, is_tailnet_ip,
+        pcm_frame_ok,
+    };
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+    #[test]
+    fn a_relay_address_is_not_a_direct_path_for_phone_unlock() {
+        let relay = iroh::TransportAddr::Relay("https://relay.example/".parse().unwrap());
+        assert_eq!(super::direct_ip_addr(&relay), None);
+    }
+
+    #[test]
+    fn private_lan_ip_leaves_out_tailnet_cgnat_and_wan() {
+        for ok in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.20",
+            "169.254.3.4",
+            "::1",
+            "fe80::1",
+            "fd00::5",
+        ] {
+            assert!(is_private_lan_ip(ok.parse().unwrap()), "expected {ok} to be private");
+        }
+        for no in [
+            "100.64.0.1",
+            "100.100.100.100",
+            "100.127.255.254",
+            "fd7a:115c:a1e0::1",
+            "8.8.8.8",
+            "2001:4860::8888",
+            "::ffff:100.64.0.1",
+        ] {
+            assert!(!is_private_lan_ip(no.parse().unwrap()), "expected {no} not to be private");
+        }
+        assert!(is_private_lan_ip("::ffff:192.168.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn same_subnet_compares_v4_24_and_v6_64() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(is_same_subnet(ip("203.0.113.5"), ip("203.0.113.200")));
+        assert!(!is_same_subnet(ip("203.0.113.5"), ip("203.0.114.5")));
+        assert!(is_same_subnet(ip("2001:db8:1:2::a"), ip("2001:db8:1:2:ffff::1")));
+        assert!(!is_same_subnet(ip("2001:db8:1:2::a"), ip("2001:db8:1:3::a")));
+        assert!(is_same_subnet(ip("::ffff:203.0.113.5"), ip("203.0.113.9")));
+        assert!(!is_same_subnet(ip("203.0.113.5"), ip("2001:db8::1")));
+    }
 
     #[test]
     fn lan_ip_accepts_private_local_and_tailnet_and_rejects_wan() {

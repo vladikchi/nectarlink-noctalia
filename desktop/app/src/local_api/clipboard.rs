@@ -7,7 +7,7 @@ use std::sync::Mutex;
 #[cfg(test)]
 pub(super) static TEST_CLIPBOARD: Mutex<String> = Mutex::new(String::new());
 
-pub(super) fn read_pc_clipboard() -> String {
+pub(crate) fn read_pc_clipboard() -> String {
     #[cfg(test)]
     {
         return TEST_CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -21,7 +21,7 @@ pub(super) fn read_pc_clipboard() -> String {
     }
 }
 
-pub(super) fn write_pc_clipboard(text: &str) -> Result<(), String> {
+pub(crate) fn write_pc_clipboard(text: &str) -> Result<(), String> {
     #[cfg(test)]
     {
         *TEST_CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner()) = text.to_owned();

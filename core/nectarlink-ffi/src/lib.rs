@@ -167,7 +167,11 @@ pub enum PairingFailure {
     Declined,
     Expired,
     Unreachable,
-    Other { message: String },
+    /// Reached, but not on its pairing screen.
+    NotPairing,
+    Other {
+        message: String,
+    },
 }
 
 /// What unlocks a feature (see docs/architecture/capabilities.md).
@@ -685,6 +689,17 @@ pub enum Event {
     ContactsChanged {
         id: String,
     },
+    /// A paired device making a problem report asks for this phone's recent
+    /// activity log: ask the user, then `report_log_answer`.
+    DiagLogAsked {
+        id: String,
+    },
+    /// The log asked for with `report_ask` arrived (`shared`) or was
+    /// declined; `report_prepare` now includes it.
+    ReportLogArrived {
+        id: String,
+        shared: bool,
+    },
     /// A paired phone's screen (session 0) or app window started or
     /// stopped showing (PCs only).
     Mirroring {
@@ -759,6 +774,12 @@ pub enum Event {
         channels: u8,
         pcm: Vec<u8>,
     },
+    /// A paired PC's microphone for the call in progress (`call.audio`):
+    /// 16 kHz mono 16-bit PCM to put into the call.
+    CallAudioUplink {
+        device: String,
+        pcm: Vec<u8>,
+    },
     /// A paired PC started streaming its screen to this phone (`mirror` video stream config).
     PcMirrorConfig {
         id: String,
@@ -775,6 +796,10 @@ pub enum Event {
     },
     /// A paired PC's screen stream ended.
     PcMirrorEnded {
+        id: String,
+    },
+    /// The PC couldn't start or continue sharing its screen.
+    PcMirrorCaptureFailed {
         id: String,
     },
     /// The persistent outgoing send queue changed.
@@ -1199,6 +1224,23 @@ pub struct MirrorOptions {
     pub sound_only: bool,
 }
 
+/// The phone's screen as the pointer the PC's mouse moves sees it, and how
+/// far one count moves it (the answer to `pointer_enter`).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct PointerScreen {
+    pub width: u32,
+    pub height: u32,
+    /// Pixels per count.
+    pub scale: f32,
+}
+
+/// Where the pointer the PC's mouse moves is, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct PointerPosition {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// An app a PC can open in a window (docs/protocol/mirror.md).
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PhoneApp {
@@ -1285,6 +1327,8 @@ pub struct SmsMessage {
     pub status: Option<String>,
     /// Pictures and other attachments, fetched with `sms_part`.
     pub parts: Vec<SmsPart>,
+    /// The SIM it came in on or went out from (an id from `sms_sims`), when known.
+    pub sim: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1330,6 +1374,17 @@ pub struct CallSim {
     pub label: String,
     /// Whether the phone calls with it without asking.
     pub is_default: bool,
+}
+
+/// One of a PC's screens, for picking the one to view (`mirror.displays`, #442).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PcDisplay {
+    /// What `start_pc_mirror`'s `display` takes.
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The PC's main screen.
+    pub primary: bool,
 }
 
 /// One call in this phone's call history (docs/protocol/calls.md).
@@ -1387,6 +1442,10 @@ pub struct Call {
     /// With `Active`, when this app controls the call (its in-call service
     /// is bound): mute, speaker and hold.
     pub controls: Option<CallControls>,
+    /// The app the call is in (`WhatsApp`...), when it isn't a phone call
+    /// (#434): answered, declined and ended through that app's notification.
+    #[uniffi(default = None)]
+    pub app: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
@@ -2117,6 +2176,7 @@ impl From<core::PairingFailure> for PairingFailure {
             core::PairingFailure::Declined => PairingFailure::Declined,
             core::PairingFailure::Expired => PairingFailure::Expired,
             core::PairingFailure::Unreachable => PairingFailure::Unreachable,
+            core::PairingFailure::NotPairing => PairingFailure::NotPairing,
             core::PairingFailure::Other(message) => PairingFailure::Other { message },
         }
     }
@@ -2493,10 +2553,23 @@ impl Event {
             }
             NodeEvent::CallLogChanged { device } => Event::CallLogChanged { id: device.to_string() },
             NodeEvent::ContactsChanged { device } => Event::ContactsChanged { id: device.to_string() },
+            NodeEvent::DiagLogAsked { device } => Event::DiagLogAsked { id: device.to_string() },
+            NodeEvent::DiagLog { device, nonce, lines } => {
+                let shared = lines.is_some();
+                if !peer_log_arrived(device, nonce, lines) {
+                    return None;
+                }
+                Event::ReportLogArrived { id: device.to_string(), shared }
+            }
             NodeEvent::SmsChanged { device, thread } => Event::SmsChanged { id: device.to_string(), thread },
             NodeEvent::PhotosChanged { device } => Event::PhotosChanged { id: device.to_string() },
             NodeEvent::Mirroring { device, session, on } => {
                 Event::Mirroring { id: device.to_string(), session, on }
+            }
+            NodeEvent::MirrorNotice { device, session: core::MIRROR_SCREEN, code }
+                if code == core::MIRROR_NOTICE_PC_CAPTURE_FAILED =>
+            {
+                Event::PcMirrorCaptureFailed { id: device.to_string() }
             }
             NodeEvent::Webcam { device, on } => Event::Webcam { id: device.to_string(), on },
             NodeEvent::CameraCaptureRequested { .. }
@@ -2542,6 +2615,7 @@ impl Event {
             NodeEvent::PcAudioFrame { device, sample_rate, channels, pcm } => {
                 Event::PcAudioFrame { device: device.to_string(), sample_rate, channels, pcm }
             }
+            NodeEvent::CallAudioUplink { device, pcm } => Event::CallAudioUplink { device: device.to_string(), pcm },
         })
     }
 }
@@ -2551,6 +2625,30 @@ fn parse_id(id: &str) -> Result<DeviceId> {
 }
 
 // ---- Foreign interfaces (implemented in Kotlin) ----
+
+/// Why the phone declined a PC unlock operation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum UnlockRefusal {
+    /// The owner said no, or didn't confirm in time.
+    #[error("declined")]
+    Declined,
+    /// No strong biometric enrolled, or no secure key storage.
+    #[error("unsupported")]
+    Unsupported,
+    /// The key is gone (a fingerprint was added, or app data cleared).
+    #[error("key gone")]
+    KeyGone,
+}
+
+impl From<UnlockRefusal> for core::unlock::KeyRefusal {
+    fn from(r: UnlockRefusal) -> Self {
+        match r {
+            UnlockRefusal::Declined => core::unlock::KeyRefusal::Declined,
+            UnlockRefusal::Unsupported => core::unlock::KeyRefusal::Unsupported,
+            UnlockRefusal::KeyGone => core::unlock::KeyRefusal::KeyGone,
+        }
+    }
+}
 
 /// Why a notification couldn't be dismissed or its action run.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
@@ -2686,6 +2784,10 @@ pub trait Platform: Send + Sync {
         action: MediaAction,
         position: Option<u64>,
     ) -> Result<(), MediaFailure>;
+    /// Whether a computer could be reaching this phone through adb right now
+    /// (USB debugging on with a cable in, or wireless debugging on). Pairing
+    /// over the USB tunnel without pairing mode is taken only then.
+    fn adb_may_be_connected(&self) -> bool;
     /// A paired PC sent a web link (http or https, checked) to open.
     /// False if it couldn't be shown.
     fn open_link(&self, from_id: String, url: String) -> bool;
@@ -2742,26 +2844,46 @@ pub trait Platform: Send + Sync {
     /// A PC asked for contacts matching `query` (or all with phone numbers
     /// when null), favorites first then alphabetical, skipping `offset`.
     fn contacts(&self, query: Option<String>, offset: u32, limit: u32) -> Vec<Contact>;
+    /// This phone's part of a problem report a paired PC is making: what it
+    /// says about itself and its checks (`Reports.phone`).
+    fn diag_facts(&self) -> Option<ReportDevice>;
     /// A PC asked for this phone's screen (and, with `audio`, its sound):
     /// ask the user (then call `mirror_open`, and `mirror_open_audio` for
     /// the sound). With `app` (and a `session` other than 0): run that app
     /// on a display of its own and stream it with `mirror_open`, its config
     /// packets carrying the session. False if it can't.
     fn mirror_requested(&self, pc_id: String, options: MirrorOptions) -> bool;
+    /// A PC asked to uninstall `pkg` (D349): true once it's gone.
+    fn app_uninstall_requested(&self, pc_id: String, pkg: String) -> bool;
     /// The PC stopped watching the screen (session 0) or an app window.
     fn mirror_stop_requested(&self, pc_id: String, session: u32);
     /// The PC needs a keyframe.
     fn mirror_keyframe_requested(&self, pc_id: String, session: u32);
-    /// The PC resized an app window (`session` != 0) to `width × height`.
-    fn mirror_resize_requested(&self, pc_id: String, session: u32, width: u32, height: u32);
+    /// The PC resized an app window (`session` != 0) to `width × height`,
+    /// the app drawing at `zoom` percent of its usual size.
+    fn mirror_resize_requested(&self, pc_id: String, session: u32, width: u32, height: u32, zoom: u32);
     /// The PC updated `stay_awake` or `screen_off` while mirroring the screen (`session == 0`).
     fn mirror_power_requested(&self, pc_id: String, stay_awake: bool, screen_off: bool);
+    /// The PC wants the mirrored screen in landscape or portrait.
+    fn mirror_rotate_requested(&self, pc_id: String, landscape: bool);
     /// The PC wants the phone's sound sent to it, or left on the phone, while
     /// mirroring the screen.
     fn mirror_sound_requested(&self, pc_id: String, on: bool);
     /// The PC's mouse or keyboard on the mirrored screen (only while this
     /// phone offers `mirror.input`) or an app window. Return quickly.
     fn mirror_input(&self, pc_id: String, session: u32, input: MirrorInputEvent);
+    /// The PC's mouse came over the edge of its screen (#107), at the phone's
+    /// `edge` ("left" or "right"), `y` (0 to 1) of the way down: show a
+    /// pointer there (Elevated). None when it can't. Not on the main thread;
+    /// may take a second.
+    fn pointer_enter(&self, pc_id: String, edge: String, y: f32) -> Option<PointerScreen>;
+    /// The PC's mouse moved by `dx`, `dy` counts with `buttons` held (bits:
+    /// 1 left, 2 right, 4 middle) and the wheel turned `wheel` notches. Return quickly.
+    fn pointer_move(&self, pc_id: String, dx: i32, dy: i32, buttons: u8, wheel: i8);
+    /// Where the pointer is; None when it isn't showing.
+    fn pointer_where(&self, pc_id: String) -> Option<PointerPosition>;
+    /// The PC's mouse went back to the PC: put the pointer away.
+    fn pointer_leave(&self, pc_id: String);
     /// A PC asked for this phone's camera as a webcam: start streaming (or
     /// ask the user) and call `webcam_open`. False if it can't or the user
     /// declined.
@@ -2773,6 +2895,11 @@ pub trait Platform: Send + Sync {
     fn mic_requested(&self, pc_id: String) -> bool;
     /// The PC stopped listening to this phone's microphone: stop recording.
     fn mic_stop_requested(&self, pc_id: String);
+    /// A PC asked for call `call_id`'s sound (`call.audio.start`): get ready
+    /// to carry it, then stream with `call_audio_open`. False refuses.
+    fn call_audio_requested(&self, pc_id: String, call_id: String) -> bool;
+    /// The PC stopped taking the call's sound: give it back to the phone.
+    fn call_audio_stop_requested(&self, pc_id: String);
     /// The PC needs a fresh H.264 keyframe on the webcam stream.
     fn webcam_keyframe_requested(&self, pc_id: String);
     /// A PC asked this phone to capture a photo or scan a document (`mode` is
@@ -2798,12 +2925,70 @@ pub trait Platform: Send + Sync {
         body: String,
         attachments: Vec<SmsAttachment>,
     ) -> bool;
+    /// A PC asked which SIMs this phone texts from (#474).
+    fn sms_sims(&self) -> Vec<CallSim>;
+    /// Like `send_sms_with_attachments`, on the SIM `sim` (an id from `sms_sims`).
+    fn sms_send_on(
+        &self,
+        to: Vec<String>,
+        body: String,
+        attachments: Vec<SmsAttachment>,
+        sim: String,
+    ) -> bool;
     /// A PC asked for a message's attachment; null when it's gone.
     fn sms_part(&self, id: String) -> Option<SmsPartData>;
     /// A PC asked to change one of this phone's quick settings (`id`: `"dnd"`,
     /// `"ringer"`, `"flashlight"`, `"volume"`, `"brightness"`, `"wifi"`,
     /// `"bluetooth"`). False if the phone couldn't.
     fn set_phone_toggle(&self, id: String, value: PhoneToggleValue) -> bool;
+    /// Unlock the PC with this phone (ADR 0009), enrolling: ask the owner
+    /// ("Let `pc_name` unlock with your fingerprint for `user_name`?"); after a
+    /// strong biometric, encrypt `key` with a Keystore key for `pc` and `user`
+    /// that needs a strong biometric for every use and is invalidated by a new
+    /// fingerprint. Return it encrypted (IV included). Blocks until answered
+    /// (the core gives up after 90 s).
+    fn unlock_wrap(
+        &self,
+        pc: String,
+        pc_name: String,
+        user_name: String,
+        user: String,
+        key: Vec<u8>,
+    ) -> Result<Vec<u8>, UnlockRefusal>;
+    /// Unlock the PC with this phone: show "Unlock `pc_name` for
+    /// `user_name`?"; after a strong biometric, decrypt `wrapped` with that
+    /// Keystore key and return the key. Blocks until answered (30 s).
+    fn unlock_unwrap(
+        &self,
+        pc: String,
+        pc_name: String,
+        user_name: String,
+        user: String,
+        wrapped: Vec<u8>,
+    ) -> Result<Vec<u8>, UnlockRefusal>;
+    /// Unlock the PC with this phone: delete the Keystore keys kept for `pc`
+    /// (for `user`, or all of them).
+    fn unlock_forget(&self, pc: String, user: Option<String>);
+    /// Enroll a biometric-bound Linux unlock key and return the uncompressed P-256 point.
+    fn linux_unlock_enroll(
+        &self,
+        pc: String,
+        pc_name: String,
+        user_name: String,
+        uid: u32,
+        timeout_ms: u64,
+        attempt: Arc<LinuxUnlockAttempt>,
+    ) -> Result<Vec<u8>, UnlockRefusal>;
+    /// Prompt using the confirmed enrollment, then return a DER ECDSA signature.
+    fn linux_unlock_sign(
+        &self,
+        pc: String,
+        uid: u32,
+        transcript: Vec<u8>,
+        attempt: Arc<LinuxUnlockAttempt>,
+    ) -> Result<Vec<u8>, UnlockRefusal>;
+    /// Forget one Linux account or all Linux unlock keys for this paired PC.
+    fn linux_unlock_forget(&self, pc: String, uid: Option<u32>);
     /// A PC asked to list a folder in this phone's storage (`""` is root).
     fn storage_list(&self, path: String) -> Result<Vec<StorageEntry>, StorageFailure>;
     /// A PC asked to open a file in this phone's storage for ranged reading.
@@ -2877,6 +3062,9 @@ impl std::fmt::Debug for PlatformAdapter {
 }
 
 impl core::Platform for PlatformAdapter {
+    fn diag_facts(&self) -> Option<(core::diag::report::DeviceFacts, Vec<(String, String)>)> {
+        self.0.diag_facts().map(ReportDevice::split)
+    }
     fn start_ringing(&self) {
         self.0.start_ringing();
     }
@@ -2922,6 +3110,9 @@ impl core::Platform for PlatformAdapter {
     ) -> Result<(), core::MediaError> {
         Ok(self.0.media_command(player.to_owned(), action.into(), position)?)
     }
+    fn adb_may_be_connected(&self) -> bool {
+        self.0.adb_may_be_connected()
+    }
     fn open_link(&self, from: &DeviceId, url: &str) -> Result<(), String> {
         if self.0.open_link(from.to_string(), url.to_owned()) { Ok(()) } else { Err("not shown".into()) }
     }
@@ -2954,6 +3145,13 @@ impl core::Platform for PlatformAdapter {
             Err("the clipboard rejected it".into())
         }
     }
+    fn app_uninstall_requested(&self, peer: &DeviceId, pkg: &str) -> Result<(), String> {
+        if self.0.app_uninstall_requested(peer.to_string(), pkg.to_owned()) {
+            Ok(())
+        } else {
+            Err("the phone couldn't uninstall it".into())
+        }
+    }
     fn mirror_requested(&self, peer: &DeviceId, options: &core::MirrorStart) -> Result<(), String> {
         let options = MirrorOptions {
             max_size: options.max_size,
@@ -2978,17 +3176,45 @@ impl core::Platform for PlatformAdapter {
     fn mirror_keyframe_requested(&self, peer: &DeviceId, session: u32) {
         self.0.mirror_keyframe_requested(peer.to_string(), session);
     }
-    fn mirror_resize_requested(&self, peer: &DeviceId, session: u32, width: u32, height: u32) {
-        self.0.mirror_resize_requested(peer.to_string(), session, width, height);
+    fn mirror_resize_requested(&self, peer: &DeviceId, session: u32, width: u32, height: u32, zoom: u32) {
+        self.0.mirror_resize_requested(peer.to_string(), session, width, height, zoom);
     }
     fn mirror_power_requested(&self, peer: &DeviceId, stay_awake: bool, screen_off: bool) {
         self.0.mirror_power_requested(peer.to_string(), stay_awake, screen_off);
+    }
+    fn mirror_rotate_requested(&self, peer: &DeviceId, landscape: bool) {
+        self.0.mirror_rotate_requested(peer.to_string(), landscape);
     }
     fn mirror_sound_requested(&self, peer: &DeviceId, on: bool) {
         self.0.mirror_sound_requested(peer.to_string(), on);
     }
     fn mirror_input(&self, peer: &DeviceId, session: u32, input: core::MirrorInput) {
         self.0.mirror_input(peer.to_string(), session, input.into());
+    }
+    fn pointer_enter(
+        &self,
+        peer: &DeviceId,
+        edge: core::PointerEdge,
+        y: f32,
+    ) -> Result<core::PointerScreen, String> {
+        let edge = match edge {
+            core::PointerEdge::Left => "left",
+            core::PointerEdge::Right => "right",
+        };
+        let PointerScreen { width, height, scale } = self
+            .0
+            .pointer_enter(peer.to_string(), edge.to_owned(), y)
+            .ok_or_else(|| "the phone can't show a pointer".to_owned())?;
+        Ok(core::PointerScreen { width, height, scale })
+    }
+    fn pointer_move(&self, peer: &DeviceId, moved: core::PointerMove) {
+        self.0.pointer_move(peer.to_string(), moved.dx, moved.dy, moved.buttons, moved.wheel);
+    }
+    fn pointer_where(&self, peer: &DeviceId) -> Option<core::PointerAt> {
+        self.0.pointer_where(peer.to_string()).map(|PointerPosition { x, y }| core::PointerAt { x, y })
+    }
+    fn pointer_leave(&self, peer: &DeviceId) {
+        self.0.pointer_leave(peer.to_string());
     }
     fn webcam_requested(&self, peer: &DeviceId, options: &core::WebcamStart) -> Result<(), String> {
         let options = WebcamOptions {
@@ -3012,6 +3238,16 @@ impl core::Platform for PlatformAdapter {
     }
     fn mic_stop_requested(&self, peer: &DeviceId) {
         self.0.mic_stop_requested(peer.to_string());
+    }
+    fn call_audio_requested(&self, peer: &DeviceId, call_id: &str) -> Result<(), String> {
+        if self.0.call_audio_requested(peer.to_string(), call_id.to_owned()) {
+            Ok(())
+        } else {
+            Err("the phone can't reach the call's sound".into())
+        }
+    }
+    fn call_audio_stop_requested(&self, peer: &DeviceId) {
+        self.0.call_audio_stop_requested(peer.to_string());
     }
     fn webcam_keyframe_requested(&self, peer: &DeviceId) {
         self.0.webcam_keyframe_requested(peer.to_string());
@@ -3081,6 +3317,7 @@ impl core::Platform for PlatformAdapter {
                     .into_iter()
                     .map(|p| core::SmsPart { id: p.id, mime: p.mime, size: p.size })
                     .collect(),
+                sim: m.sim,
             })
             .collect())
     }
@@ -3099,6 +3336,29 @@ impl core::Platform for PlatformAdapter {
         let att: Vec<SmsAttachment> =
             attachments.iter().cloned().map(|a| SmsAttachment { mime: a.mime, data: a.data }).collect();
         if self.0.send_sms_with_attachments(to.to_vec(), body.to_owned(), att) {
+            Ok(())
+        } else {
+            Err("not sent".into())
+        }
+    }
+    fn sms_sims(&self) -> Result<core::CallSims, String> {
+        let sims = self.0.sms_sims();
+        let default = sims.iter().find(|s| s.is_default).map(|s| s.id.clone());
+        Ok(core::CallSims {
+            sims: sims.into_iter().map(|s| core::CallSim { id: s.id, label: s.label }).collect(),
+            default,
+        })
+    }
+    fn send_sms_on(
+        &self,
+        to: &[String],
+        body: &str,
+        attachments: &[core::SmsAttachment],
+        sim: &str,
+    ) -> Result<(), String> {
+        let att: Vec<SmsAttachment> =
+            attachments.iter().cloned().map(|a| SmsAttachment { mime: a.mime, data: a.data }).collect();
+        if self.0.sms_send_on(to.to_vec(), body.to_owned(), att, sim.to_owned()) {
             Ok(())
         } else {
             Err("not sent".into())
@@ -3218,6 +3478,70 @@ impl core::Platform for PlatformAdapter {
             .into_iter()
             .map(|t| core::PhotoThumb { id: t.id, data: t.data })
             .collect())
+    }
+    fn unlock_wrap(
+        &self,
+        pc: &core::DeviceId,
+        ask: &core::unlock::Ask,
+        key: &[u8],
+    ) -> Result<Vec<u8>, core::unlock::KeyRefusal> {
+        Ok(self.0.unlock_wrap(
+            pc.to_string(),
+            ask.pc_name.clone(),
+            ask.user_name.clone(),
+            ask.user.clone(),
+            key.to_vec(),
+        )?)
+    }
+    fn unlock_unwrap(
+        &self,
+        pc: &core::DeviceId,
+        ask: &core::unlock::Ask,
+        wrapped: &[u8],
+    ) -> Result<Vec<u8>, core::unlock::KeyRefusal> {
+        Ok(self.0.unlock_unwrap(
+            pc.to_string(),
+            ask.pc_name.clone(),
+            ask.user_name.clone(),
+            ask.user.clone(),
+            wrapped.to_vec(),
+        )?)
+    }
+    fn unlock_forget(&self, pc: &core::DeviceId, user: Option<&str>) {
+        self.0.unlock_forget(pc.to_string(), user.map(str::to_owned));
+    }
+    fn linux_unlock_enroll(
+        &self,
+        pc: &core::DeviceId,
+        ask: &core::linux_unlock::Ask,
+        attempt: &core::linux_unlock::Attempt,
+    ) -> Result<Vec<u8>, core::unlock::KeyRefusal> {
+        let timeout_ms = u64::try_from(ask.timeout.as_millis()).unwrap_or(u64::MAX);
+        Ok(self.0.linux_unlock_enroll(
+            pc.to_string(),
+            ask.pc_name.clone(),
+            ask.user_name.clone(),
+            ask.uid,
+            timeout_ms,
+            Arc::new(LinuxUnlockAttempt(attempt.clone())),
+        )?)
+    }
+    fn linux_unlock_sign(
+        &self,
+        pc: &core::DeviceId,
+        uid: u32,
+        transcript: &[u8],
+        attempt: &core::linux_unlock::Attempt,
+    ) -> Result<Vec<u8>, core::unlock::KeyRefusal> {
+        Ok(self.0.linux_unlock_sign(
+            pc.to_string(),
+            uid,
+            transcript.to_vec(),
+            Arc::new(LinuxUnlockAttempt(attempt.clone())),
+        )?)
+    }
+    fn linux_unlock_forget(&self, pc: &core::DeviceId, uid: Option<u32>) {
+        self.0.linux_unlock_forget(pc.to_string(), uid);
     }
     fn set_phone_toggle(&self, id: &str, value: &core::PhoneToggleValue) -> Result<(), String> {
         let value = match value {
@@ -3368,6 +3692,21 @@ pub enum RelayEditResult {
     Failed,
 }
 
+/// Cancellation of a single Linux unlock or enrollment on the phone.
+#[derive(Debug, uniffi::Object)]
+pub struct LinuxUnlockAttempt(core::linux_unlock::Attempt);
+
+#[uniffi::export]
+impl LinuxUnlockAttempt {
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    pub async fn wait_cancelled(&self) {
+        self.0.cancelled().await;
+    }
+}
+
 /// The NectarLink engine. One per app process.
 #[derive(uniffi::Object)]
 pub struct NectarlinkNode {
@@ -3435,11 +3774,23 @@ impl NectarlinkNode {
         let mut events = node.events();
         let node_for_events = node.clone();
         runtime.spawn(async move {
+            // An exception thrown by the app's listener comes back as a panic here. One
+            // bad event must not end this task, or no event would reach the app again.
+            let deliver = |event: Event| {
+                let delivered =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(event)));
+                if delivered.is_err() {
+                    tracing::error!("the app's event listener failed on an event; carrying on");
+                }
+            };
+            // What the app was given, so after a lag it gets only what it missed.
+            let mut given = core::Resync::new();
             loop {
                 match events.recv().await {
                     Ok(event) => {
+                        given.note(&event);
                         if let Some(ev) = Event::from_node(event) {
-                            listener.on_event(ev);
+                            deliver(ev);
                         }
                     }
                     Err(RecvError::Lagged(missed)) => {
@@ -3449,26 +3800,24 @@ impl NectarlinkNode {
                             Vec::new()
                         });
                         for d in devices {
-                            listener
-                                .on_event(Event::LinkChanged { id: d.id.to_string(), link: d.link.into() });
-                            listener.on_event(Event::WakeInfoChanged {
-                                id: d.id.to_string(),
-                                can_wake: d.can_wake,
-                            });
-                            listener
-                                .on_event(Event::ReconnectChanged { id: d.id.to_string(), on: d.reconnect });
-                            listener.on_event(Event::PeerInfoChanged {
-                                id: d.id.to_string(),
-                                info: d.info.into(),
-                            });
+                            deliver(Event::LinkChanged { id: d.id.to_string(), link: d.link.into() });
+                            deliver(Event::WakeInfoChanged { id: d.id.to_string(), can_wake: d.can_wake });
+                            deliver(Event::ReconnectChanged { id: d.id.to_string(), on: d.reconnect });
+                            deliver(Event::PeerInfoChanged { id: d.id.to_string(), info: d.info.into() });
                             if let Ok(matrix) = node_for_events.capabilities(d.id) {
-                                listener.on_event(Event::Capabilities {
+                                deliver(Event::Capabilities {
                                     id: d.id.to_string(),
                                     features: features(&matrix),
                                 });
                             }
                         }
-                        listener.on_event(Event::QueueChanged);
+                        deliver(Event::QueueChanged);
+                        // Transfers, rings and pairing only ever come as events.
+                        for event in given.missed(node_for_events.latest_state()) {
+                            if let Some(ev) = Event::from_node(event) {
+                                deliver(ev);
+                            }
+                        }
                     }
                     Err(RecvError::Closed) => return,
                 }
@@ -3558,6 +3907,42 @@ impl NectarlinkNode {
         let id = parse_id(&pc_id)?;
         let node = self.node.clone();
         self.run(async move { Ok(node.elevated_usb_start(id, apk, token, grants).await?) }).await
+    }
+
+    /// Asks paired device `id` for its part of the problem report being
+    /// made; with `log`, its user is asked to share its recent log too
+    /// (a `ReportLogArrived` event follows). `report_prepare` includes what
+    /// came back.
+    pub async fn report_ask(&self, id: String, log: bool, just_now: bool) -> ReportPeer {
+        let Ok(peer) = parse_id(&id) else { return ReportPeer::Offline };
+        let node = self.node.clone();
+        let asked = self.run(async move { Ok(node.diag_ask(peer, log, just_now).await?) }).await;
+        match asked {
+            Ok(part) => {
+                let state = match part.log {
+                    core::PeerLog::Asking => ReportPeer::Asking,
+                    core::PeerLog::Busy => ReportPeer::Busy,
+                    core::PeerLog::NotAsked => ReportPeer::Included,
+                };
+                peer_parts().insert(peer, part);
+                state
+            }
+            Err(NectarlinkError::Unsupported) => ReportPeer::Unsupported,
+            Err(_) => ReportPeer::Offline,
+        }
+    }
+
+    /// This phone's user answered `id`'s request for its log.
+    pub async fn report_log_answer(&self, id: String, share: bool) -> Result<()> {
+        let peer = parse_id(&id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(node.diag_log_answer(peer, share).await?) }).await
+    }
+
+    /// Whether `id` still waits for this phone's user to answer its request
+    /// for the log.
+    pub fn report_log_waiting(&self, id: String) -> bool {
+        parse_id(&id).is_ok_and(|peer| self.node.diag_log_waiting(&peer))
     }
 
     pub async fn ring(&self, id: String, on: bool) -> Result<()> {
@@ -3801,6 +4186,13 @@ impl NectarlinkNode {
         self.run(async move { Ok(node.send_clipboard_image(id, mime, bytes).await?) }).await
     }
 
+    /// Sends an automatic image to a connected PC without queueing.
+    pub async fn send_clipboard_image_live(&self, id: String, mime: String, bytes: Vec<u8>) -> Result<()> {
+        let id = parse_id(&id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(node.send_clipboard_image_live(id, mime, bytes).await?) }).await
+    }
+
     /// Whether the local clipboard history is enabled.
     pub fn clipboard_history_enabled(&self) -> bool {
         self.node.clipboard_history_enabled()
@@ -4020,6 +4412,12 @@ impl NectarlinkNode {
         self.node.away_mode()
     }
 
+    /// Whether the phone has Wi-Fi, Ethernet or a VPN (#397): without, and
+    /// with mobile data off, PCs aren't dialed until one comes back.
+    pub fn set_local_network(&self, available: bool) {
+        self.node.set_local_network(available);
+    }
+
     /// Enables or disables connecting over mobile data / non-LAN paths at runtime.
     pub fn set_away_mode(&self, enabled: bool) {
         self.node.set_away_mode(enabled);
@@ -4093,6 +4491,20 @@ impl NectarlinkNode {
         let node = self.node.clone();
         let action = if sleep { core::PowerAction::Sleep } else { core::PowerAction::Lock };
         self.run(async move { Ok(node.pc_power(id, action).await?) }).await
+    }
+
+    /// Asks a paired PC to play this phone's sound (#398).
+    pub async fn ask_pc_for_phone_sound(&self, id: String) -> Result<()> {
+        let id = parse_id(&id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(node.ask_pc_for_phone_sound(id).await?) }).await
+    }
+
+    /// Shuts a paired PC down (only one that offers `pc.power.shutdown`).
+    pub async fn pc_shutdown(&self, id: String) -> Result<()> {
+        let id = parse_id(&id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(node.pc_power(id, core::PowerAction::Shutdown).await?) }).await
     }
 
     /// Hibernates a paired PC (only one that offers `pc.power.hibernate`).
@@ -4230,6 +4642,45 @@ impl NectarlinkNode {
         self.run(async move { Ok(node.remote_laser(id, on, x, y).await?) }).await
     }
 
+    /// Sends the phone's game controller as it is now to a paired PC
+    /// (`input.gamepad`). With `reliable`, it goes on the control stream and
+    /// answers whether the PC could plug a controller in
+    /// (`NectarlinkError::Unsupported` when its driver is missing); otherwise
+    /// in a QUIC datagram, repeated by the caller while the controller is open.
+    /// `buttons` uses the XInput bits; sticks run -32768 to 32767, `y` up.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remote_pad(
+        &self,
+        id: String,
+        buttons: u16,
+        lt: u8,
+        rt: u8,
+        lx: i16,
+        ly: i16,
+        rx: i16,
+        ry: i16,
+        reliable: bool,
+    ) -> Result<()> {
+        let id = parse_id(&id)?;
+        let pad = core::PadState { buttons, lt, rt, lx, ly, rx, ry };
+        let node = self.node.clone();
+        self.run(async move {
+            if reliable {
+                Ok(node.remote_input(id, core::RemoteInput::Pad { pad }).await?)
+            } else {
+                Ok(node.remote_pad(id, pad).await?)
+            }
+        })
+        .await
+    }
+
+    /// Unplugs this phone's game controller on a paired PC.
+    pub async fn remote_pad_off(&self, id: String) -> Result<()> {
+        let id = parse_id(&id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(node.remote_input(id, core::RemoteInput::PadOff).await?) }).await
+    }
+
     // ---- Deck (macro pad) ----
 
     /// The latest Deck layout reported by a connected PC, if any.
@@ -4320,6 +4771,7 @@ impl NectarlinkNode {
         fps: u32,
         bitrate: u32,
         watch: Option<String>,
+        display: Option<u32>,
     ) -> Result<()> {
         let id = parse_id(&pc_id)?;
         let node = self.node.clone();
@@ -4334,8 +4786,25 @@ impl NectarlinkNode {
             screen_off: false,
             watch,
             sound_only: false,
+            display,
         };
         self.run(async move { Ok(node.mirror_start(id, options).await?) }).await
+    }
+
+    /// A paired PC's screens, the main one first, to pick the one to view;
+    /// empty from a PC that only shares its main one (#442).
+    pub async fn pc_displays(&self, pc_id: String) -> Result<Vec<PcDisplay>> {
+        let id = parse_id(&pc_id)?;
+        let node = self.node.clone();
+        self.run(async move {
+            Ok(node
+                .mirror_displays(id)
+                .await?
+                .into_iter()
+                .map(|d| PcDisplay { id: d.id, width: d.width, height: d.height, primary: d.primary })
+                .collect())
+        })
+        .await
     }
 
     /// Asks a paired PC for a fresh keyframe on its screen stream (`mirror.keyframe`).
@@ -4380,6 +4849,25 @@ impl NectarlinkNode {
         let id = parse_id(&pc_id)?;
         let node = self.node.clone();
         self.run(async move { Ok(Arc::new(MirrorStream(node.mic_open(id).await?))) }).await
+    }
+
+    /// Opens the call's other party to a paired PC (`call.audio`, `downlink`):
+    /// a config packet (`mirror_audio_config(16000, 1)`) first, then 16-bit PCM.
+    pub async fn call_audio_open(&self, pc_id: String) -> Result<Arc<MirrorStream>> {
+        let id = parse_id(&pc_id)?;
+        let node = self.node.clone();
+        self.run(async move { Ok(Arc::new(MirrorStream(node.call_audio_open(id, false).await?))) }).await
+    }
+
+    /// Gives the call's sound back to the phone and tells the PC.
+    pub async fn call_audio_stop(&self, pc_id: String) -> Result<()> {
+        let id = parse_id(&pc_id)?;
+        let node = self.node.clone();
+        self.run(async move {
+            node.call_audio_stop(id).await;
+            Ok(())
+        })
+        .await
     }
 
     /// Stops this phone's microphone stream to a paired PC and tells the PC.
@@ -4466,6 +4954,7 @@ impl NectarlinkNode {
                 held: c.held,
                 can_hold: c.can_hold,
             }),
+            app: call.app,
         };
         self.run(async move { Ok(node.call_changed(call).await?) }).await
     }
@@ -4869,17 +5358,545 @@ pub fn install_id_from(platform_id: String) -> Option<String> {
     core::install_id_from(&platform_id)
 }
 
-/// Sends core logs to the platform log (logcat on Android). Call once,
-/// before starting the node. `filter` uses tracing's syntax, e.g. "info".
+/// What's new (#461), kept in `dir` (the app's data folder): at start, after
+/// an update or on a first install, so the dot shows when an update brought
+/// something not seen yet.
 #[uniffi::export]
-pub fn init_logging(filter: String) {
+pub fn whats_new_note_start(dir: String, updated: bool) {
+    nectarlink_core::whats_new::note_start(std::path::Path::new(&dir), updated);
+}
+
+/// Whether What's new has something not seen yet (the dot).
+#[uniffi::export]
+pub fn whats_new_pending(dir: String) -> bool {
+    nectarlink_core::whats_new::pending(std::path::Path::new(&dir))
+}
+
+/// What's new as JSON: `{version, mode, newCount, groups: [{title, items,
+/// more}], url}`, one short line per change.
+#[uniffi::export]
+pub fn whats_new_json(dir: String) -> String {
+    nectarlink_core::whats_new::json(std::path::Path::new(&dir))
+}
+
+/// What's new was opened: the dot goes, and what it showed stays to show again.
+#[uniffi::export]
+pub fn whats_new_mark_seen(dir: String) {
+    nectarlink_core::whats_new::mark_seen(std::path::Path::new(&dir));
+}
+
+/// One of the two activity log files on a phone.
+const PHONE_LOG_SEGMENT_BYTES: u64 = 256 * 1024;
+
+/// Sends core logs to the platform log (logcat on Android) and to the
+/// private activity log in `diag_dir/logs` (`nectarlink_core::diag`), and
+/// keeps a record of any Rust panic in `diag_dir/crashes`. Call once, before
+/// starting the node; later calls change nothing. `filter` uses tracing's
+/// syntax, e.g. "info"; `data_dir` is the app's own folder, named in log
+/// text instead of spelled out.
+#[uniffi::export]
+pub fn init_logging(filter: String, diag_dir: String, data_dir: String, version: String) {
+    use std::sync::Arc;
+
+    use core::diag::{self, RingLayer, RingLog};
     use tracing_subscriber::{EnvFilter, prelude::*};
+    let diag_dir = std::path::PathBuf::from(diag_dir);
+    let _ = DIAG_DIR.set(diag_dir.clone());
+    diag::init_roots(std::path::Path::new(&data_dir));
+    diag::crash::configure(&diag_dir, &version);
+    diag::health::init(&diag_dir);
+    diag::crash::install_panic_hook();
     let filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info"));
     #[cfg(target_os = "android")]
     let layer = paranoid_android::layer("Nectarlink").with_ansi(false);
     #[cfg(not(target_os = "android"))]
     let layer = tracing_subscriber::fmt::layer();
-    let _ = tracing_subscriber::registry().with(filter).with(layer).try_init();
+    let ring = RingLog::open(&diag_dir.join("logs"), PHONE_LOG_SEGMENT_BYTES)
+        .ok()
+        .map(|r| RingLayer::new(Arc::new(r)));
+    let _ = tracing_subscriber::registry().with(filter).with(layer).with(ring).try_init();
+}
+
+/// Counts one `feature` that went `code` in the feature health counts
+/// (`nectarlink_core::diag::health`). Unknown names are ignored.
+#[uniffi::export]
+pub fn count_health(feature: String, code: String) {
+    use core::diag::health::{Code, Feature, count};
+    if let (Some(feature), Some(code)) = (Feature::parse(&feature), Code::parse(&code)) {
+        count(feature, code);
+    }
+}
+
+/// Writes the feature health counts so far (when the app goes to the
+/// background: Android may end it without warning after that).
+#[uniffi::export]
+pub fn flush_health() {
+    core::diag::health::flush();
+}
+
+/// A crash the phone app found itself (its own Java or Kotlin crash, or one
+/// Android reported), kept with the core's own records. `kind` is
+/// `exception`, `native` or `anr`; `location` and `message` must be fixed
+/// text and names from the app's code, never values.
+#[uniffi::export]
+pub fn record_crash(kind: String, location: String, message: String, thread: Option<String>, at: u64) {
+    use core::diag::crash;
+    let clean = |text: &str| -> String { core::diag::redact::text(text).chars().take(200).collect() };
+    let (kind, location, message) = (clean(&kind), clean(&location), clean(&message));
+    let record = crash::CrashRecord {
+        sig: crash::signature(&[&kind, &location, &message]),
+        kind,
+        location,
+        message,
+        thread: thread.map(|t| clean(&t)),
+        version: crash::version(),
+        at,
+    };
+    crash::record(&record);
+    core::diag::health::count(core::diag::health::Feature::Crash, core::diag::health::Code::Ok);
+}
+
+/// Where the phone keeps its diagnostics, from [`init_logging`].
+static DIAG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// The report made last, for Send and Open on GitHub.
+static LAST_REPORT: std::sync::Mutex<Option<core::diag::report::Report>> = std::sync::Mutex::new(None);
+
+fn diag_dir() -> std::path::PathBuf {
+    DIAG_DIR.get().cloned().unwrap_or_default()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A `name: value` fact, or a check and its outcome, for a report.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReportPair {
+    pub name: String,
+    pub value: String,
+}
+
+/// Paired devices' parts from `report_ask`, by device.
+static PEER_PARTS: std::sync::Mutex<Option<std::collections::HashMap<DeviceId, core::PeerPart>>> =
+    std::sync::Mutex::new(None);
+
+struct PeerParts(std::sync::MutexGuard<'static, Option<std::collections::HashMap<DeviceId, core::PeerPart>>>);
+
+impl std::ops::Deref for PeerParts {
+    type Target = std::collections::HashMap<DeviceId, core::PeerPart>;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("made on lock")
+    }
+}
+
+impl std::ops::DerefMut for PeerParts {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("made on lock")
+    }
+}
+
+fn peer_parts() -> PeerParts {
+    let mut guard = PEER_PARTS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(Default::default);
+    PeerParts(guard)
+}
+
+/// Adds a log that arrived to the part it was asked with. False when no
+/// part is waiting for it.
+fn peer_log_arrived(device: DeviceId, nonce: u64, lines: Option<Vec<String>>) -> bool {
+    let mut parts = peer_parts();
+    let Some(part) = parts.get_mut(&device).filter(|p| p.nonce == nonce) else { return false };
+    part.log = core::PeerLog::NotAsked;
+    if let Some(lines) = lines {
+        part.part.log = lines;
+    }
+    true
+}
+
+/// What became of asking a paired device for its part of a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReportPeer {
+    /// Its part is in the report.
+    Included,
+    /// Its part is in, and its user is being asked to share its log.
+    Asking,
+    /// Its part is in; it was asked for its log moments ago.
+    Busy,
+    /// It's offline, or didn't answer in time.
+    Offline,
+    /// It runs a NectarLink that doesn't answer yet.
+    Unsupported,
+}
+
+/// What a device says about itself in a report: versions and hardware,
+/// never names. `extra` and `checks` come from fixed lists.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReportDevice {
+    /// The paired device's ID; "" for this phone.
+    #[uniffi(default = "")]
+    pub id: String,
+    /// `Phone` or `PC`.
+    pub role: String,
+    pub app_version: String,
+    pub channel: String,
+    pub install: String,
+    pub os: String,
+    pub arch: String,
+    pub hardware: Vec<String>,
+    pub extra: Vec<ReportPair>,
+    pub checks: Vec<ReportPair>,
+}
+
+impl ReportDevice {
+    fn split(self) -> (core::diag::report::DeviceFacts, Vec<(String, String)>) {
+        let pairs = |list: Vec<ReportPair>| list.into_iter().map(|p| (p.name, p.value)).collect::<Vec<_>>();
+        let checks = pairs(self.checks);
+        let facts = core::diag::report::DeviceFacts {
+            role: self.role,
+            app_version: self.app_version,
+            channel: self.channel,
+            install: self.install,
+            os: self.os,
+            arch: self.arch,
+            hardware: self.hardware,
+            extra: pairs(self.extra),
+        };
+        (facts, checks)
+    }
+}
+
+/// The area a recent crash or failure on this phone points to: an `Area` id.
+#[uniffi::export]
+pub fn report_guess_area() -> String {
+    core::diag::report::guess_area(&diag_dir()).id().to_owned()
+}
+
+/// Makes a report on this phone and returns its exact text. `phone` is this
+/// phone with its checks; `others` are paired devices as far as the phone
+/// knows them. `parts` leaves out the parts whose bit isn't set (1 devices,
+/// 2 checks, 4 health, 8 crashes, 16 log).
+#[uniffi::export]
+pub fn report_prepare(
+    area: String,
+    other: String,
+    text: String,
+    just_now: bool,
+    parts: i32,
+    phone: ReportDevice,
+    others: Vec<ReportDevice>,
+) -> String {
+    use core::diag::report::{self, Area, DevicePart, Parts};
+    let dir = diag_dir();
+    let mut made = report::Report::new(Area::parse(&area).unwrap_or(Area::Other), &other, &text, just_now);
+    made.parts = Parts {
+        devices: parts & 1 != 0,
+        checks: parts & 2 != 0,
+        health: parts & 4 != 0,
+        crashes: parts & 8 != 0,
+        log: parts & 16 != 0,
+    };
+    let (facts, checks) = phone.split();
+    made.devices.push(report::local_part(&dir, &dir.join("logs"), facts, checks, just_now));
+    if others.is_empty() {
+        made.missing.push("no_paired_device".into());
+    }
+    let parts = peer_parts();
+    for device in others {
+        let asked = parse_id(&device.id).ok().and_then(|id| parts.get(&id));
+        let role = device.role.clone();
+        let (mut facts, checks) = device.split();
+        match asked {
+            Some(peer) => {
+                let mut part = peer.part.clone();
+                part.facts.role = role;
+                part.facts.extra.extend(facts.extra);
+                if peer.log == core::PeerLog::Asking && made.parts.log {
+                    made.missing
+                        .push(format!("{}_log_waiting_for_its_user", part.facts.role.to_ascii_lowercase()));
+                }
+                made.devices.push(part);
+            }
+            None => {
+                facts.role = role;
+                made.devices.push(DevicePart { facts, checks, ..DevicePart::default() });
+            }
+        }
+    }
+    drop(parts);
+    let rendered = made.render();
+    *LAST_REPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
+    rendered
+}
+
+/// Whether `text` seems to have an email address or phone number in it.
+#[uniffi::export]
+pub fn report_looks_like_contact(text: String) -> bool {
+    core::diag::report::looks_like_contact(&text)
+}
+
+/// A new GitHub issue for the report made last, with its short parts
+/// filled in; the full text is pasted into it.
+#[uniffi::export]
+pub fn report_issue_url() -> Option<String> {
+    LAST_REPORT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(core::diag::report::Report::issue_url)
+}
+
+/// A report ready to POST to [`report_service`]`/v1/report`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutgoingReport {
+    pub rid: String,
+    /// Sent as is, as `application/json`.
+    pub body: String,
+    /// Sent as `X-Proof`.
+    pub proof: String,
+    pub at: u64,
+}
+
+impl From<core::diag::send::Outgoing> for OutgoingReport {
+    fn from(o: core::diag::send::Outgoing) -> Self {
+        OutgoingReport { rid: o.rid, body: o.body, proof: o.proof, at: o.at }
+    }
+}
+
+impl From<OutgoingReport> for core::diag::send::Outgoing {
+    fn from(o: OutgoingReport) -> Self {
+        core::diag::send::Outgoing { rid: o.rid, body: o.body, proof: o.proof, at: o.at }
+    }
+}
+
+/// The report service's address.
+#[uniffi::export]
+pub fn report_service() -> String {
+    core::diag::send::REPORT_SERVICE.to_owned()
+}
+
+/// The request for the report made last, with its proof of work. Takes
+/// about a second: call it off the main thread. `crash_sig` makes it a
+/// crash report, sent from the crash card.
+#[uniffi::export]
+pub fn report_outgoing(crash_sig: Option<String>) -> Option<OutgoingReport> {
+    use core::diag::send::{Kind, Outgoing};
+    let made = LAST_REPORT.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let kind = if crash_sig.is_some() { Kind::Crash } else { Kind::Person };
+    Some(Outgoing::new(&made, kind, crash_sig.as_deref(), now_secs()).into())
+}
+
+/// What became of a sent report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReportOutcome {
+    Filed {
+        issue: u64,
+    },
+    Queued,
+    /// Couldn't reach the service: kept, and sent at the next chance.
+    Later,
+    Limited,
+    Failed,
+}
+
+/// Reads the service's answer to `outgoing` (`status` 0 when it couldn't be
+/// reached), keeps what has to be kept, and says what happened. `follow`
+/// checks its issue for replies later (not for crash reports, whose issue
+/// gets a count comment).
+#[uniffi::export]
+pub fn report_answer(outgoing: OutgoingReport, status: u16, body: Vec<u8>, follow: bool) -> ReportOutcome {
+    use core::diag::send::{self, Answer, Sent};
+    let dir = diag_dir();
+    let answer = if status == 0 { Answer::Later } else { Answer::read(status, &body) };
+    let outgoing: send::Outgoing = outgoing.into();
+    let keep = |issue: Option<u64>| {
+        send::clear_pending_if(&dir, &outgoing.rid);
+        if !follow {
+            return;
+        }
+        send::remember(
+            &dir,
+            Sent { rid: outgoing.rid.clone(), issue, at: outgoing.at, comments: 0, closed: false },
+            now_secs(),
+        );
+    };
+    match answer {
+        Answer::Filed { issue } => {
+            keep(Some(issue));
+            ReportOutcome::Filed { issue }
+        }
+        Answer::Queued => {
+            keep(None);
+            ReportOutcome::Queued
+        }
+        Answer::Later => {
+            send::keep_pending(&dir, &outgoing);
+            ReportOutcome::Later
+        }
+        Answer::Limited => ReportOutcome::Limited,
+        Answer::Refused => {
+            send::clear_pending_if(&dir, &outgoing.rid);
+            ReportOutcome::Failed
+        }
+    }
+}
+
+/// What this phone says about itself in the daily count.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CountInstall {
+    pub app: String,
+    pub channel: String,
+    pub platform: String,
+    pub os: String,
+    pub hardware: String,
+}
+
+/// Today's count to POST to `report_service()/v1/ping` (as JSON, with
+/// `X-Proof`), or null when it went out already today.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DailyCount {
+    pub body: String,
+    pub proof: String,
+}
+
+#[uniffi::export]
+pub fn daily_count_due(install: CountInstall) -> Option<DailyCount> {
+    let install = core::diag::usage::Install {
+        app: install.app,
+        channel: install.channel,
+        platform: install.platform,
+        os: install.os,
+        hardware: install.hardware,
+    };
+    core::diag::usage::due(&diag_dir(), &install, now_secs()).map(|(body, proof)| DailyCount { body, proof })
+}
+
+/// Today's count went out (or was refused for good): not again today.
+#[uniffi::export]
+pub fn daily_count_sent() {
+    core::diag::usage::sent(&diag_dir(), now_secs());
+}
+
+/// The report that couldn't be sent yet, to send at the next update check.
+#[uniffi::export]
+pub fn report_pending() -> Option<OutgoingReport> {
+    core::diag::send::pending(&diag_dir()).map(Into::into)
+}
+
+/// Sent reports still waiting in the service's queue: their `rid`s, to ask
+/// `GET /v1/report/<rid>` which issue each became.
+#[uniffi::export]
+pub fn report_queued() -> Vec<String> {
+    core::diag::send::sent(&diag_dir(), now_secs())
+        .into_iter()
+        .filter(|s| s.issue.is_none())
+        .map(|s| s.rid)
+        .collect()
+}
+
+/// A sent report this phone follows for replies.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FollowedReport {
+    pub rid: String,
+    pub issue: u64,
+    /// GitHub's public API address for it.
+    pub url: String,
+}
+
+/// Something new on a followed report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReportNotice {
+    Replied { issue: u64 },
+    Closed { issue: u64 },
+}
+
+/// The crash on the crash card.
+static CARD: std::sync::Mutex<Option<core::diag::crash::CrashRecord>> = std::sync::Mutex::new(None);
+
+/// A crash the crash card offers to report.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CrashCard {
+    pub sig: String,
+    /// The report area it points to (an `Area` id).
+    pub area: String,
+}
+
+/// The crash the crash card should offer for this `version`: once per
+/// crash per version, unless turned off.
+#[uniffi::export]
+pub fn crash_card(version: String) -> Option<CrashCard> {
+    let record = core::diag::crash::for_card(&diag_dir(), &version, now_secs())?;
+    let card = CrashCard {
+        sig: record.sig.clone(),
+        area: core::diag::report::Area::guess(Some(&record.location), None).id().to_owned(),
+    };
+    *CARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
+    Some(card)
+}
+
+/// The version that fixes the card's crash, from the known-crashes `list`
+/// (`known_crashes_url()`), when a newer one does.
+#[uniffi::export]
+pub fn crash_card_fixed_in(list: Vec<u8>) -> Option<String> {
+    let card = CARD.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    core::diag::known::fixed_in(&list, &card.sig, &card.version)
+}
+
+/// Where the list of crashes already fixed is.
+#[uniffi::export]
+pub fn known_crashes_url() -> String {
+    core::diag::known::KNOWN_URL.to_owned()
+}
+
+/// The card was answered (sent, looked at, or put away): not again for it.
+#[uniffi::export]
+pub fn crash_card_done() {
+    if let Some(record) = CARD.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        core::diag::crash::card_shown(&diag_dir(), &record);
+    }
+}
+
+/// "Don't ask about crashes".
+#[uniffi::export]
+pub fn crash_card_off() {
+    core::diag::crash::card_off(&diag_dir());
+    CARD.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
+/// The sent reports to check for replies (at most 3, for 30 days).
+#[uniffi::export]
+pub fn report_followed() -> Vec<FollowedReport> {
+    core::diag::send::sent(&diag_dir(), now_secs())
+        .into_iter()
+        .filter_map(|s| {
+            s.issue.map(|issue| FollowedReport {
+                rid: s.rid,
+                issue,
+                url: core::diag::send::issue_api_url(issue),
+            })
+        })
+        .collect()
+}
+
+/// GitHub's answer about followed report `rid`: what's new, if anything.
+#[uniffi::export]
+pub fn report_issue_answer(rid: String, status: u16, body: Vec<u8>) -> Option<ReportNotice> {
+    use core::diag::send::{self, Notice};
+    send::check_issue(&diag_dir(), &rid, status, &body, now_secs()).map(|n| match n {
+        Notice::Replied { issue } => ReportNotice::Replied { issue },
+        Notice::Closed { issue } => ReportNotice::Closed { issue },
+    })
+}
+
+/// The service's answer about the queued report `rid`.
+#[uniffi::export]
+pub fn report_queued_answer(rid: String, status: u16, body: Vec<u8>) {
+    use core::diag::send::{self, Answer};
+    let dir = diag_dir();
+    match Answer::read(status, &body) {
+        Answer::Filed { issue } => {
+            if let Some(entry) = send::sent(&dir, now_secs()).into_iter().find(|s| s.rid == rid) {
+                send::remember(&dir, send::Sent { issue: Some(issue), ..entry }, now_secs());
+            }
+        }
+        Answer::Refused => send::forget(&dir, &rid),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

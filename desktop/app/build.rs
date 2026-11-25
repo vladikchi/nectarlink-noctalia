@@ -22,6 +22,8 @@ const QML: &[&str] = &[
     "qml/MainWindow.qml",
     "qml/MirrorWindow.qml",
     "qml/ShelfWindow.qml",
+    "qml/components/AgentConfirmSheet.qml",
+    "qml/components/AgentsSection.qml",
     "qml/components/AppsSheet.qml",
     "qml/components/Avatar.qml",
     "qml/components/Button.qml",
@@ -34,6 +36,7 @@ const QML: &[&str] = &[
     "qml/components/Divider.qml",
     "qml/components/GlassRim.qml",
     "qml/components/DoctorSheet.qml",
+    "qml/components/WhatsNewPanel.qml",
     "qml/components/HistoryItem.qml",
     "qml/components/Icon.qml",
     "qml/components/IconButton.qml",
@@ -42,13 +45,18 @@ const QML: &[&str] = &[
     "qml/components/NavItem.qml",
     "qml/components/NotificationItem.qml",
     "qml/components/NowPlaying.qml",
+    "qml/components/PhoneInstallPane.qml",
     "qml/components/QrCode.qml",
     "qml/components/RelaySheet.qml",
+    "qml/components/ReportSheet.qml",
+    "qml/components/CrashCard.qml",
     "qml/components/RoundedImage.qml",
     "qml/components/Segmented.qml",
+    "qml/components/ScrollRail.qml",
     "qml/components/Sheet.qml",
     "qml/components/Spinner.qml",
     "qml/components/StarPrompt.qml",
+    "qml/components/DiscordPrompt.qml",
     "qml/components/StatusDot.qml",
     "qml/components/Toast.qml",
     "qml/components/Toggle.qml",
@@ -76,7 +84,7 @@ const QML: &[&str] = &[
 ];
 
 /// QML singletons.
-const QML_SINGLETONS: &[&str] = &["qml/Tokens.qml", "qml/Theme.qml", "qml/Icons.qml"];
+const QML_SINGLETONS: &[&str] = &["qml/Tokens.qml", "qml/Theme.qml", "qml/Icons.qml", "qml/Links.qml"];
 
 /// Bundled fonts (in `assets/fonts`), compiled in under `:/fonts/`.
 const FONTS: &[&str] =
@@ -160,7 +168,7 @@ fn icon_file() -> Vec<u8> {
 }
 
 /// Fragment shaders, served under `qrc:/shaders/`.
-const SHADERS: &[&str] = &["glassrim.frag", "hive.frag"];
+const SHADERS: &[&str] = &["darken.frag", "glassrim.frag", "hive.frag"];
 
 /// Compiles the shaders with Qt's `qsb` when it can be found (next to qmake, or on PATH),
 /// otherwise uses the compiled copies committed beside the sources. Returns the qrc path.
@@ -249,9 +257,12 @@ fn find_lrelease() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Some(qmake) = std::env::var_os("QMAKE").map(PathBuf::from)
-        && let Some(bin_dir) = qmake.parent()
-    {
+    // Next to qmake, or in the Qt that install-qt-action and aqt set up.
+    let qt_bins = [
+        std::env::var_os("QMAKE").map(PathBuf::from).and_then(|q| q.parent().map(Path::to_path_buf)),
+        std::env::var_os("QT_ROOT_DIR").map(|root| PathBuf::from(root).join("bin")),
+    ];
+    for bin_dir in qt_bins.into_iter().flatten() {
         for name in ["lrelease", "lrelease.exe", "lrelease-qt6"] {
             let candidate = bin_dir.join(name);
             if candidate.is_file() {
@@ -350,6 +361,9 @@ fn compile_translations() {
             .arg(&out_qm)
             .status()
             .is_ok_and(|s| s.success());
+        if !compiled {
+            println!("cargo:warning={} couldn't compile {}", lrelease.display(), ts.display());
+        }
         if compiled && let Some(ref target_dir) = profile_dir {
             let _ = fs::copy(&out_qm, target_dir.join(&qm_name));
         }
@@ -375,7 +389,7 @@ fn main() {
         .qml_files(QML.iter().map(|f| QmlFile::from(*f)))
         .qml_files(QML_SINGLETONS.iter().map(|f| QmlFile::from(*f).singleton(true)));
     let mut builder = CxxQtBuilder::new_qml_module(module).qt_module("Quick");
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux" | "macos")) {
         builder = builder.qt_module("Widgets");
     }
     builder
@@ -394,6 +408,7 @@ fn main() {
         .files([
             "src/bridge/native.rs",
             "src/bridge/app.rs",
+            "src/bridge/agents.rs",
             "src/bridge/calls.rs",
             "src/bridge/devices.rs",
             "src/bridge/history.rs",
@@ -402,10 +417,12 @@ fn main() {
             "src/bridge/mirror.rs",
             "src/bridge/notifications.rs",
             "src/bridge/pairing.rs",
+            "src/bridge/phone_install.rs",
             "src/bridge/phone_mic.rs",
             "src/bridge/photo_backup.rs",
             "src/bridge/photos.rs",
             "src/bridge/prefs.rs",
+            "src/bridge/report.rs",
             "src/bridge/setup.rs",
             "src/bridge/timeline.rs",
             "src/bridge/transfers.rs",
@@ -419,6 +436,12 @@ fn main() {
         println!("cargo:rustc-link-lib=ole32");
         println!("cargo:rustc-link-lib=shell32");
         println!("cargo:rustc-link-lib=user32");
+        // Trimmed Windows builds can lack the Cloud Files API. Load it on first
+        // use so the app still starts there; storage.rs checks for it first.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg=/DELAYLOAD:cldapi.dll");
+            println!("cargo:rustc-link-lib=delayimp");
+        }
     } else if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-lib=Qt6Quick");
         println!("cargo:rustc-link-lib=Qt6Widgets");
@@ -426,11 +449,15 @@ fn main() {
             "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/../lib:$ORIGIN/../lib/nectarlink/lib"
         );
     } else if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_macos_audio_loopback();
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=CoreAudio");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");
         println!("cargo:rustc-link-lib=framework=IOKit");
+        println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=Foundation");
     }
     println!("cargo:rerun-if-changed=cpp/app_helpers.h");
     println!("cargo:rerun-if-changed=cpp/app_helpers.cpp");
@@ -461,4 +488,13 @@ fn build_linux_video_codec() {
     build.compile("nectarlink_linux_video_codec");
     println!("cargo::rustc-link-lib=dl");
     println!("cargo::rustc-cfg=linux_ffmpeg_video");
+}
+
+fn build_macos_audio_loopback() {
+    println!("cargo::rerun-if-changed=cpp/mac_audio_loopback.mm");
+    cc::Build::new()
+        .file("cpp/mac_audio_loopback.mm")
+        .flag("-fobjc-arc")
+        .flag("-std=c++17")
+        .compile("nectarlink_mac_audio_loopback");
 }

@@ -152,12 +152,33 @@ fn default_window_height() -> u32 {
     DEFAULT_WINDOW_HEIGHT
 }
 
+fn default_history_days() -> u32 {
+    1
+}
+
+fn default_mirror_fps() -> u32 {
+    60
+}
+
+/// A frame rate the phone is asked for: 30, 60, 90 or 120 (60 otherwise).
+pub fn sane_mirror_fps(fps: u32) -> u32 {
+    if matches!(fps, 30 | 60 | 90 | 120) { fps } else { 60 }
+}
+
+fn default_island_position() -> String {
+    "center".into()
+}
+
+fn default_island_look() -> String {
+    "dark".into()
+}
+
 fn default_true() -> bool {
     true
 }
 
 fn default_close_to_tray() -> bool {
-    !cfg!(target_os = "macos")
+    true
 }
 
 fn default_webcam_camera() -> String {
@@ -176,7 +197,12 @@ static FORWARD_PC_NOTIFICATIONS: std::sync::atomic::AtomicBool = std::sync::atom
 static AWAY_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static FLOW_FOLLOW_CLIPBOARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static MIRROR_QUALITY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static MIRROR_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(60);
 static SYNC_PASSWORDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static KEEP_POPUPS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Held while settings are written, and while they're read for a change.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static USB_DEBUGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static SYNC_WIFI_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static OPEN_SHARED_FILES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -201,8 +227,28 @@ pub fn mirror_quality() -> crate::mirror::Quality {
     crate::mirror::Quality::parse(&MIRROR_QUALITY.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// The frame rate mirroring asks the phone for (#442).
+pub fn mirror_fps() -> u32 {
+    MIRROR_FPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_mirror_fps(fps: u32) {
+    MIRROR_FPS.store(sane_mirror_fps(fps), std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn set_mirror_quality(quality: &str) {
     quality.clone_into(&mut MIRROR_QUALITY.lock().unwrap_or_else(|e| e.into_inner()));
+}
+
+/// Whether NectarLink uses phones' USB debugging (adb) at all (#439). Off,
+/// it never asks a phone on a cable for it: no USB connection, pairing,
+/// installing or starting Elevated over USB. Read at startup.
+pub fn usb_debugging() -> bool {
+    USB_DEBUGGING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_usb_debugging(on: bool) {
+    USB_DEBUGGING.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn sync_passwords() -> bool {
@@ -211,6 +257,29 @@ pub fn sync_passwords() -> bool {
 
 pub fn set_sync_passwords(on: bool) {
     SYNC_PASSWORDS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether pausing pop-ups lasts until it's resumed, even across restarts (#442).
+pub fn keep_popups_paused() -> bool {
+    KEEP_POPUPS_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_keep_popups_paused(on: bool) {
+    KEEP_POPUPS_PAUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Saves whether pop-ups are paused, when that's kept across restarts.
+pub fn remember_popups_paused(paused: bool) {
+    if !keep_popups_paused() {
+        return;
+    }
+    let dir = crate::core_host::host().data_dir.clone();
+    let _ = std::thread::Builder::new().name("save-popups-paused".into()).spawn(move || {
+        // Read and written under one lock, so a toggle can't undo a save in between.
+        if let Err(e) = Settings::update(&dir, |settings| settings.popups_paused = paused) {
+            tracing::warn!(error = %e, "can't save whether pop-ups are paused");
+        }
+    });
 }
 
 pub fn sync_wifi_only() -> bool {
@@ -278,6 +347,16 @@ pub fn set_flow_follow_clipboard(on: bool) {
     FLOW_FOLLOW_CLIPBOARD.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Sets the phone beside the PC (#107): the mouse goes over to it at that
+/// side. An unknown device or side, or an empty one, turns it off.
+pub fn set_phone_beside(device: &str, side: &str) {
+    let target = device.parse::<nectarlink_core::DeviceId>().ok().zip(crate::pointer_flow::Side::parse(side));
+    #[cfg(windows)]
+    crate::win::pointer_hooks::configure(target);
+    #[cfg(not(windows))]
+    let _ = target;
+}
+
 #[allow(dead_code)]
 pub fn away_mode() -> bool {
     AWAY_MODE.load(std::sync::atomic::Ordering::Relaxed)
@@ -312,8 +391,78 @@ fn default_battery_full_threshold() -> u8 {
     100
 }
 
+/// Low in Settings (#321), what it always was; Medium is 100 and High 200.
+fn default_sound_buffer_ms() -> u16 {
+    40
+}
+
+static PHONE_SOUND_BUFFER_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(40);
+
+/// How much of a phone's sound the PC holds before playing it.
+pub fn phone_sound_buffer_ms() -> u32 {
+    PHONE_SOUND_BUFFER_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_phone_sound_buffer_ms(ms: u16) {
+    PHONE_SOUND_BUFFER_MS.store(u32::from(ms.clamp(20, 500)), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn default_battery_low_threshold() -> u8 {
+    15
+}
+
+static BATTERY_LOW_THRESHOLD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(15);
+
+/// At or under this (and not charging), a phone's battery is low (#478).
+pub fn battery_low_threshold() -> u8 {
+    BATTERY_LOW_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_battery_low_threshold(threshold: u8) {
+    BATTERY_LOW_THRESHOLD.store(threshold.clamp(5, 50), std::sync::atomic::Ordering::Relaxed);
+}
+
 static NICKNAMES: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
     std::sync::Mutex::new(None);
+
+/// Most apps pinned on one phone.
+pub const MAX_PINNED_APPS: usize = 24;
+
+static PINNED_APPS: std::sync::Mutex<Option<std::collections::HashMap<String, Vec<String>>>> =
+    std::sync::Mutex::new(None);
+
+/// Every phone's pinned apps (#477), by device ID: package names, in order.
+pub fn pinned_apps_all() -> std::collections::HashMap<String, Vec<String>> {
+    PINNED_APPS.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
+}
+
+pub fn set_pinned_apps_all(pins: std::collections::HashMap<String, Vec<String>>) {
+    *PINNED_APPS.lock().unwrap_or_else(|e| e.into_inner()) = Some(pins);
+}
+
+/// `device`'s pinned apps, in the order they were pinned.
+pub fn pinned_apps(device: &str) -> Vec<String> {
+    PINNED_APPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(device).cloned())
+        .unwrap_or_default()
+}
+
+/// Pins `pkg` on `device` (last, up to [`MAX_PINNED_APPS`]) or unpins it.
+pub fn set_app_pinned(device: &str, pkg: &str, on: bool) {
+    let mut lock = PINNED_APPS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = lock.get_or_insert_default();
+    let list = map.entry(device.to_owned()).or_default();
+    list.retain(|p| p != pkg);
+    if on && list.len() < MAX_PINNED_APPS {
+        list.push(pkg.to_owned());
+    }
+    if list.is_empty() {
+        map.remove(device);
+    }
+}
 
 static KEEP_SCREEN_OFF: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -463,6 +612,10 @@ pub struct Settings {
     /// Closing the window keeps NectarLink running in the tray.
     #[serde(default = "default_close_to_tray", alias = "close_to_tray")]
     pub close_to_tray: bool,
+    /// The tray icon in one colour, white or black to match the taskbar
+    /// (#479), instead of the coloured tile.
+    #[serde(default, alias = "tray_one_colour")]
+    pub tray_one_colour: bool,
     /// Send what's copied on this PC to connected phones.
     #[serde(alias = "auto_clipboard", alias = "clipboard_sync")]
     pub auto_clipboard: bool,
@@ -493,6 +646,15 @@ pub struct Settings {
     /// In mirroring and app windows, right-click is a long press instead of Back.
     #[serde(default)]
     pub right_click_long_press: bool,
+    /// No floating toolbar in mirroring and app windows (D475): it sits over
+    /// the app's own top corner. Ctrl+Shift+T in a window brings it back.
+    #[serde(default)]
+    pub hide_mirror_toolbar: bool,
+    /// That toolbar's corner, so it can be moved off the app's own buttons.
+    #[serde(default)]
+    pub mirror_toolbar_bottom: bool,
+    #[serde(default)]
+    pub mirror_toolbar_left: bool,
     /// No pop-ups for phone notifications while this PC is locked.
     #[serde(default, alias = "quiet_when_locked")]
     pub quiet_when_locked: bool,
@@ -518,6 +680,13 @@ pub struct Settings {
     /// Battery charge level percent to treat as "full" for alerts (default `100`, or `80` for battery protection mode).
     #[serde(default = "default_battery_full_threshold", alias = "battery_full_threshold")]
     pub battery_full_threshold: u8,
+    /// How much of a phone's sound is held before it plays, in ms: more
+    /// survives a busy Wi-Fi, less is closer to live.
+    #[serde(default = "default_sound_buffer_ms", alias = "phone_sound_buffer_ms")]
+    pub phone_sound_buffer_ms: u16,
+    /// The battery level that counts as low, in percent (default 15).
+    #[serde(default = "default_battery_low_threshold", alias = "battery_low_threshold")]
+    pub battery_low_threshold: u8,
     /// How big the app draws, in percent of normal ([`UI_SCALES`]). Read when
     /// the app starts.
     #[serde(default = "default_ui_scale", alias = "ui_scale")]
@@ -532,6 +701,9 @@ pub struct Settings {
         alias = "device_nicknames"
     )]
     pub device_nicknames: std::collections::HashMap<String, String>,
+    /// Apps pinned to the top of Apps (#477), by device ID: package names.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty", alias = "pinned_apps")]
+    pub pinned_apps: std::collections::HashMap<String, Vec<String>>,
     /// Start when the user signs in. Unset until the user chooses: then an
     /// installed copy starts with Windows and a build run from its folder
     /// doesn't.
@@ -552,12 +724,19 @@ pub struct Settings {
     /// Horizontally mirror the webcam video.
     #[serde(alias = "webcam_mirror")]
     pub webcam_mirror: bool,
+    /// Turn the phone's torch on when the webcam starts with the back camera (#353).
+    #[serde(default)]
+    pub webcam_torch: bool,
     /// Where a phone's microphone plays (an output endpoint ID; `None`: a
     /// virtual audio cable if there is one, else the default output).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone_mic_output: Option<String>,
     /// How loud a phone's microphone plays, in percent (50 to 400).
     pub phone_mic_gain: u32,
+    /// The microphone a phone call records on this PC (an input endpoint ID;
+    /// `None`: Windows' default communications microphone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_mic: Option<String>,
     /// Which phone camera lens to stream (`"back"` or `"front"`).
     #[serde(default = "default_webcam_camera", alias = "webcam_camera")]
     pub webcam_camera: String,
@@ -582,6 +761,15 @@ pub struct Settings {
     /// TCP port on `127.0.0.1` for the localhost automation API.
     #[serde(default = "default_local_api_port", alias = "local_api_port")]
     pub local_api_port: u16,
+    /// Whether the local API may also hand out the phone's notifications and
+    /// conversations (`GET /v1/notifications`, `GET /v1/messages`); off by default.
+    #[serde(default, alias = "local_api_private")]
+    pub local_api_private: bool,
+    /// Whether AI agents may use NectarLink through MCP, the CLI or the v2
+    /// API (off by default; see `crate::agents`).
+    pub agent_access_enabled: bool,
+    /// Every agent is read-only, whatever its own permissions say.
+    pub agent_read_only: bool,
     /// Automatically place small incoming received files onto the Windows clipboard (`CF_HDROP`).
     #[serde(default = "default_true", alias = "clipboard_auto_copy_received_files")]
     pub clipboard_auto_copy_received_files: bool,
@@ -596,14 +784,36 @@ pub struct Settings {
     /// What password managers mark private also goes to phones.
     #[serde(default, alias = "sync_passwords")]
     pub sync_passwords: bool,
+    /// Pausing pop-ups lasts across restarts until it's resumed (#442).
+    #[serde(default, alias = "keep_popups_paused")]
+    pub keep_popups_paused: bool,
+    /// Whether pop-ups were paused, kept only with `keep_popups_paused`.
+    #[serde(default, alias = "popups_paused")]
+    pub popups_paused: bool,
+    /// Use phones' USB debugging (adb) for USB features; off, never ask (#439).
+    #[serde(default = "default_true", alias = "usb_debugging")]
+    pub usb_debugging: bool,
+    /// How many days notification history is kept: 1, 3, 7 or 30 (#442).
+    #[serde(default = "default_history_days", alias = "notification_history_days")]
+    pub notification_history_days: u32,
     /// "sharper" or "smoother"; anything else is the balanced default. Text, so a
     /// value from a newer version can't stop this file from loading.
     #[serde(default, alias = "mirror_quality")]
     pub mirror_quality: String,
+    /// Frames per second for mirroring and app windows: 30, 60, 90 or 120.
+    #[serde(default = "default_mirror_fps", alias = "mirror_fps")]
+    pub mirror_fps: u32,
     /// Send the PC's clipboard to the phone when control moves to it: the mouse
     /// enters the phone's window, or a remote control session starts.
     #[serde(default = "default_true", alias = "flow_follow_clipboard")]
     pub flow_follow_clipboard: bool,
+    /// The phone beside this PC, for its mouse to go over the edge of the
+    /// screen to (#107): its device ID. Empty: none.
+    #[serde(default, skip_serializing_if = "String::is_empty", alias = "phone_beside")]
+    pub phone_beside: String,
+    /// Which side of the PC it's on: "left" or "right".
+    #[serde(default, skip_serializing_if = "String::is_empty", alias = "phone_beside_side")]
+    pub phone_beside_side: String,
     /// Configured one-way / two-way folder synchronization rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "folder_sync_rules")]
     pub folder_sync_rules: Vec<crate::folder_sync::FolderSyncRule>,
@@ -622,6 +832,16 @@ pub struct Settings {
     /// Trigger Nectar Island for phone notifications.
     #[serde(default, alias = "nectar_island_notifications")]
     pub nectar_island_notifications: bool,
+    /// Where the Island sits along the top (#472): `left`, `center` or `right`.
+    #[serde(default = "default_island_position", alias = "nectar_island_position")]
+    pub nectar_island_position: String,
+    /// The Island always dark (`dark`), or following the app's light or dark
+    /// look (`theme`, #325).
+    #[serde(default = "default_island_look", alias = "nectar_island_look")]
+    pub nectar_island_look: String,
+    /// The Island also shows what plays on this PC (#472).
+    #[serde(default, alias = "nectar_island_pc_media")]
+    pub nectar_island_pc_media: bool,
     /// Configured "When X, Do Y" automation rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "automation_rules")]
     pub automation_rules: Vec<crate::automations::AutomationRule>,
@@ -661,6 +881,18 @@ pub struct Settings {
     /// Minutes the window has been in use, up to when a new install is asked.
     #[serde(default, alias = "star_prompt_minutes")]
     pub star_prompt_minutes: u32,
+    /// The ask to join the Discord server ended: joined, or dismissed three times.
+    #[serde(default)]
+    pub community_prompt_done: bool,
+    /// An update armed the ask, for when the window is next in use.
+    #[serde(default)]
+    pub community_prompt_due: bool,
+    /// How many times it was shown.
+    #[serde(default)]
+    pub community_prompt_count: u32,
+    /// When it was last armed (Unix seconds), so it comes at most once a month.
+    #[serde(default)]
+    pub community_prompt_at: u64,
     /// OBS Studio's WebSocket port, for `obs:` Deck commands.
     pub obs_port: u16,
     /// OBS's WebSocket password, encrypted with Windows DPAPI (base64). Never stored in clear.
@@ -685,7 +917,28 @@ pub struct Settings {
     pub window_maximized: bool,
 }
 
+/// The ask to join Discord comes at most once in this long.
+pub const COMMUNITY_PROMPT_EVERY_SECS: u64 = 30 * 24 * 60 * 60;
+/// And stops for good after it was shown this many times.
+pub const COMMUNITY_PROMPT_TIMES: u32 = 3;
+
 impl Settings {
+    /// After an update, the ask to join Discord is armed: unless it ended,
+    /// was shown three times, or came less than a month ago. Never on a new
+    /// install. Whether anything changed.
+    pub fn ask_to_join_after_update(&mut self, now_secs: u64) -> bool {
+        if self.community_prompt_done
+            || self.community_prompt_due
+            || self.community_prompt_count >= COMMUNITY_PROMPT_TIMES
+            || now_secs.saturating_sub(self.community_prompt_at) < COMMUNITY_PROMPT_EVERY_SECS
+        {
+            return false;
+        }
+        self.community_prompt_due = true;
+        self.community_prompt_at = now_secs;
+        true
+    }
+
     /// Someone who updated is asked for a star right away, unless they already
     /// answered: an answer stays through every update. Whether anything changed.
     pub fn ask_for_star_after_update(&mut self) -> bool {
@@ -708,6 +961,7 @@ impl Default for Settings {
             comb_motion: true,
             noctalia_colors: None,
             close_to_tray: default_close_to_tray(),
+            tray_one_colour: false,
             auto_clipboard: true,
             clipboard_history: true,
             suggest_clipboard_actions: true,
@@ -718,6 +972,9 @@ impl Default for Settings {
             sync_dnd: false,
             enter_sends: false,
             right_click_long_press: false,
+            hide_mirror_toolbar: false,
+            mirror_toolbar_bottom: false,
+            mirror_toolbar_left: false,
             quiet_when_locked: false,
             hold_when_locked: false,
             send_to_menu: true,
@@ -726,18 +983,23 @@ impl Default for Settings {
             update_channel: String::new(),
             battery_alerts: true,
             battery_full_threshold: default_battery_full_threshold(),
+            battery_low_threshold: default_battery_low_threshold(),
+            phone_sound_buffer_ms: default_sound_buffer_ms(),
             ui_scale: default_ui_scale(),
             keep_screen_off: Vec::new(),
             device_nicknames: std::collections::HashMap::new(),
+            pinned_apps: std::collections::HashMap::new(),
             start_with_windows: None,
             recordings_folder: None,
             recordings_format: RecordingFormat::default(),
             webcam_phone: None,
             webcam_height: 720,
             webcam_mirror: false,
+            webcam_torch: false,
             webcam_camera: default_webcam_camera(),
             phone_mic_output: None,
             phone_mic_gain: crate::phone_mic::DEFAULT_GAIN,
+            call_mic: None,
             timeline_retention_days: 90,
             continuity_photo_hotkey: "Ctrl+Alt+C".into(),
             continuity_scan_hotkey: "Ctrl+Alt+D".into(),
@@ -745,18 +1007,31 @@ impl Default for Settings {
             shelf_hotkey: "Ctrl+Alt+S".into(),
             local_api_enabled: false,
             local_api_port: default_local_api_port(),
+            local_api_private: false,
+            agent_access_enabled: false,
+            agent_read_only: false,
             clipboard_auto_copy_received_files: true,
             open_shared_files: false,
             sync_wifi_only: false,
             sync_passwords: false,
+            keep_popups_paused: false,
+            popups_paused: false,
+            usb_debugging: true,
+            notification_history_days: 1,
             mirror_quality: String::new(),
+            mirror_fps: 60,
             flow_follow_clipboard: true,
+            phone_beside: String::new(),
+            phone_beside_side: String::new(),
             folder_sync_rules: Vec::new(),
             nectar_island: false,
             nectar_island_calls: true,
             nectar_island_transfers: true,
             nectar_island_media: true,
             nectar_island_notifications: false,
+            nectar_island_position: default_island_position(),
+            nectar_island_look: default_island_look(),
+            nectar_island_pc_media: false,
             automation_rules: Vec::new(),
             stream_pc_audio_to_phone: false,
             share_pc_storage: false,
@@ -770,6 +1045,10 @@ impl Default for Settings {
             star_prompt_done: false,
             star_prompt_updated: false,
             star_prompt_minutes: 0,
+            community_prompt_done: false,
+            community_prompt_due: false,
+            community_prompt_count: 0,
+            community_prompt_at: 0,
             obs_port: crate::obs::DEFAULT_PORT,
             obs_password: None,
             window_screen: None,
@@ -800,10 +1079,6 @@ impl Settings {
             self.window_x = None;
             self.window_y = None;
         }
-        #[cfg(target_os = "macos")]
-        {
-            self.close_to_tray = false;
-        }
         self
     }
 
@@ -820,12 +1095,19 @@ impl Settings {
     }
 
     pub fn apply_runtime(&self) {
+        #[cfg(windows)]
+        crate::win::tray::set_one_colour(self.tray_one_colour);
         set_clipboard_auto_copy_received_files(self.clipboard_auto_copy_received_files);
         set_open_shared_files(self.open_shared_files);
         set_sync_wifi_only(self.sync_wifi_only);
         set_sync_passwords(self.sync_passwords);
+        set_keep_popups_paused(self.keep_popups_paused);
+        set_usb_debugging(self.usb_debugging);
+        crate::state::set_history_days(self.notification_history_days);
         set_mirror_quality(&self.mirror_quality);
+        set_mirror_fps(self.mirror_fps);
         set_flow_follow_clipboard(self.flow_follow_clipboard);
+        set_phone_beside(&self.phone_beside, &self.phone_beside_side);
         set_folder_sync_rules(self.folder_sync_rules.clone());
         set_obs_settings(
             if self.obs_port == 0 { crate::obs::DEFAULT_PORT } else { self.obs_port },
@@ -838,8 +1120,11 @@ impl Settings {
         set_forward_pc_notifications_to_phone(self.forward_pc_notifications_to_phone);
         set_away_mode(self.away_mode);
         set_battery_full_threshold(self.battery_full_threshold);
+        set_battery_low_threshold(self.battery_low_threshold);
+        set_phone_sound_buffer_ms(self.phone_sound_buffer_ms);
         set_keep_screen_off_phones(self.keep_screen_off.clone());
         set_device_nicknames(self.device_nicknames.clone());
+        set_pinned_apps_all(self.pinned_apps.clone());
         set_window_geometry(
             self.window_screen.clone(),
             self.window_x,
@@ -889,8 +1174,19 @@ impl Settings {
 
     /// Saves atomically: a crash mid-write never leaves a half-written file.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        self.save_locked(dir)
+    }
+
+    /// Changes what's saved on disk, read and written under the save lock.
+    pub fn update(dir: &Path, change: impl FnOnce(&mut Settings)) -> std::io::Result<()> {
+        let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Settings::load(dir);
+        change(&mut settings);
+        settings.save_locked(dir)
+    }
+
+    fn save_locked(&self, dir: &Path) -> std::io::Result<()> {
         let path = Self::path(dir);
         let tmp = path.with_extension("json.tmp");
         {
@@ -926,6 +1222,24 @@ pub(crate) fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pins_keep_their_order_and_unpin_cleanly() {
+        set_pinned_apps_all(std::collections::HashMap::new());
+        set_app_pinned("phone", "com.a", true);
+        set_app_pinned("phone", "com.b", true);
+        set_app_pinned("phone", "com.a", true);
+        assert_eq!(pinned_apps("phone"), ["com.b", "com.a"]);
+        set_app_pinned("phone", "com.b", false);
+        set_app_pinned("phone", "com.a", false);
+        assert!(pinned_apps("phone").is_empty());
+        assert!(!pinned_apps_all().contains_key("phone"));
+        for i in 0..MAX_PINNED_APPS + 5 {
+            set_app_pinned("phone", &format!("com.p{i}"), true);
+        }
+        assert_eq!(pinned_apps("phone").len(), MAX_PINNED_APPS);
+        set_pinned_apps_all(std::collections::HashMap::new());
+    }
 
     #[test]
     fn every_theme_keeps_its_name() {
@@ -968,6 +1282,21 @@ mod tests {
         assert!(new.star_prompt_updated);
         assert!(!new.ask_for_star_after_update(), "nothing more to save the next time");
 
+        // The ask to join Discord: after an update, once a month, three times at most.
+        let month = COMMUNITY_PROMPT_EVERY_SECS;
+        let mut s = Settings::default();
+        assert!(s.ask_to_join_after_update(month));
+        assert!(!s.ask_to_join_after_update(month + 1), "already due");
+        s.community_prompt_due = false;
+        s.community_prompt_count = 1;
+        assert!(!s.ask_to_join_after_update(month + 10), "not again within a month");
+        assert!(s.ask_to_join_after_update(2 * month));
+        s.community_prompt_due = false;
+        s.community_prompt_count = COMMUNITY_PROMPT_TIMES;
+        assert!(!s.ask_to_join_after_update(10 * month), "three times at most");
+        let joined = Settings { community_prompt_done: true, ..Settings::default() };
+        assert!(!{ joined }.ask_to_join_after_update(10 * month));
+
         let mut answered = Settings { star_prompt_done: true, ..Settings::default() };
         assert!(!answered.ask_for_star_after_update());
         assert!(!answered.star_prompt_updated);
@@ -998,6 +1327,7 @@ mod tests {
         assert_eq!(def.command_palette_hotkey, "Ctrl+Alt+Space");
         assert_eq!(def.shelf_hotkey, "Ctrl+Alt+S");
         assert!(!def.local_api_enabled);
+        assert!(!def.local_api_private);
         assert_eq!(def.local_api_port, 53320);
         def.apply_runtime();
         assert!(flow_follow_clipboard());
@@ -1013,6 +1343,7 @@ mod tests {
             comb_motion: false,
             noctalia_colors: Some(false),
             close_to_tray: false,
+            tray_one_colour: true,
             auto_clipboard: false,
             clipboard_history: false,
             suggest_clipboard_actions: false,
@@ -1023,6 +1354,9 @@ mod tests {
             sync_dnd: true,
             enter_sends: true,
             right_click_long_press: true,
+            hide_mirror_toolbar: true,
+            mirror_toolbar_bottom: true,
+            mirror_toolbar_left: true,
             quiet_when_locked: true,
             hold_when_locked: true,
             send_to_menu: false,
@@ -1031,18 +1365,26 @@ mod tests {
             update_channel: "nightly".into(),
             battery_alerts: false,
             battery_full_threshold: 80,
+            battery_low_threshold: 10,
+            phone_sound_buffer_ms: 200,
             ui_scale: 125,
             keep_screen_off: vec!["abc".to_owned()],
             device_nicknames: std::collections::HashMap::from([("abc".to_owned(), "Work phone".to_owned())]),
+            pinned_apps: std::collections::HashMap::from([(
+                "abc".to_owned(),
+                vec!["com.example.notes".to_owned()],
+            )]),
             start_with_windows: Some(true),
             recordings_folder: Some(PathBuf::from(r"C:\Recordings")),
             recordings_format: RecordingFormat::Flac,
             webcam_phone: Some("0101".repeat(16)),
             webcam_height: 2160,
             webcam_mirror: true,
+            webcam_torch: true,
             webcam_camera: "front".into(),
             phone_mic_output: Some("{0.0.0.00000000}.{cable}".into()),
             phone_mic_gain: 250,
+            call_mic: Some("{0.0.1.00000000}.{headset}".into()),
             timeline_retention_days: 30,
             continuity_photo_hotkey: "Ctrl+Alt+P".into(),
             continuity_scan_hotkey: "Ctrl+Alt+S".into(),
@@ -1050,18 +1392,31 @@ mod tests {
             shelf_hotkey: "Ctrl+Alt+E".into(),
             local_api_enabled: true,
             local_api_port: 54321,
+            local_api_private: true,
+            agent_access_enabled: true,
+            agent_read_only: true,
             clipboard_auto_copy_received_files: false,
             open_shared_files: true,
             sync_wifi_only: true,
             sync_passwords: true,
+            keep_popups_paused: true,
+            popups_paused: true,
+            usb_debugging: false,
+            notification_history_days: 7,
             mirror_quality: "sharper".into(),
+            mirror_fps: 120,
             flow_follow_clipboard: false,
+            phone_beside: String::new(),
+            phone_beside_side: String::new(),
             folder_sync_rules: Vec::new(),
             nectar_island: true,
             nectar_island_calls: true,
             nectar_island_transfers: true,
             nectar_island_media: true,
             nectar_island_notifications: false,
+            nectar_island_position: "right".into(),
+            nectar_island_look: "theme".into(),
+            nectar_island_pc_media: true,
             automation_rules: Vec::new(),
             stream_pc_audio_to_phone: true,
             share_pc_storage: true,
@@ -1075,6 +1430,10 @@ mod tests {
             star_prompt_done: true,
             star_prompt_updated: true,
             star_prompt_minutes: 3,
+            community_prompt_done: false,
+            community_prompt_due: true,
+            community_prompt_count: 2,
+            community_prompt_at: 1_700_000_000,
             obs_port: crate::obs::DEFAULT_PORT,
             obs_password: None,
             window_screen: Some("DP-1".into()),

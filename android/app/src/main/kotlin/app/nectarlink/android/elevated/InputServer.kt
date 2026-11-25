@@ -38,6 +38,10 @@ import kotlin.concurrent.thread
  * the app there and streams the display's video back on that connection
  * (see [AppDisplay]); a `K` line asks for a keyframe; closing the
  * connection closes the window.
+ *
+ * A first line of `A` streams the phone's sound instead, `CALL` carries the
+ * call in progress both ways, and `CALLCHECK` says whether this phone lets it
+ * (see [CallAudio]).
  */
 /**
  * Compiles NectarLink ahead of time from its startup profile, as Android does
@@ -76,47 +80,88 @@ object InputServer {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var controlOut: java.io.Writer? = null
     @Volatile private var displayTurnedOff = false
+    /** The phone was asleep and was woken, dark, for app windows (#483): it sleeps again after them. */
+    @Volatile private var wokenForWindows = false
+    private var lastWokenForWindows = 0L
+    private const val WAKE_SETTLE_MS = 2_000L
     @Volatile private var savedBrightness: Int? = null
+
+    /** The only fixed shell commands the app may run through the helper. */
+    private val allowedCommands = setOf(
+        "cmd statusbar expand-notifications",
+        "svc wifi enable",
+        "svc wifi disable",
+        "svc bluetooth enable",
+        "svc bluetooth disable",
+        "hotspot on",
+        "hotspot off",
+        "cmd wifi start-softap",
+        "cmd wifi stop-softap",
+        // Pause for banking apps: seeing which app is in front.
+        "appops set $PKG GET_USAGE_STATS allow",
+        // Fast starts right after an install or update.
+        COMPILE_APP_COMMAND,
+        // Start without asking: the camera or microphone a chosen PC asked for.
+        app.nectarlink.android.service.PcAutoStart.OPEN_COMMAND,
+    )
+
+
+    private const val BRIGHTNESS_PREFIX = "settings put system screen_brightness "
+    // Rotate from the PC (#473): held while mirrored, then put back.
+    private const val AUTO_ROTATE_PREFIX = "settings put system accelerometer_rotation "
+    private const val ROTATION_PREFIX = "settings put system user_rotation "
+    private const val UNINSTALL_PREFIX = "pm uninstall "
+
+    /**
+     * Whether the app may run [cmd] through the helper: one of [allowedCommands],
+     * a screen brightness, the screen's rotation, or uninstalling another app (a PC asked, D349), never
+     * NectarLink itself.
+     */
+    internal fun isAllowedCommand(cmd: String): Boolean {
+        if (cmd in allowedCommands) return true
+        if (cmd.startsWith(BRIGHTNESS_PREFIX)) {
+            val v = cmd.removePrefix(BRIGHTNESS_PREFIX).toIntOrNull()
+            return v != null && v in 0..255
+        }
+        if (cmd.startsWith(AUTO_ROTATE_PREFIX)) {
+            return cmd.removePrefix(AUTO_ROTATE_PREFIX) in setOf("0", "1")
+        }
+        if (cmd.startsWith(ROTATION_PREFIX)) {
+            return cmd.removePrefix(ROTATION_PREFIX) in setOf("0", "1", "2", "3")
+        }
+        if (cmd.startsWith(UNINSTALL_PREFIX)) {
+            val pkg = cmd.removePrefix(UNINSTALL_PREFIX)
+            return app.nectarlink.services.client.NectarlinkServiceContract.isAllowedUninstallPackage(pkg)
+        }
+        return false
+    }
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val rawArg = args.getOrNull(0)
-        val attach = rawArg == null || rawArg == "--attach"
-        val token = if (attach) {
-            ByteArray(24).also(java.security.SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
-        } else {
-            rawArg
-        }
+        // The app that starts the helper (over adb, USB or Shizuku) passes the
+        // token it will present; nothing else may connect.
+        val token = args.getOrNull(0)?.takeIf { it.length in 32..64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+            ?: return fail("usage: InputServer <token>")
         grantAppOps()
+        // A helper that stopped while the PC's mouse was here left the
+        // pointer's acceleration off.
+        PointerFlow.restoreAcceleration()
         startClipboardWatcher()
+        // No window is open yet: an association left by a helper that was killed goes.
+        Thread { VirtualDevice.forget() }.start()
         val injector = runCatching { Injector() }.getOrElse { return fail("can't inject input: $it") }
         val server = runCatching { ServerSocket(0, 8, InetAddress.getLoopbackAddress()) }.getOrElse { return fail("can't listen: $it") }
         serverSocket = server
         println("ready ${server.localPort}")
         System.out.flush()
-        if (attach) {
-            runCatching {
-                Runtime.getRuntime().exec(
-                    arrayOf(
-                        "am",
-                        "broadcast",
-                        "--include-stopped-packages",
-                        "-n",
-                        "$PKG/${Elevated.AttachReceiver::class.java.name}",
-                        "--ei",
-                        "port",
-                        server.localPort.toString(),
-                        "--es",
-                        "token",
-                        token,
-                    ),
-                ).waitFor()
-            }
-        }
         while (!server.isClosed) {
             val client = runCatching { server.accept() }.getOrNull() ?: continue
             try {
-                clientPool.execute { serve(client, token, injector) }
+                clientPool.execute {
+                    // One connection failing (an Android audio bug, #518) must
+                    // not take the helper, and so input and mirroring, with it.
+                    runCatching { serve(client, token, injector) }.onFailure { System.err.println("connection failed: $it") }
+                }
             } catch (_: java.util.concurrent.RejectedExecutionException) {
                 runCatching { client.close() }
             }
@@ -334,9 +379,12 @@ object InputServer {
 
     private fun shutdown() {
         runCatching { serverSocket?.close() }
+        runCatching { PointerFlow.stop() }
         runCatching { UhidBridge.closeAll() }
         val open = synchronized(windows) { windows.toList().also { windows.clear() } }
         open.forEach { runCatching { it.stop() } }
+        // The windows' own cleanup won't run before the exit: their association goes here.
+        if (open.isNotEmpty()) VirtualDevice.forget()
         kotlin.system.exitProcess(0)
     }
 
@@ -360,13 +408,19 @@ object InputServer {
             client.tcpNoDelay = true
             client.soTimeout = AUTH_TIMEOUT_MS
             val reader = client.inputStream.bufferedReader()
+            var given = runCatching { reader.nextLine(MAX_TOKEN_CHARS) }.getOrNull() ?: return
+            // The app first checks this is the helper it started (HelperProof).
+            if (runCatching { HelperProof.answerIfChallenge(given, token, client.getOutputStream()) }.getOrElse { return }) {
+                given = runCatching { reader.nextLine(MAX_TOKEN_CHARS) }.getOrNull() ?: return
+            }
             // Compared in constant time: the token is the only key.
-            val given = runCatching { reader.nextLine(MAX_TOKEN_CHARS) }.getOrNull() ?: return
             if (!MessageDigest.isEqual(given.toByteArray(), token.toByteArray())) return
             val first = runCatching { reader.nextLine(MAX_LINE_CHARS) }.getOrNull()
             client.soTimeout = 0
             if (first != null && first.startsWith("V ")) return appWindow(client, first, reader)
             if (first == "A") return streamDeviceAudio(client.getOutputStream(), injector)
+            if (first == "CALL") return CallAudio.serve(client)
+            if (first == "CALLCHECK") return CallAudio.check(client)
             val writer = java.io.OutputStreamWriter(client.getOutputStream(), Charsets.UTF_8)
             controlOut = writer
             blockedReported = false
@@ -464,6 +518,11 @@ object InputServer {
             }
         } catch (_: java.io.IOException) {
             // Client disconnected.
+        } catch (e: RuntimeException) {
+            // Some phones can't capture the submix from here (startRecording
+            // throws on Android 17 MagicOS, #518): the phone's sound stays
+            // off and the screen still mirrors.
+            System.err.println("device audio unavailable: $e")
         } finally {
             runCatching { recorder.stop() }
             runCatching { recorder.release() }
@@ -686,7 +745,7 @@ object InputServer {
         val pkg = parts.getOrNull(6)?.takeIf { it == "-" || PACKAGE.matches(it) } ?: return
         val codec = parts.getOrNull(7)?.takeIf { it in setOf("h264", "h265", "av1") } ?: "h264"
         if (width !in 16..4096 || height !in 16..4096 || dpi !in 72..1000) return
-        val window = AppDisplay(width, height, dpi, bitrate.coerceIn(500_000, 40_000_000), fps.coerceIn(1, 120), codec)
+        val window = AppDisplay(width, height, dpi, bitrate.coerceIn(500_000, 40_000_000), fps.coerceIn(1, 120), codec, ::wakeForWindow)
         windows.add(window)
         // Further lines: keyframe or resize requests; the end of them closes the window.
         Thread {
@@ -723,7 +782,48 @@ object InputServer {
         } finally {
             windows.remove(window)
             window.stop()
+            if (windows.isEmpty()) sleepAfterWindows()
         }
+    }
+
+    /**
+     * Wakes the phone for a window on a plain display, which sleeps with it
+     * (#152) and takes no input while it's asleep (#483). WAKEUP does nothing
+     * to a phone that's awake. A phone that was asleep stays dark: its own
+     * screen goes off at once and it stays locked, so it looks asleep while
+     * the window works. Asleep again while dark means its power button was
+     * pressed to see it, so then it lights up as usual. A panel turned off
+     * for the PC goes back off.
+     */
+    @Synchronized
+    private fun wakeForWindow() {
+        // Each window checks on its own, and waking takes a moment to show.
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastWokenForWindows < WAKE_SETTLE_MS) return
+        val wasAsleep = UserActivity.interactive()?.invoke() == false
+        if (wasAsleep) lastWokenForWindows = now
+        runCatching { Runtime.getRuntime().exec(arrayOf("input", "keyevent", "KEYCODE_WAKEUP")).waitFor() }
+        when {
+            wokenForWindows && wasAsleep -> {
+                wokenForWindows = false
+                runCatching { setDisplayPower(true) }
+            }
+            displayTurnedOff -> runCatching { setDisplayPower(false) }
+            wasAsleep -> {
+                wokenForWindows = true
+                runCatching { setDisplayPower(false) }
+            }
+        }
+    }
+
+    /** The last window closed: a phone woken for windows goes back to sleep, as it was. */
+    @Synchronized
+    private fun sleepAfterWindows() {
+        if (!wokenForWindows) return
+        wokenForWindows = false
+        // The panel's own power first, or it would stay off the next time the phone wakes.
+        runCatching { setDisplayPower(true) }
+        runCatching { Runtime.getRuntime().exec(arrayOf("input", "keyevent", "KEYCODE_SLEEP")).waitFor() }
     }
 
     private val PACKAGE = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
@@ -772,6 +872,16 @@ object InputServer {
                     val (code, meta) = rest.split(' ').map { it.toInt() }
                     shortcut(code, meta)
                 }
+                "FS" -> if (display < 0) {
+                    val (edge, y) = rest.split(' ')
+                    reply(PointerFlow.start(edge, y.toFloat()))
+                }
+                "FM" -> {
+                    val (dx, dy, buttons, wheel) = rest.split(' ').map { it.toInt() }
+                    PointerFlow.move(dx, dy, buttons, wheel)
+                }
+                "FW" -> reply(PointerFlow.where())
+                "FX" -> PointerFlow.stop()
                 "T" -> type(rest)
                 "G" -> gamepad(rest)
                 "C" -> if (allowedCommand(rest) && display < 0) {
@@ -786,6 +896,15 @@ object InputServer {
                 "P" -> if (display < 0) setDisplayPower(rest.trim() != "0")
                 "B" -> if (display < 0) setClipboard(rest)
                 "X" -> if (display < 0) clearClipboard(rest)
+            }
+        }
+
+        /** A line back to the app, on the connection that asked. */
+        private fun reply(line: String) {
+            val out = controlOut ?: return
+            synchronized(out) {
+                out.write(line + "\n")
+                out.flush()
             }
         }
 
@@ -906,8 +1025,7 @@ object InputServer {
             val changed = buttons xor lastGamepadButtons
             lastGamepadButtons = buttons
 
-            for ((bit, keyCode) in GAMEPAD_BUTTON_KEYCODES) {
-                val mask = 1 shl bit
+            for ((mask, keyCode) in GamepadMapping.KEYCODES) {
                 if ((changed and mask) != 0) {
                     val action = if ((buttons and mask) != 0) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
                     send(
@@ -929,16 +1047,7 @@ object InputServer {
 
             fun normAxis(v: Int): Float = (v.coerceIn(-32767, 32767) / 32767f)
             fun normTrigger(v: Int): Float = (v.coerceIn(0, 255) / 255f)
-            val hatX = when {
-                (buttons and (1 shl 13)) != 0 -> 1f
-                (buttons and (1 shl 12)) != 0 -> -1f
-                else -> 0f
-            }
-            val hatY = when {
-                (buttons and (1 shl 11)) != 0 -> 1f
-                (buttons and (1 shl 10)) != 0 -> -1f
-                else -> 0f
-            }
+            val (hatX, hatY) = GamepadMapping.hatAxes(buttons)
 
             val properties = arrayOf(
                 MotionEvent.PointerProperties().apply {
@@ -949,13 +1058,13 @@ object InputServer {
             val coords = arrayOf(
                 MotionEvent.PointerCoords().apply {
                     setAxisValue(MotionEvent.AXIS_X, normAxis(lx))
-                    setAxisValue(MotionEvent.AXIS_Y, normAxis(ly))
+                    setAxisValue(MotionEvent.AXIS_Y, normAxis(GamepadMapping.stickY(ly)))
                     setAxisValue(MotionEvent.AXIS_Z, normAxis(rx))
-                    setAxisValue(MotionEvent.AXIS_RZ, normAxis(ry))
+                    setAxisValue(MotionEvent.AXIS_RZ, normAxis(GamepadMapping.stickY(ry)))
                     setAxisValue(MotionEvent.AXIS_LTRIGGER, normTrigger(lt))
                     setAxisValue(MotionEvent.AXIS_RTRIGGER, normTrigger(rt))
-                    setAxisValue(MotionEvent.AXIS_HAT_X, hatX)
-                    setAxisValue(MotionEvent.AXIS_HAT_Y, hatY)
+                    setAxisValue(MotionEvent.AXIS_HAT_X, hatX.toFloat())
+                    setAxisValue(MotionEvent.AXIS_HAT_Y, hatY.toFloat())
                 },
             )
             val motion = MotionEvent.obtain(
@@ -1001,55 +1110,8 @@ object InputServer {
             }
         }
 
-        private fun allowedCommand(cmd: String): Boolean {
-            if (cmd in allowed) return true
-            if (cmd.startsWith(BRIGHTNESS_PREFIX)) {
-                val v = cmd.removePrefix(BRIGHTNESS_PREFIX).toIntOrNull()
-                return v != null && v in 0..255
-            }
-            return false
-        }
+        private fun allowedCommand(cmd: String): Boolean = isAllowedCommand(cmd)
 
-        /** The only shell commands the app may run through this. */
-        private val allowed = setOf(
-            "cmd statusbar expand-notifications",
-            "svc wifi enable",
-            "svc wifi disable",
-            "svc bluetooth enable",
-            "svc bluetooth disable",
-            "hotspot on",
-            "hotspot off",
-            "cmd wifi start-softap",
-            "cmd wifi stop-softap",
-            // Pause for banking apps: seeing which app is in front.
-            "appops set $PKG GET_USAGE_STATS allow",
-            // Fast starts right after an install or update.
-            COMPILE_APP_COMMAND,
-            // Start without asking: the camera or microphone a chosen PC asked for.
-            app.nectarlink.android.service.PcAutoStart.OPEN_COMMAND,
-        )
-
-        private companion object {
-            const val BRIGHTNESS_PREFIX = "settings put system screen_brightness "
-
-            val GAMEPAD_BUTTON_KEYCODES = listOf(
-                0 to KeyEvent.KEYCODE_BUTTON_A,
-                1 to KeyEvent.KEYCODE_BUTTON_B,
-                2 to KeyEvent.KEYCODE_BUTTON_X,
-                3 to KeyEvent.KEYCODE_BUTTON_Y,
-                4 to KeyEvent.KEYCODE_BUTTON_L1,
-                5 to KeyEvent.KEYCODE_BUTTON_R1,
-                6 to KeyEvent.KEYCODE_BUTTON_SELECT,
-                7 to KeyEvent.KEYCODE_BUTTON_START,
-                8 to KeyEvent.KEYCODE_BUTTON_THUMBL,
-                9 to KeyEvent.KEYCODE_BUTTON_THUMBR,
-                10 to KeyEvent.KEYCODE_DPAD_UP,
-                11 to KeyEvent.KEYCODE_DPAD_DOWN,
-                12 to KeyEvent.KEYCODE_DPAD_LEFT,
-                13 to KeyEvent.KEYCODE_DPAD_RIGHT,
-                14 to KeyEvent.KEYCODE_BUTTON_MODE,
-            )
-        }
     }
 
     /**
@@ -1065,8 +1127,8 @@ object InputServer {
         private const val UHID_EVENT_SIZE = 4380
         private const val BUS_USB = 0x03
 
-        // 12-byte HID gamepad report descriptor:
-        // [buttonsLo, buttonsHi, lxLo, lxHi, lyLo, lyHi, rxLo, rxHi, ryLo, ryHi, lt, rt]
+        // 13-byte HID gamepad report (see GamepadMapping for the button order):
+        // [buttonsLo, buttonsHi, hat (low 4 bits), lxLo, lxHi, lyLo, lyHi, rxLo, rxHi, ryLo, ryHi, lt, rt]
         private val GAMEPAD_RD = byteArrayOf(
             0x05, 0x01, // Usage Page (Generic Desktop)
             0x09, 0x05, // Usage (Game Pad)
@@ -1080,6 +1142,20 @@ object InputServer {
             0x95.toByte(), 0x10, //   Report Count (16)
             0x81.toByte(), 0x02, //   Input (Data, Variable, Absolute)
             0x05, 0x01, //   Usage Page (Generic Desktop)
+            0x09, 0x39, //   Usage (Hat switch)
+            0x15, 0x00, //   Logical Minimum (0)
+            0x25, 0x07, //   Logical Maximum (7)
+            0x35, 0x00, //   Physical Minimum (0)
+            0x46, 0x3B, 0x01, // Physical Maximum (315)
+            0x65, 0x14, //   Unit (degrees)
+            0x75, 0x04, //   Report Size (4)
+            0x95.toByte(), 0x01, //   Report Count (1)
+            0x81.toByte(), 0x42, //   Input (Data, Variable, Absolute, Null state)
+            0x65, 0x00, //   Unit (none)
+            0x45, 0x00, //   Physical Maximum (0)
+            0x75, 0x04, //   Report Size (4)
+            0x95.toByte(), 0x01, //   Report Count (1)
+            0x81.toByte(), 0x03, //   Input (Constant): padding
             0x09, 0x30, //   Usage (X)
             0x09, 0x31, //   Usage (Y)
             0x09, 0x32, //   Usage (Z)
@@ -1153,12 +1229,13 @@ object InputServer {
                 gamepadFd = openDevice("NectarLink Virtual Gamepad", 0x4EE8, GAMEPAD_RD)
             }
             val fd = gamepadFd ?: return false
-            val report = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
-                putShort(buttons.toShort())
+            val report = java.nio.ByteBuffer.allocate(13).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+                putShort(GamepadMapping.hidButtons(buttons).toShort())
+                put(GamepadMapping.hat(buttons).toByte())
                 putShort(lx.coerceIn(-32767, 32767).toShort())
-                putShort(ly.coerceIn(-32767, 32767).toShort())
+                putShort(GamepadMapping.stickY(ly).toShort())
                 putShort(rx.coerceIn(-32767, 32767).toShort())
-                putShort(ry.coerceIn(-32767, 32767).toShort())
+                putShort(GamepadMapping.stickY(ry).toShort())
                 put(lt.coerceIn(0, 255).toByte())
                 put(rt.coerceIn(0, 255).toByte())
             }.array()
@@ -1169,6 +1246,181 @@ object InputServer {
         fun closeAll() {
             gamepadFd?.let(::destroy)
             gamepadFd = null
+            closeMouse()
+        }
+
+        // 4-byte relative mouse: [buttons (3 bits), dx, dy, wheel].
+        private val MOUSE_RD = byteArrayOf(
+            0x05, 0x01, // Usage Page (Generic Desktop)
+            0x09, 0x02, // Usage (Mouse)
+            0xA1.toByte(), 0x01, // Collection (Application)
+            0x09, 0x01, //   Usage (Pointer)
+            0xA1.toByte(), 0x00, //   Collection (Physical)
+            0x05, 0x09, //     Usage Page (Button)
+            0x19, 0x01, //     Usage Minimum (1)
+            0x29, 0x03, //     Usage Maximum (3)
+            0x15, 0x00, //     Logical Minimum (0)
+            0x25, 0x01, //     Logical Maximum (1)
+            0x95.toByte(), 0x03, //     Report Count (3)
+            0x75, 0x01, //     Report Size (1)
+            0x81.toByte(), 0x02, //     Input (Data, Variable, Absolute)
+            0x95.toByte(), 0x01, //     Report Count (1)
+            0x75, 0x05, //     Report Size (5)
+            0x81.toByte(), 0x03, //     Input (Constant)
+            0x05, 0x01, //     Usage Page (Generic Desktop)
+            0x09, 0x30, //     Usage (X)
+            0x09, 0x31, //     Usage (Y)
+            0x09, 0x38, //     Usage (Wheel)
+            0x15, 0x81.toByte(), //     Logical Minimum (-127)
+            0x25, 0x7F, //     Logical Maximum (127)
+            0x75, 0x08, //     Report Size (8)
+            0x95.toByte(), 0x03, //     Report Count (3)
+            0x81.toByte(), 0x06, //     Input (Data, Variable, Relative)
+            0xC0.toByte(), //   End Collection
+            0xC0.toByte(), // End Collection
+        )
+
+        /** The device name, to find its pointer in `dumpsys input`. */
+        const val MOUSE_NAME = "NectarLink Virtual Mouse"
+
+        @Volatile private var mouseFd: java.io.RandomAccessFile? = null
+
+        @Synchronized
+        fun openMouse(): Boolean {
+            if (mouseFd == null) mouseFd = openDevice(MOUSE_NAME, 0x4EE9, MOUSE_RD)
+            return mouseFd != null
+        }
+
+        /** Moves by ([dx], [dy]) counts with [buttons] held, in reports of at most 127 each way. */
+        @Synchronized
+        fun mouse(dx: Int, dy: Int, buttons: Int, wheel: Int): Boolean {
+            val fd = mouseFd ?: return false
+            var x = dx
+            var y = dy
+            var w = wheel
+            do {
+                val sx = x.coerceIn(-127, 127)
+                val sy = y.coerceIn(-127, 127)
+                val sw = w.coerceIn(-127, 127)
+                val report = byteArrayOf((buttons and 0x07).toByte(), sx.toByte(), sy.toByte(), sw.toByte())
+                if (!writeInputReport(fd, report)) return false
+                x -= sx
+                y -= sy
+                w -= sw
+            } while (x != 0 || y != 0 || w != 0)
+            return true
+        }
+
+        @Synchronized
+        fun closeMouse() {
+            mouseFd?.let(::destroy)
+            mouseFd = null
+        }
+    }
+    /**
+     * The PC's mouse on the phone (#107): a virtual USB mouse, so Android
+     * draws its own pointer. Android speeds a mouse up with how fast it moves,
+     * so the PC couldn't tell where the pointer is; while the PC's mouse is
+     * here, pointer acceleration is off (Android 15+'s
+     * `mouse_pointer_acceleration_enabled`, given back after, also after the
+     * helper stopped), and a count then moves the pointer a fixed distance,
+     * measured once at the start.
+     *
+     * Lines: `FS <left|right> <y 0..1>` starts, answered `FI <width> <height>
+     * <pixels per count>` (zeros if it couldn't); `FM <dx> <dy> <buttons>
+     * <wheel>` moves; `FW` is answered `FP <x> <y>` (-1 when unknown); `FX`
+     * stops.
+     */
+    private object PointerFlow {
+        private const val ACCELERATION = "mouse_pointer_acceleration_enabled"
+        private val saved = java.io.File("/data/local/tmp/nectarlink-pointer-acceleration")
+        // The main display's viewport: input devices without a display list
+        // empty frames first.
+        private val FRAME = Regex("""displayId=0,[^\n]*?logicalFrame=\[0, 0, (\d+), (\d+)\]""")
+
+        @Synchronized
+        fun start(edge: String, y: Float): String {
+            saveAcceleration()
+            settings("put", ACCELERATION, "0")
+            if (!UhidBridge.openMouse()) {
+                restoreAcceleration()
+                return "FI 0 0 0"
+            }
+            // A new device may miss its first reports while Android adds it.
+            Thread.sleep(400)
+            val size = screen()
+            // From the top left corner, 100 counts each way tell the scale.
+            UhidBridge.mouse(-127 * 30, -127 * 60, 0, 0)
+            Thread.sleep(80)
+            UhidBridge.mouse(100, 100, 0, 0)
+            Thread.sleep(150)
+            val at = position()
+            if (size == null || at == null || at.first <= 0f) {
+                stop()
+                return "FI 0 0 0"
+            }
+            val (width, height) = size
+            val scale = (at.first + at.second) / 200f
+            // Then to where the PC's mouse came in.
+            UhidBridge.mouse(if (edge == "left") -127 * 30 else 127 * 30, -127 * 60, 0, 0)
+            UhidBridge.mouse(0, (y.coerceIn(0f, 1f) * (height - 1) / scale).toInt(), 0, 0)
+            return "FI $width $height $scale"
+        }
+
+        @Synchronized
+        fun move(dx: Int, dy: Int, buttons: Int, wheel: Int) {
+            UhidBridge.mouse(dx, dy, buttons, wheel)
+        }
+
+        fun where(): String = position()?.let { (x, y) -> "FP $x $y" } ?: "FP -1 -1"
+
+        @Synchronized
+        fun stop() {
+            UhidBridge.closeMouse()
+            restoreAcceleration()
+        }
+
+        private fun saveAcceleration() {
+            if (saved.exists()) return
+            val now = runCatching {
+                val proc = Runtime.getRuntime().exec(arrayOf("settings", "get", "system", ACCELERATION))
+                proc.inputStream.bufferedReader().use { it.readText().trim() }.also { proc.waitFor() }
+            }.getOrDefault("null")
+            runCatching { saved.writeText(now) }
+        }
+
+        /** Gives the user's acceleration setting back, if it was changed. */
+        fun restoreAcceleration() {
+            val was = runCatching { saved.readText().trim() }.getOrNull() ?: return
+            if (was == "null" || was.isEmpty()) settings("delete", ACCELERATION) else settings("put", ACCELERATION, was)
+            saved.delete()
+        }
+
+        private fun settings(vararg args: String) {
+            runCatching { Runtime.getRuntime().exec(arrayOf("settings", args[0], "system") + args.drop(1)).waitFor() }
+        }
+
+        private fun dumpInput(): String? = runCatching {
+            val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "input"))
+            proc.inputStream.bufferedReader().use { it.readText() }.also { proc.waitFor() }
+        }.getOrNull()
+
+        /** The screen's size as the pointer sees it (turned with the phone). */
+        private fun screen(): Pair<Int, Int>? {
+            val dump = dumpInput() ?: return null
+            return FRAME.findAll(dump)
+                .map { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+                .firstOrNull { (w, h) -> w > 0 && h > 0 }
+        }
+
+        /** Where the virtual mouse's pointer is, from `dumpsys input`. */
+        private fun position(): Pair<Float, Float>? {
+            val dump = dumpInput() ?: return null
+            val id = Regex("""Device (\d+): ${Regex.escape(UhidBridge.MOUSE_NAME)}""").find(dump)?.groupValues?.get(1)
+                ?: return null
+            val at = Regex("""DeviceId\($id\):[^\n]*?Pointer\(id=0, MOUSE\) at \(([\d.]+), ([\d.]+)\)""").find(dump)
+                ?: return null
+            return at.groupValues[1].toFloat() to at.groupValues[2].toFloat()
         }
     }
 }

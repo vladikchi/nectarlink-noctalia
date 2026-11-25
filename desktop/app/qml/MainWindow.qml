@@ -13,7 +13,10 @@ NativeWindow {
     readonly property bool welcome: AppController.status !== "ready" || showWalkthrough
     property string page: AppController.currentPage.length > 0 ? AppController.currentPage : "home"
     property string pendingSettingsSection: ""
-    onPageChanged: if (AppController.currentPage !== page) AppController.currentPage = page
+    onPageChanged: {
+        if (AppController.currentPage !== page) AppController.currentPage = page
+        whatsNewLoader.hide()
+    }
     Connections {
         target: AppController
         function onCurrentPageChanged() {
@@ -102,9 +105,11 @@ NativeWindow {
     }
     readonly property int currentDeviceIndex: DeviceList.count > 0
         ? Math.min(Math.max(0, AppController.currentDevice), DeviceList.count - 1) : 0
-    readonly property string currentDeviceId: DeviceList.count > 0
+    // Read again whenever the rows change (revision): a reorder or a rename
+    // keeps the count, and these calls alone wouldn't notice.
+    readonly property string currentDeviceId: DeviceList.count > 0 && DeviceList.revision >= 0
         ? DeviceList.deviceIdAt(currentDeviceIndex) : ""
-    readonly property string currentDeviceName: DeviceList.count > 0
+    readonly property string currentDeviceName: DeviceList.count > 0 && DeviceList.revision >= 0
         ? DeviceList.deviceNameAt(currentDeviceIndex) : ""
 
     minimumWidth: Theme.layout.minWindow[0]
@@ -388,6 +393,8 @@ NativeWindow {
                 AppController.refreshToastsEnabled()
                 if (!window.activeFocusItem && window.contentItem)
                     window.contentItem.forceActiveFocus()
+            } else {
+                whatsNewLoader.hide()
             }
         }
         function onActiveFocusItemChanged() {
@@ -460,6 +467,13 @@ NativeWindow {
         origin: Qt.point(Theme.railWidth / 2, Theme.topBarHeight / 2)
         reach: 2.4
         pulseReach: 1.05
+    }
+
+    // No graphics driver: Windows draws in software, so motion stays off.
+    Binding {
+        target: Theme
+        property: "softwareRendering"
+        value: window.softwareRendering === true
     }
 
     // The comb's clock runs while this window is in front and showing Hive.
@@ -875,6 +889,19 @@ NativeWindow {
                     }
                     Component.onCompleted: window.addCaptionHole(refresh)
                 }
+                // What's new (#461), last on the right; its dot shows after an
+                // update that brought something not seen yet.
+                IconButton {
+                    id: whatsNewBtn
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconPath: Icons.whatsNew
+                    iconSize: 16
+                    label: qsTr("What's new")
+                    dot: AppController.whatsNewPending
+                    tonal: whatsNewLoader.item ? whatsNewLoader.item.opened : false
+                    onClicked: whatsNewLoader.toggle()
+                    Component.onCompleted: window.addCaptionHole(whatsNewBtn)
+                }
             }
         }
 
@@ -994,10 +1021,23 @@ NativeWindow {
         }
     }
 
+    CrashCard {
+        eligible: AppController.status === "ready" && !window.showWalkthrough && window.visible
+    }
+
     StarPrompt {
         eligible: AppController.status === "ready" && !window.showWalkthrough && window.active
-        onStarred: Qt.openUrlExternally("https://github.com/thtbee/nectarlink")
-        onSupported: Qt.openUrlExternally("https://buymeacoffee.com/thtbee_")
+        onStarred: Links.open("repo")
+        onSupported: Links.open("donate")
+    }
+
+    // Now and then after an update, an ask to come chat on Discord: never
+    // while the star prompt or What's new is open, one ask at a time.
+    DiscordPrompt {
+        eligible: AppController.status === "ready" && !window.showWalkthrough && window.active
+            && Preferences.starPromptDone
+            && !(whatsNewLoader.item && whatsNewLoader.item.opened)
+        onJoined: Links.open("discord")
     }
 
     // ---- First run ----
@@ -1048,6 +1088,9 @@ NativeWindow {
             }
         }
     }
+
+    // An AI agent asks the user to approve something (crate::agents).
+    AgentConfirmSheet {}
 
     Sheet {
         id: ringingSheet
@@ -1231,12 +1274,54 @@ NativeWindow {
         anchors.right: parent.right
     }
 
+    // What's new (#461): a panel under the top bar's sparkle button. It
+    // never opens by itself; the button's dot says there's something new.
+    Loader {
+        id: whatsNewLoader
+        anchors.fill: parent
+        z: 120
+        active: false
+        source: active ? "qrc:/qt/qml/app/nectarlink/qml/components/WhatsNewPanel.qml" : ""
+        onLoaded: {
+            item.anchorItem = whatsNewBtn
+            item.open()
+        }
+        function toggle() {
+            if (!active) active = true
+            else if (item && item.opened) item.close()
+            else if (item) item.open()
+        }
+        function hide() { if (item) item.close() }
+    }
+    Connections {
+        target: AppController
+        function onWhatsNewRequested() {
+            if (!whatsNewLoader.item || !whatsNewLoader.item.opened) whatsNewLoader.toggle()
+        }
+    }
+
     Loader {
         id: doctorLoader
         anchors.fill: parent
         active: false
         source: active ? "qrc:/qt/qml/app/nectarlink/qml/components/DoctorSheet.qml" : ""
         onLoaded: item.open()
+    }
+    Loader {
+        id: reportLoader
+        anchors.fill: parent
+        active: false
+        source: active ? "qrc:/qt/qml/app/nectarlink/qml/components/ReportSheet.qml" : ""
+        onLoaded: item.open()
+    }
+    Connections {
+        target: Report
+        function onRequested() {
+            if (reportLoader.active && reportLoader.item)
+                reportLoader.item.open()
+            else
+                reportLoader.active = true
+        }
     }
     Connections {
         target: AppController

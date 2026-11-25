@@ -11,6 +11,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -27,12 +28,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -42,19 +46,19 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import app.nectarlink.android.ui.AppLanguage
-import app.nectarlink.android.ui.StarNotification
 import androidx.compose.material3.RadioButton
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.res.pluralStringResource
@@ -64,6 +68,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -79,6 +84,7 @@ import app.nectarlink.android.elevated.Elevated
 import app.nectarlink.android.elevated.PairingNotification
 import app.nectarlink.android.elevated.ElevatedMethod
 import app.nectarlink.android.elevated.ShizukuElevated
+import app.nectarlink.services.client.NectarlinkServiceContract
 import app.nectarlink.android.mirror.InputService
 import app.nectarlink.android.photos.RecentPhotos
 import app.nectarlink.android.sms.PhoneSms
@@ -98,6 +104,8 @@ import app.nectarlink.android.ui.theme.Tokens
 import app.nectarlink.android.ui.theme.glassModalBlur
 import app.nectarlink.android.ui.theme.glassModalContainerColor
 import app.nectarlink.android.ui.theme.liquidGlassCard
+import app.nectarlink.android.ui.theme.customHomeCardColors
+import app.nectarlink.android.ui.theme.normalizeHomeCardHex
 import kotlinx.coroutines.delay
 
 @Composable
@@ -113,6 +121,8 @@ fun SettingsScreen(
     updater: AppUpdater,
     onSetStorageEnabled: (pcId: String, enabled: Boolean) -> Unit = { _, _ -> },
     onSetMicEnabled: (pcId: String, enabled: Boolean) -> Unit = { _, _ -> },
+    onSetUnlockEnabled: (pcId: String, enabled: Boolean) -> Unit = { _, _ -> },
+    onSetClipboardAccepted: (deviceId: String, on: Boolean) -> Unit = { _, _ -> },
     startWithoutAsking: Set<String> = emptySet(),
     onSetStartWithoutAsking: (pcId: String, on: Boolean) -> Unit = { _, _ -> },
     onAddSafFolder: (Uri) -> Unit = {},
@@ -123,6 +133,12 @@ fun SettingsScreen(
     onSetSuggestClipboardActions: (Boolean) -> Unit = {},
     volumeKeysControlPc: Boolean = true,
     onSetVolumeKeysControlPc: (Boolean) -> Unit = {},
+    pcSoundBufferMs: Int = 40,
+    onSetPcSoundBufferMs: (Int) -> Unit = {},
+    quietWhileUsingPc: Boolean = false,
+    onSetQuietWhileUsingPc: (Boolean) -> Unit = {},
+    hideFromRecents: Boolean = false,
+    onSetHideFromRecents: (Boolean) -> Unit = {},
     backgroundServiceEnabled: Boolean = true,
     onToggleBackgroundService: (Boolean) -> Unit = {},
     onSetTimelineRetentionDays: (UInt) -> Unit = {},
@@ -136,6 +152,7 @@ fun SettingsScreen(
     onOpenRelaySettings: () -> Unit = {},
     onOpenWalkthrough: () -> Unit = {},
     onOpenFeaturesGuide: () -> Unit = {},
+    onReportProblem: () -> Unit = {},
     highlightTarget: GuideHighlightTarget? = null,
     onHighlightConsumed: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -278,6 +295,10 @@ fun SettingsScreen(
                         ),
                         appearance.mode,
                     ) { value -> onAppearance { it.copy(mode = value) } }
+                    SettingRowDivider()
+                    HomeCardColorSetting(appearance.homeCardSeed) { seed ->
+                        onAppearance { it.copy(homeCardSeed = seed) }
+                    }
                     if (AppLanguage.supported) {
                         // System and English, plus the language picked from the list (or More).
                         val context = LocalContext.current
@@ -391,16 +412,7 @@ fun SettingsScreen(
                             ) {
                                 Tokens.bloomSeeds.forEach { (name, seed) ->
                                     val isSelected = (!appearance.dynamicColor || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) && appearance.seed == name
-                                    val seedLabel = stringResource(
-                                        when (name) {
-                                            "honey" -> R.string.settings_seed_honey
-                                            "lavender" -> R.string.settings_seed_lavender
-                                            "ocean" -> R.string.settings_seed_ocean
-                                            "sage" -> R.string.settings_seed_sage
-                                            "black" -> R.string.settings_seed_black
-                                            else -> R.string.settings_seed_honey
-                                        },
-                                    )
+                                    val seedLabel = stringResource(bloomSeedLabel(name))
                                     val isBlackSeed = name == "black"
                                     val borderColor = when {
                                         isSelected -> MaterialTheme.colorScheme.onSurface
@@ -565,6 +577,52 @@ fun SettingsScreen(
                                         modifier = Modifier.semantics { contentDescription = micToggleTitle },
                                     )
                                 }
+                                if (app.nectarlink.android.unlock.UnlockKeys.supported(context)) {
+                                    val unlockTitle = stringResource(R.string.unlock_pc_toggle)
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                            Text(unlockTitle, style = MaterialTheme.typography.bodyMedium)
+                                            Text(
+                                                stringResource(R.string.unlock_pc_toggle_hint),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        Switch(
+                                            checked = device.unlockEnabled,
+                                            onCheckedChange = { enabled -> onSetUnlockEnabled(device.id, enabled) },
+                                            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                                            modifier = Modifier.semantics { contentDescription = unlockTitle },
+                                        )
+                                    }
+                                    // Android opens the fingerprint prompt from the background only for
+                                    // apps that may show over other apps; without it, a notification to tap.
+                                    var promptsDirectly by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+                                    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+                                        promptsDirectly = Settings.canDrawOverlays(context)
+                                        onPauseOrDispose { }
+                                    }
+                                    if (device.unlockEnabled && !promptsDirectly) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                stringResource(R.string.unlock_prompt_directly_hint),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f).padding(end = 12.dp),
+                                            )
+                                            TextButton(onClick = {
+                                                runCatching {
+                                                    context.startActivity(
+                                                        Intent(
+                                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                                            Uri.parse("package:${context.packageName}"),
+                                                        ),
+                                                    )
+                                                }
+                                            }) { Text(stringResource(R.string.unlock_prompt_directly_action)) }
+                                        }
+                                    }
+                                }
                                 val autoStartTitle = stringResource(R.string.start_without_asking_toggle)
                                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                     Column(Modifier.weight(1f).padding(end = 12.dp)) {
@@ -582,6 +640,60 @@ fun SettingsScreen(
                                         modifier = Modifier.semantics { contentDescription = autoStartTitle },
                                     )
                                 }
+                                val mirrorAsk by app.nectarlink.android.mirror.MirrorAsk.pcs(context).collectAsState()
+                                val mirrorAskTitle = stringResource(R.string.mirror_ask_toggle)
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                        Text(mirrorAskTitle, style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            stringResource(R.string.mirror_ask_hint),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Switch(
+                                        checked = device.id in mirrorAsk,
+                                        onCheckedChange = { on -> app.nectarlink.android.mirror.MirrorAsk.set(context, device.id, on) },
+                                        colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                                        modifier = Modifier.semantics { contentDescription = mirrorAskTitle },
+                                    )
+                                }
+                            }
+                            val notShared by app.nectarlink.android.clipboard.ClipboardPeers.notShared(context).collectAsState()
+                            val notAccepted by app.nectarlink.android.clipboard.ClipboardPeers.notAccepted(context).collectAsState()
+                            val clipShareTitle = stringResource(R.string.clip_share_toggle)
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text(clipShareTitle, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        stringResource(R.string.clip_share_hint),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = device.id !in notShared,
+                                    onCheckedChange = { on -> app.nectarlink.android.clipboard.ClipboardPeers.setShared(context, device.id, on) },
+                                    colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                                    modifier = Modifier.semantics { contentDescription = clipShareTitle },
+                                )
+                            }
+                            val clipAcceptTitle = stringResource(R.string.clip_accept_toggle)
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text(clipAcceptTitle, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        stringResource(R.string.clip_accept_hint),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = device.id !in notAccepted,
+                                    onCheckedChange = { on -> onSetClipboardAccepted(device.id, on) },
+                                    colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                                    modifier = Modifier.semantics { contentDescription = clipAcceptTitle },
+                                )
                             }
                         }
                     }
@@ -607,6 +719,8 @@ fun SettingsScreen(
                     FilledTonalButton(onClick = onOpenRelaySettings) {
                         Text(stringResource(R.string.relay_settings_title))
                     }
+                    SettingRowDivider()
+                    ReconnectSettings()
                 }
             }
         }
@@ -618,6 +732,24 @@ fun SettingsScreen(
                     highlighted = pulsingSectionKey == "notifications",
                 ) {
                     NotificationAccess(state.notificationAccess)
+                    SettingRowDivider()
+                    val quietTitle = stringResource(R.string.settings_quiet_while_using_pc)
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(quietTitle, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                stringResource(R.string.settings_quiet_while_using_pc_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = quietWhileUsingPc,
+                            onCheckedChange = onSetQuietWhileUsingPc,
+                            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                            modifier = Modifier.semantics { contentDescription = quietTitle },
+                        )
+                    }
                 }
             }
 
@@ -627,14 +759,23 @@ fun SettingsScreen(
                     highlighted = pulsingSectionKey == "control",
                 ) {
                     ControlAccess(state.inputAccess)
-                    SettingRowDivider()
-                    ElevatedAccess()
+                    if (!state.hideElevated) {
+                        SettingRowDivider()
+                        ElevatedAccess()
+                    }
+                    AssistOnDemandAccess(
+                        state.hasElevatedCapability(NectarlinkServiceContract.CAP_INPUT_INJECTION),
+                        state.hideElevated,
+                    )
                     SettingRowDivider()
                     BankingPauseAccess()
                     SettingRowDivider()
                     DndAccess(state.dndAccess)
                     SettingRowDivider()
-                    WriteSettingsAccess(state.writeSettingsAccess || state.elevated)
+                    WriteSettingsAccess(
+                        state.writeSettingsAccess ||
+                            state.hasElevatedCapability(NectarlinkServiceContract.CAP_SYSTEM_TOGGLES),
+                    )
                 }
             }
 
@@ -658,6 +799,24 @@ fun SettingsScreen(
                             onCheckedChange = onToggleBackgroundService,
                             colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
                             modifier = Modifier.semantics { contentDescription = runInBackgroundTitle },
+                        )
+                    }
+                    SettingRowDivider()
+                    val hideRecentsTitle = stringResource(R.string.settings_hide_from_recents)
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(hideRecentsTitle, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                stringResource(R.string.settings_hide_from_recents_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = hideFromRecents,
+                            onCheckedChange = onSetHideFromRecents,
+                            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                            modifier = Modifier.semantics { contentDescription = hideRecentsTitle },
                         )
                     }
                     SettingRowDivider()
@@ -733,31 +892,34 @@ fun SettingsScreen(
                     highlighted = pulsingSectionKey == "clipboard",
                 ) {
                     val context = LocalContext.current
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.settings_background_clipboard_title), style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                if (state.elevated) {
-                                    stringResource(R.string.settings_wireless_debugging_active)
-                                } else {
-                                    stringResource(R.string.settings_wireless_debugging_hint)
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        // Elevated's own section knows every way to start it.
-                        if (state.elevated) {
-                            OutlinedButton(onClick = { jumpToControl++ }) {
-                                Text(stringResource(R.string.action_manage))
+                    // Hidden only when the add-on covers Elevated; with Elevated on it says so here.
+                    if (!state.hideElevated) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text(stringResource(R.string.settings_background_clipboard_title), style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    if (state.elevated) {
+                                        stringResource(R.string.settings_wireless_debugging_active)
+                                    } else {
+                                        stringResource(R.string.settings_wireless_debugging_hint)
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                        } else {
-                            Button(onClick = { jumpToControl++ }) {
-                                Text(stringResource(R.string.elevated_set_up))
+                            // Elevated's own section knows every way to start it.
+                            if (state.elevated) {
+                                OutlinedButton(onClick = { jumpToControl++ }) {
+                                    Text(stringResource(R.string.action_manage))
+                                }
+                            } else {
+                                Button(onClick = { jumpToControl++ }) {
+                                    Text(stringResource(R.string.elevated_set_up))
+                                }
                             }
                         }
+                        SettingRowDivider()
                     }
-                    SettingRowDivider()
                     var syncPasswords by remember { mutableStateOf(PhoneClipboard.syncPasswords(context)) }
                     val syncPasswordsTitle = stringResource(R.string.settings_clipboard_passwords)
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -778,6 +940,8 @@ fun SettingsScreen(
                             modifier = Modifier.semantics { contentDescription = syncPasswordsTitle },
                         )
                     }
+                    SettingRowDivider()
+                    ScreenshotClipboardSetting(onAccessChanged)
                     SettingRowDivider()
                     val suggestionsTitle = stringResource(R.string.settings_clipboard_suggestions)
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -838,6 +1002,23 @@ fun SettingsScreen(
                             modifier = Modifier.semantics { contentDescription = volumeKeysTitle },
                         )
                     }
+                    SettingRowDivider()
+                    // #321: more buffer survives a busy Wi-Fi, less is closer to live.
+                    Text(stringResource(R.string.settings_pc_sound_buffer), style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        stringResource(R.string.settings_pc_sound_buffer_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Choice(
+                        options = listOf(
+                            "40" to stringResource(R.string.settings_buffer_low),
+                            "100" to stringResource(R.string.settings_buffer_medium),
+                            "200" to stringResource(R.string.settings_buffer_high),
+                        ),
+                        selected = pcSoundBufferMs.toString(),
+                        onSelect = { onSetPcSoundBufferMs(it.toInt()) },
+                    )
                 }
             }
 
@@ -1044,20 +1225,39 @@ fun SettingsScreen(
                     CheckForUpdates(updater)
                 }
             }
+            // Community: Discord, news, the code and support, side by side.
             item(key = "support", contentType = "section") {
-                val uriHandler = LocalUriHandler.current
-                Section(stringResource(R.string.support_title)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            stringResource(R.string.support_body),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f).padding(end = 12.dp),
-                        )
-                        FilledTonalButton(onClick = { runCatching { uriHandler.openUri(StarNotification.SUPPORT) } }) {
-                            Text(stringResource(R.string.support_action))
-                        }
-                    }
+                val context = LocalContext.current
+                Section(stringResource(R.string.community_title)) {
+                    CommunityRow(
+                        title = stringResource(R.string.community_discord_title),
+                        body = stringResource(R.string.community_discord_body),
+                        action = stringResource(R.string.clip_action_open),
+                    ) { app.nectarlink.android.ui.Link.open(context, app.nectarlink.android.ui.Link.DISCORD) }
+                    SettingRowDivider()
+                    CommunityRow(
+                        title = stringResource(R.string.community_x_title),
+                        body = stringResource(R.string.community_x_body),
+                        action = stringResource(R.string.clip_action_open),
+                    ) { app.nectarlink.android.ui.Link.open(context, app.nectarlink.android.ui.Link.X) }
+                    SettingRowDivider()
+                    CommunityRow(
+                        title = stringResource(R.string.community_github_title),
+                        body = stringResource(R.string.community_github_body),
+                        action = stringResource(R.string.clip_action_open),
+                    ) { app.nectarlink.android.ui.Link.open(context, app.nectarlink.android.ui.Link.REPO) }
+                    SettingRowDivider()
+                    CommunityRow(
+                        title = stringResource(R.string.support_title),
+                        body = stringResource(R.string.support_body),
+                        action = stringResource(R.string.support_action),
+                    ) { app.nectarlink.android.ui.Link.open(context, app.nectarlink.android.ui.Link.DONATE) }
+                    SettingRowDivider()
+                    CommunityRow(
+                        title = stringResource(R.string.report_title),
+                        body = stringResource(R.string.report_entry_body),
+                        action = stringResource(R.string.clip_action_open),
+                    ) { onReportProblem() }
                 }
             }
         }
@@ -1382,6 +1582,35 @@ private fun ControlAccess(on: Boolean) {
     }
 }
 
+/**
+ * Assist only while a PC uses the phone (#400): offered with Elevated, which
+ * does everything else Assist would. Its own divider, since it may not show.
+ */
+@Composable
+private fun AssistOnDemandAccess(elevatedRunning: Boolean, hideElevated: Boolean = false) {
+    val context = LocalContext.current
+    val on by app.nectarlink.android.banking.AssistOnDemand.enabled.collectAsStateWithLifecycle()
+    if (!on && (hideElevated || (!elevatedRunning && !Elevated.isSetUp()))) return
+    SettingRowDivider()
+    val title = stringResource(R.string.settings_assist_on_demand)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.settings_assist_on_demand_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = on,
+            onCheckedChange = { app.nectarlink.android.banking.AssistOnDemand.setEnabled(context, it) },
+            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+            modifier = Modifier.semantics { contentDescription = title },
+        )
+    }
+}
+
 /** Elevated through the phone's own wireless debugging: real touch and keys. */
 @Composable
 private fun ElevatedAccess() {
@@ -1470,6 +1699,31 @@ private fun ElevatedAccess() {
                     Text(stringResource(R.string.elevated_turn_off))
                 }
                 Elevated.State.Starting -> {}
+            }
+        }
+        // Set up through Wireless debugging: whether NectarLink may turn it back on by
+        // itself (on any Wi-Fi), or leaves that to the user.
+        if (Elevated.isSetUp() && !viaShizuku && !Elevated.rootActive && state != Elevated.State.Starting) {
+            var turnsOn by remember { mutableStateOf(Elevated.turnsOnWirelessDebugging()) }
+            val turnsOnTitle = stringResource(R.string.elevated_turn_on_wireless)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(turnsOnTitle, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        stringResource(R.string.elevated_turn_on_wireless_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = turnsOn,
+                    onCheckedChange = { on ->
+                        turnsOn = on
+                        Elevated.setTurnsOnWirelessDebugging(on)
+                    },
+                    colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+                    modifier = Modifier.semantics { contentDescription = turnsOnTitle },
+                )
             }
         }
         if (state == Elevated.State.Waiting || state is Elevated.State.Failed) {
@@ -1680,6 +1934,22 @@ private fun SettingRowDivider() {
     )
 }
 
+/** One row of Community: what it is, and a button that opens it. */
+@Composable
+private fun CommunityRow(title: String, body: String, action: String, onOpen: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        FilledTonalButton(onClick = onOpen) { Text(action) }
+    }
+}
+
 @Composable
 private fun Section(
     title: String,
@@ -1719,6 +1989,157 @@ private fun Section(
     }
 }
 
+private fun bloomSeedLabel(seed: String?) = when (seed) {
+    null -> R.string.settings_home_card_color_default
+    "black" -> R.string.settings_seed_black
+    "lavender" -> R.string.settings_seed_lavender
+    "ocean" -> R.string.settings_seed_ocean
+    "sage" -> R.string.settings_seed_sage
+    else -> R.string.settings_seed_honey
+}
+
+@Composable
+private fun HomeCardColorSetting(seed: String?, onSelect: (String?) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    var editingCustomColor by rememberSaveable { mutableStateOf(false) }
+    val title = stringResource(R.string.settings_home_card_color)
+    val customHex = normalizeHomeCardHex(seed)
+    val current = customHex ?: stringResource(bloomSeedLabel(seed))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.semantics {
+                    contentDescription = title
+                    stateDescription = current
+                },
+            ) {
+                Text(current)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                (listOf(null) + Tokens.bloomSeeds.keys).forEach { option ->
+                    val color = Tokens.bloomSeeds[option]?.color ?: MaterialTheme.colorScheme.primaryContainer
+                    DropdownMenuItem(
+                        text = { Text(stringResource(bloomSeedLabel(option))) },
+                        leadingIcon = {
+                            Surface(
+                                modifier = Modifier.size(18.dp),
+                                shape = CircleShape,
+                                color = color,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            ) {}
+                        },
+                        trailingIcon = { RadioButton(selected = option == seed, onClick = null) },
+                        modifier = Modifier.semantics { selected = option == seed },
+                        onClick = {
+                            onSelect(option)
+                            expanded = false
+                        },
+                    )
+                }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.settings_home_card_color_custom)) },
+                    trailingIcon = { RadioButton(selected = customHex != null, onClick = null) },
+                    modifier = Modifier.semantics { selected = customHex != null },
+                    onClick = {
+                        expanded = false
+                        editingCustomColor = true
+                    },
+                )
+            }
+        }
+    }
+
+    if (editingCustomColor) {
+        var input by rememberSaveable(customHex) { mutableStateOf(customHex.orEmpty()) }
+        val hex = normalizeHomeCardHex(input)
+        val preview = remember(hex) { customHomeCardColors(hex) }
+        AlertDialog(
+            onDismissRequest = { editingCustomColor = false },
+            title = { Text(stringResource(R.string.settings_home_card_color_custom)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        label = { Text(stringResource(R.string.settings_home_card_color_hex)) },
+                        placeholder = { Text("#7C3AED") },
+                        supportingText = { Text("#RRGGBB") },
+                        singleLine = true,
+                        isError = input.isNotBlank() && hex == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (preview != null) {
+                        Surface(
+                            color = preview.background,
+                            contentColor = preview.ink,
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(title, modifier = Modifier.padding(16.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = hex != null,
+                    onClick = {
+                        onSelect(hex)
+                        editingCustomColor = false
+                    },
+                ) { Text(stringResource(R.string.action_done)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingCustomColor = false }) { Text(stringResource(R.string.action_cancel)) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ScreenshotClipboardSetting(onAccessChanged: () -> Unit) {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(PhoneClipboard.screenshotSyncSince(context) != Long.MAX_VALUE) }
+    var hasAccess by remember { mutableStateOf(RecentPhotos.hasImageAccess(context)) }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        hasAccess = RecentPhotos.hasImageAccess(context)
+        onAccessChanged()
+    }
+    val title = stringResource(R.string.settings_clipboard_screenshots)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.settings_clipboard_screenshots_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (enabled && !hasAccess) {
+                TextButton(onClick = { ask.launch(RecentPhotos.imagePermissions) }) {
+                    Text(stringResource(R.string.action_allow))
+                }
+            }
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = {
+                enabled = it
+                PhoneClipboard.setScreenshotSync(context, it)
+                if (it && !hasAccess) ask.launch(RecentPhotos.imagePermissions)
+            },
+            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+            modifier = Modifier.semantics { contentDescription = title },
+        )
+    }
+}
+
 @Composable
 private fun Label(text: String) {
     Text(text, style = MaterialTheme.typography.titleSmall)
@@ -1726,6 +2147,73 @@ private fun Label(text: String) {
 
 /** The third language choice when it isn't a picked language: opens the list. */
 private const val MORE_LANGUAGES = "more"
+
+/** When the phone looks for its PCs by itself (#397). */
+@Composable
+private fun ReconnectSettings() {
+    val core = (LocalContext.current.applicationContext as app.nectarlink.android.NectarlinkApplication).core
+    var knownOnly by remember { mutableStateOf(core.reconnectKnownOnly) }
+    var giveUp by remember { mutableStateOf(core.reconnectGiveUpMinutes) }
+    var known by remember { mutableStateOf(core.reconnectKnownNetworks) }
+    val knownTitle = stringResource(R.string.reconnect_known_only_title)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(knownTitle, style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.reconnect_known_only_body),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (known > 0) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        pluralStringResource(R.plurals.reconnect_known_count, known, known),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = {
+                        core.forgetReconnectNetworks()
+                        known = 0
+                    }) { Text(stringResource(R.string.reconnect_forget)) }
+                }
+            }
+        }
+        Switch(
+            checked = knownOnly,
+            onCheckedChange = { on ->
+                knownOnly = on
+                core.setReconnectKnownOnly(on)
+                known = core.reconnectKnownNetworks
+            },
+            colors = app.nectarlink.android.ui.theme.nectarSwitchColors(),
+            modifier = Modifier.semantics { contentDescription = knownTitle },
+        )
+    }
+    SettingRowDivider()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.reconnect_give_up_title), style = MaterialTheme.typography.titleSmall)
+        Text(
+            stringResource(R.string.reconnect_give_up_body),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val labels = listOf(
+            stringResource(R.string.reconnect_give_up_never),
+            stringResource(R.string.reconnect_give_up_15_min),
+            stringResource(R.string.reconnect_give_up_1_hour),
+            stringResource(R.string.reconnect_give_up_4_hours),
+        )
+        Choice(
+            options = app.nectarlink.android.core.ReconnectPolicy.GIVE_UP_CHOICES.map { it.toString() }.zip(labels),
+            selected = giveUp.toString(),
+            onSelect = { value ->
+                val minutes = value.toIntOrNull() ?: 0
+                giveUp = minutes
+                core.setReconnectGiveUpMinutes(minutes)
+            },
+        )
+    }
+}
 
 /** A row of choices, one picked. */
 @Composable

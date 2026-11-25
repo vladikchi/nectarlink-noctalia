@@ -53,6 +53,8 @@ pub mod qobject {
         #[qproperty(i32, caps_revision)]
         /// Pop-ups for phone notifications are paused.
         #[qproperty(bool, notifications_paused)]
+        /// Updated since What's new was last closed: it opens by itself (#461).
+        #[qproperty(bool, whats_new_pending, cxx_name = "whatsNewPending")]
         /// Bumped when a device toggle is changed from this PC.
         #[qproperty(i32, toggles_revision)]
         /// Bumped whenever a phone's quick settings toggles change.
@@ -84,6 +86,7 @@ pub mod qobject {
         #[qproperty(bool, relay_check_busy)]
         /// This copy updates itself (it's installed).
         #[qproperty(bool, can_update)]
+        #[qproperty(bool, can_install_unattended)]
         /// A newer version that's available ("" when none).
         #[qproperty(QString, update_version)]
         /// Checking for or installing an update.
@@ -114,6 +117,8 @@ pub mod qobject {
         #[qproperty(QString, wake_state)]
         /// True when `wake_adapter` is wired Ethernet, false for Wi-Fi or none.
         #[qproperty(bool, wake_wired)]
+        /// Running under the Niri compositor, where an idle Island still takes clicks.
+        #[qproperty(bool, on_niri)]
         /// Selected navigation page and device index, kept in Rust across tray
         /// unloads so the window can be destroyed in the background.
         #[qproperty(QString, current_page)]
@@ -233,6 +238,18 @@ pub mod qobject {
         /// Pauses or resumes pop-ups for phone notifications.
         #[qinvokable]
         fn toggle_notifications_paused(self: Pin<&mut AppController>);
+        /// This build's release notes and the ones before, as JSON (#461).
+        #[qinvokable]
+        #[cxx_name = "whatsNew"]
+        fn whats_new(self: &AppController) -> QString;
+        /// What's new was closed: all of this build's notes are seen.
+        #[qinvokable]
+        #[cxx_name = "markWhatsNewSeen"]
+        fn mark_whats_new_seen(self: Pin<&mut AppController>);
+        /// Opens What's new.
+        #[qinvokable]
+        #[cxx_name = "openWhatsNew"]
+        fn open_whats_new(self: Pin<&mut AppController>);
         #[qinvokable]
         fn unpair(self: Pin<&mut AppController>, device: &QString);
 
@@ -261,6 +278,16 @@ pub mod qobject {
         fn set_hotspot_network(self: &AppController, device: &QString, network: &QString);
         #[qinvokable]
         fn set_device_toggle(self: Pin<&mut AppController>, device: &QString, name: &QString, on: bool);
+        /// Unlock with phone: whether the signed-in Windows user is set up to
+        /// unlock this PC with `device`.
+        #[qinvokable]
+        #[cxx_name = "unlockSetUp"]
+        fn unlock_set_up(self: &AppController, device: &QString) -> bool;
+        /// Unlock with phone: sets the signed-in Windows user up with `device`,
+        /// checking `password` with Windows first. Answers with `unlockResult`.
+        #[qinvokable]
+        #[cxx_name = "setUpUnlock"]
+        fn set_up_unlock(self: Pin<&mut AppController>, device: &QString, password: &QString);
         /// Latest quick settings toggles for a phone as JSON (`""` when unknown).
         #[qinvokable]
         fn phone_toggles(self: &AppController, device: &QString) -> QString;
@@ -413,6 +440,12 @@ pub mod qobject {
         /// A short message for the user (e.g. a command failed).
         #[qsignal]
         fn toast(self: Pin<&mut AppController>, message: QString);
+        /// How setting up unlock with phone ended: `done`, `wrong_password`,
+        /// `declined`, `phone_away`, `phone_cant`, `failed`, or `registered` /
+        /// `register_failed` for the administrator step.
+        #[qsignal]
+        #[cxx_name = "unlockResult"]
+        fn unlock_result(self: Pin<&mut AppController>, device: QString, result: QString);
         /// The phone didn't take a change to one of its quick settings.
         #[qsignal]
         #[cxx_name = "phoneToggleFailed"]
@@ -429,6 +462,10 @@ pub mod qobject {
         /// Show the Connection Doctor.
         #[qsignal]
         fn doctor_requested(self: Pin<&mut AppController>);
+        /// Show What's new.
+        #[qsignal]
+        #[cxx_name = "whatsNewRequested"]
+        fn whats_new_requested(self: Pin<&mut AppController>);
         /// Open the Send files picker on the Home page.
         #[qsignal]
         fn file_picker_requested(self: Pin<&mut AppController>);
@@ -450,6 +487,7 @@ pub struct AppControllerRust {
     has_devices: bool,
     caps_revision: i32,
     notifications_paused: bool,
+    whats_new_pending: bool,
     toggles_revision: i32,
     phone_toggles_revision: i32,
     ringing_from: QString,
@@ -465,6 +503,7 @@ pub struct AppControllerRust {
     doctor_checks: QString,
     doctor_busy: bool,
     can_update: bool,
+    can_install_unattended: bool,
     update_version: QString,
     update_busy: bool,
     update_progress: f64,
@@ -481,6 +520,7 @@ pub struct AppControllerRust {
     wake_adapter: QString,
     wake_state: QString,
     wake_wired: bool,
+    on_niri: bool,
     current_page: QString,
     current_device: i32,
     pending_dial: QString,
@@ -515,6 +555,8 @@ pub struct AppControllerRust {
     guide_doc_body: QString,
     highlight_target: QString,
     last_online_count: usize,
+    /// The selected phone and the row it had when last seen there.
+    selected: Option<(DeviceId, i32)>,
     last_tray_tooltip: String,
     tray: Option<tray::Tray>,
 }
@@ -732,20 +774,25 @@ pub(crate) fn show_offline_queued_toast(device: DeviceId, item_id: Option<String
 }
 
 /// Opens the Calls page dialer with `number` filled in (without placing the call).
-pub(crate) fn open_dialer(device: DeviceId, number: &str) {
+pub(crate) fn open_dialer(device: Option<DeviceId>, number: &str) {
     let number = number.trim().to_owned();
     if number.is_empty() {
         return;
     }
-    let idx = core_host::host().hub.read(|s| {
-        s.devices
-            .iter()
-            .position(|d| d.id == device && matches!(d.link, LinkState::Online { .. }))
-            .or_else(|| s.devices.iter().position(|d| matches!(d.link, LinkState::Online { .. })))
-            .or_else(|| s.devices.iter().position(|d| d.id == device))
+    let idx = device.and_then(|device| {
+        core_host::host().hub.read(|s| {
+            s.devices
+                .iter()
+                .position(|d| d.id == device && matches!(d.link, LinkState::Online { .. }))
+                .or_else(|| s.devices.iter().position(|d| matches!(d.link, LinkState::Online { .. })))
+                .or_else(|| s.devices.iter().position(|d| d.id == device))
+        })
     });
     if let Some(qt) = controller() {
         let _ = qt.queue(move |mut object| {
+            // No device given (a telephone link): the selected one, unless
+            // it's offline and another isn't.
+            let idx = idx.or_else(|| online_instead_of(*object.current_device()));
             if let Some(idx) = idx {
                 object.as_mut().set_current_device(idx as i32);
             }
@@ -754,6 +801,17 @@ pub(crate) fn open_dialer(device: DeviceId, number: &str) {
             object.activate_requested();
         });
     }
+}
+
+/// The first online device, when the one at `current` isn't online.
+fn online_instead_of(current: i32) -> Option<usize> {
+    core_host::host().hub.read(|s| {
+        let selected = s.devices.get(current.max(0) as usize);
+        if selected.is_some_and(|d| matches!(d.link, LinkState::Online { .. })) {
+            return None;
+        }
+        s.devices.iter().position(|d| matches!(d.link, LinkState::Online { .. }))
+    })
 }
 
 /// Explains a failed command in a sentence the user understands.
@@ -784,8 +842,20 @@ fn spawn_data_retention_refresh(qt: CxxQtThread<qobject::AppController>) {
 impl cxx_qt::Initialize for qobject::AppController {
     fn initialize(mut self: Pin<&mut Self>) {
         self.as_mut().set_version(QString::from(env!("CARGO_PKG_VERSION")));
+        self.as_mut().set_on_niri(cfg!(target_os = "linux") && std::env::var_os("NIRI_SOCKET").is_some());
+        self.as_mut().set_notifications_paused(crate::notifications::paused());
+        self.as_mut()
+            .set_whats_new_pending(nectarlink_core::whats_new::pending(&crate::core_host::host().data_dir));
         self.as_mut().set_current_page(QString::from("home"));
+        // Queued: Rust also changes the selection, from inside refresh.
+        self.as_mut()
+            .connect_current_device_changed(
+                |c| c.remember_selected(),
+                cxx_qt::ConnectionType::QueuedConnection,
+            )
+            .release();
         self.as_mut().set_can_update(crate::updater::can_update());
+        self.as_mut().set_can_install_unattended(crate::updater::can_install_unattended());
         // Nothing downloading yet (0 would show an empty bar).
         self.as_mut().set_update_progress(-1.0);
         self.as_mut().set_clipboard_history(QString::from(&crate::clipboard::history_json()));
@@ -890,7 +960,10 @@ impl cxx_qt::Initialize for qobject::AppController {
             quit: tr!("App", "Quit NectarLink"),
         };
         match tray::Tray::create("NectarLink", labels, move |event| on_tray_event(&qt, event)) {
-            Ok(tray) => self.rust_mut().tray = Some(tray),
+            Ok(tray) => {
+                tray.set_notifications_paused(crate::notifications::paused());
+                self.rust_mut().tray = Some(tray);
+            }
             Err(e) => tracing::warn!(error = %e, "no tray icon"),
         }
     }
@@ -913,6 +986,13 @@ pub fn handle_jump_task(action: &str) {
 }
 
 fn dispatch_jump_task(qt: &CxxQtThread<qobject::AppController>, action: String) {
+    // A phone app's shortcut (#370): it opens in an app window, nothing else shows.
+    if let Some((device, pkg)) = crate::app_shortcuts::parse_task(&action) {
+        let data_dir = &core_host::host().data_dir;
+        let label = crate::mirror::saved_label(data_dir, &device, &pkg).unwrap_or_else(|| pkg.clone());
+        crate::mirror::start_app(device, pkg, label);
+        return;
+    }
     let _ = qt.queue(move |mut object| match action.as_str() {
         "send-files" => {
             object.as_mut().set_current_page(QString::from("home"));
@@ -1301,7 +1381,16 @@ impl qobject::AppController {
             || (devices > 0 && (current_idx < 0 || (current_idx as usize) >= devices));
         if should_reset_current {
             self.as_mut().set_current_device(0);
+        } else if let Some((id, at)) = self.rust().selected
+            && at == current_idx
+            && let Some(now) = hub.read(|s| s.devices.iter().position(|d| d.id == id))
+            && now as i32 != current_idx
+        {
+            // The list reordered (a phone paired earlier came back and sorts
+            // first): the selection follows its phone, not its row.
+            self.as_mut().set_current_device(now as i32);
         }
+        self.as_mut().remember_selected();
         let (status_text, error) = match &status {
             CoreStatus::Starting => ("starting", String::new()),
             CoreStatus::Ready { device_id, name } => {
@@ -1575,7 +1664,7 @@ impl qobject::AppController {
             }
             PaletteUiAction::OpenDialer { device_id, number } => {
                 if let Ok(dev) = device_id.parse::<DeviceId>() {
-                    open_dialer(dev, &number);
+                    open_dialer(Some(dev), &number);
                 }
             }
             PaletteUiAction::OpenHandoffFilePicker { device_index } => {
@@ -1610,9 +1699,23 @@ impl qobject::AppController {
         }
     }
 
+    pub fn whats_new(&self) -> QString {
+        QString::from(&nectarlink_core::whats_new::json(&crate::core_host::host().data_dir))
+    }
+
+    pub fn open_whats_new(self: Pin<&mut Self>) {
+        self.whats_new_requested();
+    }
+
+    pub fn mark_whats_new_seen(mut self: Pin<&mut Self>) {
+        nectarlink_core::whats_new::mark_seen(&crate::core_host::host().data_dir);
+        self.as_mut().set_whats_new_pending(false);
+    }
+
     pub fn toggle_notifications_paused(mut self: Pin<&mut Self>) {
         let paused = !crate::notifications::paused();
         crate::notifications::set_paused(paused);
+        crate::settings::remember_popups_paused(paused);
         self.as_mut().set_notifications_paused(paused);
         if let Some(tray) = self.rust().tray.as_ref() {
             tray.set_notifications_paused(paused);
@@ -1738,10 +1841,81 @@ impl qobject::AppController {
         }
     }
 
+    pub fn unlock_set_up(&self, device: &QString) -> bool {
+        #[cfg(windows)]
+        if let Some(id) = super::parse_device(device) {
+            return crate::win::unlock::is_registered() && crate::win::unlock::enrolled_with(id);
+        }
+        let _ = device;
+        false
+    }
+
+    pub fn set_up_unlock(self: Pin<&mut Self>, device: &QString, password: &QString) {
+        #[cfg(windows)]
+        if let Some(id) = super::parse_device(device) {
+            let password = String::from(password);
+            let qt = self.qt_thread();
+            let device = device.clone();
+            core_host::spawn(async move {
+                let result = match crate::win::unlock::enroll(id, password).await {
+                    crate::win::unlock::Enrolled::Done => "done",
+                    crate::win::unlock::Enrolled::WrongPassword => "wrong_password",
+                    crate::win::unlock::Enrolled::Declined => "declined",
+                    crate::win::unlock::Enrolled::PhoneAway => "phone_away",
+                    crate::win::unlock::Enrolled::PhoneCant => "phone_cant",
+                    crate::win::unlock::Enrolled::Failed => "failed",
+                };
+                let _ = qt.queue(move |object| object.unlock_result(device, QString::from(result)));
+            });
+            return;
+        }
+        // Not on this system (the switch never shows here).
+        let _ = password;
+        self.unlock_result(device.clone(), QString::from("failed"));
+    }
+
+    /// Unlock with phone turned on or off for `id`: the credential provider is
+    /// registered with the first phone (one administrator prompt) and removed
+    /// with the last.
+    #[cfg(windows)]
+    fn unlock_toggled(self: Pin<&mut Self>, id: DeviceId, on: bool) {
+        use crate::win::unlock;
+        let Some(node) = core_host::node() else { return };
+        let others_on = node.paired_devices().unwrap_or_default().iter().any(|d| {
+            d.id != id
+                && node
+                    .device_toggles(d.id)
+                    .is_ok_and(|t| t.iter().any(|(n, v)| *n == nectarlink_core::unlock::TOGGLE && *v))
+        });
+        let qt = self.qt_thread();
+        let device = QString::from(&id.to_string());
+        let arg = match (on, unlock::is_registered()) {
+            (true, false) => unlock::REGISTER_ARG,
+            (false, true) if !others_on => unlock::UNREGISTER_ARG,
+            _ => return,
+        };
+        crate::win::vcam::run_elevated(arg, move |ok| {
+            core_host::refresh_capabilities();
+            if on {
+                let result = if ok { "registered" } else { "register_failed" };
+                let _ = qt.queue(move |object| object.unlock_result(device, QString::from(result)));
+            }
+        });
+    }
+
     pub fn device_toggles(&self, device: &QString) -> QList<QVariant> {
         let mut list = QList::default();
         let (Some(id), Some(node)) = (super::parse_device(device), core_host::node()) else { return list };
+        #[cfg(target_os = "linux")]
+        let unlock_supported =
+            crate::win::phone_unlock::available() && node.peer_offers(id, nectarlink_core::linux_unlock::KEY);
+        #[cfg(not(target_os = "linux"))]
+        let unlock_supported = cfg!(windows) && node.peer_offers(id, nectarlink_core::unlock::KEY);
         for (name, on) in node.device_toggles(id).unwrap_or_default() {
+            // Clipboard receive is controlled from the phone (#453).
+            if name == "clipboard_receive" || (name == nectarlink_core::unlock::TOGGLE && !unlock_supported) {
+                continue;
+            }
             let mut item = QHash::<QHashPair_QString_QVariant>::default();
             item.insert(QString::from("name"), QVariant::from(&QString::from(name)));
             item.insert(QString::from("on"), QVariant::from(&on));
@@ -1755,6 +1929,10 @@ impl qobject::AppController {
         let name_str = String::from(name);
         if let Err(e) = node.set_device_toggle(id, &name_str, on) {
             show_message(describe(&e));
+        }
+        #[cfg(windows)]
+        if name_str == nectarlink_core::unlock::TOGGLE {
+            self.as_mut().unlock_toggled(id, on);
         }
         if name_str == "remote_input" {
             if !on {
@@ -2844,6 +3022,15 @@ fn load_guide_doc_content(raw_key: &str) -> (String, String) {
 
 /// The phone selected in the app. A taskbar task shows no name, so it acts
 /// on this one and never on another that happens to be online.
+impl qobject::AppController {
+    /// Notes which phone the selected row is, so a reorder can't swap it for another.
+    fn remember_selected(mut self: Pin<&mut Self>) {
+        let idx = *self.current_device();
+        let id = selected_device(idx).filter(|_| idx >= 0);
+        self.as_mut().rust_mut().selected = id.map(|id| (id, idx));
+    }
+}
+
 fn selected_device(current_device_idx: i32) -> Option<DeviceId> {
     let idx = current_device_idx.max(0) as usize;
     core_host::host().hub.read(|s| s.devices.get(idx).map(|d| d.id))

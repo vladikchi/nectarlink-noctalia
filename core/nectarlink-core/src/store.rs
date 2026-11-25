@@ -596,7 +596,30 @@ const MIGRATIONS: &[&str] = &[
         ON send_queue(status, next_retry_ms ASC, expires_at ASC);",
     // v8: a device's install-stable ID, the only key used to merge re-paired entries
     "ALTER TABLE peers ADD COLUMN install_id TEXT;",
+    // v9: unlock the PC with a phone (ADR 0009): per phone and Windows user, the
+    // password sealed under a key only the phone holds, and that key as the
+    // phone wrapped it. Neither opens anything on its own.
+    "CREATE TABLE unlock_vault (
+        peer        BLOB NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+        user        TEXT NOT NULL,
+        user_name   TEXT NOT NULL,
+        nonce       BLOB NOT NULL,
+        sealed      BLOB NOT NULL,
+        wrapped     BLOB NOT NULL,
+        enrolled_at INTEGER NOT NULL,
+        PRIMARY KEY (peer, user)
+    ) STRICT;",
 ];
+
+/// One Windows user enrolled to unlock with a phone (ADR 0009).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlockEntry {
+    pub user: String,
+    pub user_name: String,
+    pub sealed: crate::unlock::Sealed,
+    pub wrapped: Vec<u8>,
+    pub enrolled_at: i64,
+}
 
 /// A paired device as stored on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,9 +695,65 @@ pub(crate) struct Store {
     toggles: Mutex<HashMap<DeviceId, Arc<HashMap<String, bool>>>>,
 }
 
+/// On Unix, takes the group's and others' access off NectarLink's data folder
+/// (`dir`), so other accounts on the computer can't read chats, codes or the
+/// timeline whatever the umask was. Never the home folder itself. Elsewhere the
+/// folder already belongs to the user alone.
+pub(crate) fn keep_private(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if home.is_some_and(|home| same_path(&home, dir)) {
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(dir) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0
+                && let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & !0o077))
+            {
+                tracing::warn!(error = %e, "can't make the data folder private");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+#[cfg(unix)]
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// On Unix, makes the database readable by this user only before SQLite opens
+/// it; its `-wal` and `-shm` files take the database's mode.
+fn private_database(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(path);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            if let Ok(meta) = std::fs::metadata(&file)
+                && meta.permissions().mode() & 0o077 != 0
+            {
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
-        Self::init_with_dir(Connection::open(dir.join(FILE_NAME))?, Some(dir.to_path_buf()))
+        let path = dir.join(FILE_NAME);
+        private_database(&path);
+        Self::init_with_dir(Connection::open(&path)?, Some(dir.to_path_buf()))
     }
 
     #[cfg(test)]
@@ -950,6 +1029,84 @@ impl Store {
             )?;
             self.toggle_cache().remove(id);
             Ok(())
+        })
+    }
+
+    /// Keeps `entry` for `peer`, replacing an earlier one for the same user.
+    pub fn save_unlock(&self, peer: &DeviceId, entry: &UnlockEntry) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO unlock_vault (peer, user, user_name, nonce, sealed, wrapped, enrolled_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(peer, user) DO UPDATE SET user_name = excluded.user_name,
+                    nonce = excluded.nonce, sealed = excluded.sealed, wrapped = excluded.wrapped,
+                    enrolled_at = excluded.enrolled_at",
+                params![
+                    peer.as_bytes().as_slice(),
+                    entry.user,
+                    entry.user_name,
+                    entry.sealed.nonce.as_slice(),
+                    entry.sealed.ciphertext,
+                    entry.wrapped,
+                    entry.enrolled_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// What's kept to unlock `user` with `peer`.
+    pub fn unlock_entry(&self, peer: &DeviceId, user: &str) -> Result<Option<UnlockEntry>> {
+        Ok(self.unlock_entries_where(peer, Some(user))?.into_iter().next())
+    }
+
+    /// Every user enrolled to unlock with `peer`.
+    pub fn unlock_entries(&self, peer: &DeviceId) -> Result<Vec<UnlockEntry>> {
+        self.unlock_entries_where(peer, None)
+    }
+
+    fn unlock_entries_where(&self, peer: &DeviceId, user: Option<&str>) -> Result<Vec<UnlockEntry>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT user, user_name, nonce, sealed, wrapped, enrolled_at FROM unlock_vault
+                 WHERE peer = ?1 AND (?2 IS NULL OR user = ?2) ORDER BY user_name",
+            )?;
+            let rows = stmt.query_map(params![peer.as_bytes().as_slice(), user], |r| {
+                let nonce: Vec<u8> = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, nonce, r.get(3)?, r.get(4)?, r.get(5)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (user, user_name, nonce, ciphertext, wrapped, enrolled_at): (
+                    String,
+                    String,
+                    Vec<u8>,
+                    Vec<u8>,
+                    Vec<u8>,
+                    i64,
+                ) = row?;
+                // A row that isn't whole can't open anything: skip it.
+                let Ok(nonce) = <[u8; ring::aead::NONCE_LEN]>::try_from(nonce.as_slice()) else { continue };
+                out.push(UnlockEntry {
+                    user,
+                    user_name,
+                    sealed: crate::unlock::Sealed { nonce, ciphertext },
+                    wrapped,
+                    enrolled_at,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    /// Drops what's kept to unlock with `peer`, for `user` or for everyone.
+    /// Returns how many users it was.
+    pub fn remove_unlock(&self, peer: &DeviceId, user: Option<&str>) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM unlock_vault WHERE peer = ?1 AND (?2 IS NULL OR user = ?2)",
+                params![peer.as_bytes().as_slice(), user],
+            )
         })
     }
 
@@ -2818,9 +2975,11 @@ fn cleanup_peers(
                 continue;
             }
             let stale_str = row.id.to_string();
+            // Unlocking with the phone is never carried over: the new identity is turned
+            // on for it again by hand (ADR 0009).
             let _ = conn.execute(
                 "INSERT OR IGNORE INTO peer_toggles (peer, toggle, enabled)
-                 SELECT ?1, toggle, enabled FROM peer_toggles WHERE peer = ?2",
+                 SELECT ?1, toggle, enabled FROM peer_toggles WHERE peer = ?2 AND toggle <> 'unlock'",
                 params![winner_id.as_bytes().as_slice(), row.id.as_bytes().as_slice()],
             );
             let _ = conn.execute(
@@ -2844,6 +3003,31 @@ fn cleanup_peers(
 mod tests {
     use super::*;
     use nectarlink_protocol::messages::{ScreenCorners, ScreenRect};
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_folder_and_database_are_private_whatever_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("nectarlink");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // An older version left the database readable by everyone.
+        std::fs::write(data.join(FILE_NAME), b"").unwrap();
+        std::fs::set_permissions(data.join(FILE_NAME), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        keep_private(&data);
+        let store = Store::open(&data).unwrap();
+        store.upsert_peer(&DeviceId([7; 32]), &info("Pixel"), 1).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data), 0o700);
+        assert_eq!(mode(&data.join(FILE_NAME)), 0o600);
+        let wal = data.join(format!("{FILE_NAME}-wal"));
+        if wal.exists() {
+            assert_eq!(mode(&wal), 0o600, "SQLite gives the WAL the database's mode");
+        }
+    }
 
     fn info(name: &str) -> DeviceInfo {
         DeviceInfo {
@@ -3632,6 +3816,7 @@ mod tests {
         store.upsert_peer(&old, &phone, 100).unwrap();
         store.set_toggle(&old, "clipboard", false).unwrap();
         store.set_toggle(&old, "remote_input", true).unwrap();
+        store.set_toggle(&old, "unlock", true).unwrap();
         store.upsert_peer(&new, &phone, 200).unwrap();
         let ids: Vec<DeviceId> = store.list_peers().unwrap().into_iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![new], "the new pairing wins");
@@ -3645,6 +3830,7 @@ mod tests {
             Some(true),
             "enabled toggle is preserved across re-pairing"
         );
+        assert_eq!(store.toggle(&new, "unlock").unwrap(), None, "unlocking is turned on again by hand");
 
         // An online peer in skip_ids is not deleted when another peer claims the same install_id.
         let online_new = DeviceId([0x05; 32]);

@@ -64,6 +64,9 @@ pub enum PairingFailure {
     Expired,
     /// The other device couldn't be reached.
     Unreachable,
+    /// The other device was reached but isn't showing its pairing screen,
+    /// so it refused (nobody can start pairing with it uninvited, #514).
+    NotPairing,
     /// Anything else; the string is for logs.
     Other(String),
 }
@@ -176,6 +179,18 @@ pub enum NodeEvent {
     ContactsChanged {
         device: DeviceId,
     },
+    /// A paired device making a problem report asks for this device's
+    /// recent activity log: ask the user, then `Node::diag_log_answer`.
+    DiagLogAsked {
+        device: DeviceId,
+    },
+    /// The log asked for with `Node::diag_ask`: `None` when its user said
+    /// no. Lines are already private (docs/guide/privacy-and-security.md).
+    DiagLog {
+        device: DeviceId,
+        nonce: u64,
+        lines: Option<Vec<String>>,
+    },
     /// A phone's screen started or stopped showing here.
     Mirroring {
         device: DeviceId,
@@ -252,6 +267,12 @@ pub enum NodeEvent {
     Mic {
         device: DeviceId,
         on: bool,
+    },
+    /// A paired PC's microphone for the call in progress (`call.audio`):
+    /// 16 kHz mono 16-bit PCM for this phone to put into the call.
+    CallAudioUplink {
+        device: DeviceId,
+        pcm: Vec<u8>,
     },
     /// A paired PC requested a Continuity Camera capture on this phone.
     CameraCaptureRequested {

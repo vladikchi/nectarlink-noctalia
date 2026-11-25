@@ -11,6 +11,9 @@ QtObject {
     property bool starPromptDone: false
     property bool starPromptUpdated: false
     property int starPromptMinutes: 0
+    property bool communityPromptDone: false
+    property bool communityPromptDue: false
+    property int communityPromptCount: 0
     property bool quietWhenLocked: false
     property int uiScale: 100
     property bool combMotion: false
@@ -21,6 +24,9 @@ QtObject {
     property bool nectarIsland: true
     property bool nectarIslandCalls: true
     property bool nectarIslandMedia: true
+    property string nectarIslandPosition: "center"
+    property string nectarIslandLook: "dark"
+    property bool nectarIslandPcMedia: false
     property bool nectarIslandNotifications: true
     property bool nectarIslandTransfers: true
 }
