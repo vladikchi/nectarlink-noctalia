@@ -4,7 +4,7 @@
 # Installs NectarLink on Linux, with everything it needs, and shows each step
 # as it goes:
 #
-#   curl -fsSL https://github.com/thtbee/nectarlink/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/vladikchi/nectarlink-noctalia/releases/latest/download/install.sh | sh
 #
 # It picks the package that fits this system (.deb with apt, .rpm with dnf
 # or zypper, the tarball elsewhere), checks it against the release's
@@ -26,7 +26,7 @@
 # Everything is in functions, called on the last line: piped into sh, the
 # whole script has arrived before anything runs.
 
-REPO="thtbee/nectarlink"
+REPO="vladikchi/nectarlink-noctalia"
 DATA_PORT=7718
 MDNS_PORT=5353
 LOCALSEND_PORT=53317
@@ -263,10 +263,15 @@ find_release() {
     fi
     [ -n "$VERSION" ] || fail "couldn't tell which version is the latest."
     BASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
+    # Public release asset filenames use '-' in place of the tag's '+'.
+    asset_version="$VERSION"
+    if [ -z "${NECTARLINK_ASSETS_DIR:-}" ]; then
+        asset_version="$(printf '%s' "$VERSION" | tr '+' '-')"
+    fi
     case "$PACKAGE" in
-        deb) ASSET="nectarlink_${VERSION}_${DEB_ARCH}.deb" ;;
-        rpm) ASSET="nectarlink-${VERSION}-1.${ARCH}.rpm" ;;
-        tarball) ASSET="Nectarlink-${VERSION}-linux-${ARCH}.tar.gz" ;;
+        deb) ASSET="nectarlink_${asset_version}_${DEB_ARCH}.deb" ;;
+        rpm) ASSET="nectarlink-${asset_version}-1.${ARCH}.rpm" ;;
+        tarball) ASSET="Nectarlink-${asset_version}-linux-${ARCH}.tar.gz" ;;
     esac
     good "NectarLink $VERSION"
 }
