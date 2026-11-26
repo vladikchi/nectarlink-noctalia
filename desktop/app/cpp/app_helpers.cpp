@@ -179,6 +179,11 @@ void set_ui_scale(int32_t percent)
         qputenv("QT_SCALE_FACTOR", QByteArray::number(percent / 100.0));
 }
 
+void use_native_text_rendering()
+{
+    QQuickWindow::setTextRenderType(QQuickWindow::NativeTextRendering);
+}
+
 void prepare_qt_for_ui_check()
 {
     qInstallMessageHandler(uiCheckMessageHandler);
@@ -716,13 +721,23 @@ bool runOnQtMainThreadSync(F &&fn, uint32_t timeout_ms = 500)
     struct SyncState {
         std::mutex mutex;
         std::condition_variable cv;
+        bool started = false;
         bool done = false;
+        bool cancelled = false;
     };
     auto state = std::make_shared<SyncState>();
     auto task = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
     QMetaObject::invokeMethod(
         app,
         [state, task]() {
+            {
+                // `fn` often captures the caller's stack by reference, so it
+                // must never run after the caller has given up and returned.
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->cancelled)
+                    return;
+                state->started = true;
+            }
             (*task)();
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
@@ -732,9 +747,17 @@ bool runOnQtMainThreadSync(F &&fn, uint32_t timeout_ms = 500)
         },
         Qt::QueuedConnection);
     std::unique_lock<std::mutex> lock(state->mutex);
-    return state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&state]() {
-        return state->done;
-    });
+    if (state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&state]() {
+            return state->done;
+        }))
+        return true;
+    if (!state->started) {
+        state->cancelled = true;
+        return false;
+    }
+    // It is already running on the main thread: wait so it can't outlive our stack.
+    state->cv.wait(lock, [&state]() { return state->done; });
+    return true;
 }
 } // namespace
 #endif
@@ -970,6 +993,31 @@ void linux_tray_set_tooltip(rust::Str tooltip)
     });
 #else
     (void)tooltip;
+#endif
+}
+
+void linux_tray_set_one_colour(bool one_colour, rust::Str icon_name, rust::Str icon_path)
+{
+#if defined(__linux__)
+    const QString name = QString::fromUtf8(icon_name.data(), static_cast<qsizetype>(icon_name.size()));
+    const QString path = QString::fromUtf8(icon_path.data(), static_cast<qsizetype>(icon_path.size()));
+    runOnQtMainThread([one_colour, name, path]() {
+        auto *tray = linuxTray().icon.data();
+        if (!tray)
+            return;
+        // A theme icon goes to the panel by name, so a panel that recolors
+        // icons (KDE Plasma) matches it to its own colors (#555).
+        QIcon icon = one_colour ? QIcon::fromTheme(name) : QIcon();
+        if (icon.isNull())
+            icon = appIcon();
+        if (icon.isNull() && !path.isEmpty())
+            icon = QIcon(path);
+        tray->setIcon(icon);
+    });
+#else
+    (void)one_colour;
+    (void)icon_name;
+    (void)icon_path;
 #endif
 }
 

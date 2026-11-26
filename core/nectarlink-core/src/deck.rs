@@ -14,10 +14,10 @@ use std::{
 };
 
 pub use nectarlink_protocol::messages::{
-    AudioOutputDevice, DeckLayout, DeckPage, DeckPress, DeckState, DeckTile, KeyMod, PcAudioSet,
+    AudioOutputDevice, DeckLayout, DeckPage, DeckPress, DeckState, DeckTile, KeyMod, PcAudioSet, PcRadioSet,
     deck::{
         ACTIONS as DECK_ACTIONS, MAX_ID_BYTES as MAX_DECK_ID_BYTES, MAX_LABEL_BYTES as MAX_DECK_LABEL_BYTES,
-        MAX_PAGES as MAX_DECK_PAGES, MAX_TILES_PER_PAGE as MAX_DECK_TILES_PER_PAGE, PC_AUDIO,
+        MAX_PAGES as MAX_DECK_PAGES, MAX_TILES_PER_PAGE as MAX_DECK_TILES_PER_PAGE, PC_AUDIO, PC_RADIOS,
     },
     deck_colors, deck_icons, deck_kinds, is_valid_deck_id, remote_keys,
 };
@@ -43,6 +43,25 @@ pub const COMMANDS_TOGGLE: &str = "commands";
 const MAX_URL_BYTES: usize = 2048;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_COMMAND_BYTES: usize = 1024;
+/// Most steps in a macro tile (#490).
+pub const MAX_MACRO_STEPS: usize = 16;
+/// Longest pause after one macro step, and all of a macro's pauses together.
+pub const MAX_MACRO_DELAY_MS: u32 = 10_000;
+pub const MAX_MACRO_TOTAL_DELAY_MS: u32 = 30_000;
+
+/// One step of a macro tile: an action, then a pause before the next one.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroStep {
+    pub action: DeckAction,
+    #[serde(default)]
+    pub delay_ms: u32,
+}
+
+impl std::fmt::Debug for MacroStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MacroStep").field("action", &self.action).field("delay_ms", &self.delay_ms).finish()
+    }
+}
 
 /// A PC-owned action bound to a Deck tile. Parameters stay on the PC and are
 /// never sent over the wire.
@@ -77,6 +96,20 @@ pub enum DeckAction {
     RunCommand {
         command: String,
     },
+    RestartPc,
+    ShutDownPc,
+    /// Its steps in order (#490). Not nested, and no restart or shut down
+    /// inside: those are asked about on the phone, a macro isn't.
+    Macro {
+        steps: Vec<MacroStep>,
+    },
+    /// On and off in turn (#640): `on` runs when it's off, `off` when it's
+    /// on. Each is an action that fits in a macro. Whether it's on is kept
+    /// in [`DeckConfig::toggles_on`].
+    Toggle {
+        on: Box<DeckAction>,
+        off: Box<DeckAction>,
+    },
 }
 
 /// Never prints paths, URLs, text snippets, or commands (protocol v0 §11).
@@ -106,12 +139,26 @@ impl DeckAction {
             Self::TypeText { .. } => deck_kinds::TYPE_TEXT,
             Self::LaunchApp { .. } => deck_kinds::LAUNCH_APP,
             Self::RunCommand { .. } => deck_kinds::RUN_COMMAND,
+            Self::RestartPc => deck_kinds::RESTART_PC,
+            Self::ShutDownPc => deck_kinds::SHUT_DOWN_PC,
+            Self::Macro { .. } => deck_kinds::MACRO,
+            Self::Toggle { .. } => deck_kinds::TOGGLE,
         }
     }
 
     /// Whether this action requires the per-device `commands` toggle.
     pub fn requires_commands_toggle(&self) -> bool {
-        matches!(self, Self::RunCommand { .. })
+        match self {
+            Self::RunCommand { .. } => true,
+            Self::Macro { steps } => steps.iter().any(|s| s.action.requires_commands_toggle()),
+            Self::Toggle { on, off } => on.requires_commands_toggle() || off.requires_commands_toggle(),
+            _ => false,
+        }
+    }
+
+    /// Whether it can be one step of a macro, or one side of a toggle.
+    pub fn fits_in_macro(&self) -> bool {
+        !matches!(self, Self::Macro { .. } | Self::Toggle { .. } | Self::RestartPc | Self::ShutDownPc)
     }
 
     /// Validates action parameters.
@@ -127,7 +174,19 @@ impl DeckAction {
             | Self::LockPc
             | Self::ShowDesktop
             | Self::SwitchWindow
-            | Self::Screenshot => true,
+            | Self::Screenshot
+            | Self::RestartPc
+            | Self::ShutDownPc => true,
+            Self::Macro { steps } => {
+                (1..=MAX_MACRO_STEPS).contains(&steps.len())
+                    && steps.iter().all(|s| {
+                        s.action.fits_in_macro() && s.action.is_valid() && s.delay_ms <= MAX_MACRO_DELAY_MS
+                    })
+                    && steps.iter().map(|s| s.delay_ms).sum::<u32>() <= MAX_MACRO_TOTAL_DELAY_MS
+            }
+            Self::Toggle { on, off } => {
+                on.fits_in_macro() && on.is_valid() && off.fits_in_macro() && off.is_valid()
+            }
             Self::Shortcut { key, mods } => is_valid_shortcut(key, mods),
             Self::OpenUrl { url } => is_valid_http_url(url),
             Self::TypeText { text } => is_valid_snippet(text),
@@ -150,6 +209,12 @@ impl DeckAction {
             Self::ShowDesktop => "Show desktop (Win+D)".into(),
             Self::SwitchWindow => "Switch window (Alt+Tab)".into(),
             Self::Screenshot => "Take screenshot (Win+Shift+S)".into(),
+            Self::RestartPc => "Restart this PC".into(),
+            Self::ShutDownPc => "Shut down this PC".into(),
+            Self::Macro { steps } => {
+                steps.iter().map(|s| s.action.summary()).collect::<Vec<_>>().join(", then ")
+            }
+            Self::Toggle { on, off } => format!("On: {}. Off: {}", on.summary(), off.summary()),
             Self::Shortcut { key, mods } => format_shortcut(key, mods),
             Self::OpenUrl { url } => url.clone(),
             Self::TypeText { text } => {
@@ -330,6 +395,8 @@ impl DeckTileConfig {
             icon: self.icon.clone(),
             color: self.color.clone(),
             kind: self.action.kind().into(),
+            needs_commands: self.action.kind() != deck_kinds::RUN_COMMAND
+                && self.action.requires_commands_toggle(),
         }
     }
 }
@@ -366,6 +433,9 @@ impl DeckPageConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeckConfig {
     pub pages: Vec<DeckPageConfig>,
+    /// The `toggle` tiles that are on (#640), kept across restarts.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub toggles_on: BTreeSet<String>,
 }
 
 impl DeckConfig {
@@ -411,7 +481,39 @@ impl DeckConfig {
             }
             pages.push(DeckPageConfig { id: page.id, name, tiles });
         }
-        (!pages.is_empty()).then_some(DeckConfig { pages })
+        // Only toggles that are still there.
+        let toggles_on = self
+            .toggles_on
+            .into_iter()
+            .filter(|id| {
+                pages
+                    .iter()
+                    .flat_map(|p| p.tiles.iter())
+                    .any(|t| t.id == *id && matches!(t.action, DeckAction::Toggle { .. }))
+            })
+            .collect();
+        (!pages.is_empty()).then_some(DeckConfig { pages, toggles_on })
+    }
+
+    /// Presses the `toggle` tile `id`: the action to run now (`off` when
+    /// it's on, else `on`), and whether it's on after. `None` for any other tile.
+    pub fn toggle_press(&self, id: &str) -> Option<(DeckAction, bool)> {
+        let DeckAction::Toggle { on, off } = &self.tile(id)?.action else { return None };
+        Some(if self.toggles_on.contains(id) { ((**off).clone(), false) } else { ((**on).clone(), true) })
+    }
+
+    /// Notes whether the `toggle` tile `id` is on now.
+    pub fn set_toggle(&mut self, id: &str, on: bool) {
+        if on {
+            self.toggles_on.insert(id.to_owned());
+        } else {
+            self.toggles_on.remove(id);
+        }
+    }
+
+    /// The `toggle` tiles that are on, for [`DeckState::toggles_on`].
+    pub fn toggles_on_list(&self) -> Vec<String> {
+        self.toggles_on.iter().cloned().collect()
     }
 
     /// Converts to the wire [`DeckLayout`] sent to paired phones.
@@ -454,6 +556,7 @@ impl DeckConfig {
                     tile("lock_pc", DeckAction::LockPc),
                 ],
             }],
+            toggles_on: BTreeSet::new(),
         }
     }
 
@@ -571,6 +674,10 @@ impl Shared {
         self.we_offer(PC_AUDIO)
     }
 
+    fn offers_pc_radios(&self) -> bool {
+        self.we_offer(PC_RADIOS)
+    }
+
     fn deck_allowed(&self, peer: &DeviceId) -> bool {
         self.toggle_on(peer, INPUT_TOGGLE) || self.toggle_on(peer, crate::actions::POWER_TOGGLE)
     }
@@ -679,7 +786,27 @@ async fn send_pc_audio(shared: &Arc<Shared>, session: &Arc<Session>, req: PcAudi
     Ok(())
 }
 
-/// Handles `deck.layout`, `deck.state`, `deck.press`, and `pc.audio.set`.
+/// Asks a paired PC to turn its Wi-Fi and/or Bluetooth on or off (`pc.radio.set`, #636).
+pub(crate) async fn set_pc_radio(
+    shared: &Arc<Shared>,
+    session: &Arc<Session>,
+    wifi: Option<bool>,
+    bluetooth: Option<bool>,
+) -> Result<()> {
+    let req = PcRadioSet { wifi, bluetooth };
+    if !req.is_valid() {
+        return Err(Error::Protocol("invalid PC radio request".into()));
+    }
+    let peer_caps = shared.store.get_peer(&session.peer)?.map(|p| p.caps).unwrap_or_default();
+    if !peer_caps.contains(PC_RADIOS) {
+        return Err(Error::Unsupported);
+    }
+    let env = Envelope::new(types::PC_RADIO_SET, &req)?;
+    session.request(env, REQUEST_TIMEOUT).await?.expect(types::OK)?;
+    Ok(())
+}
+
+/// Handles `deck.layout`, `deck.state`, `deck.press`, `pc.audio.set` and `pc.radio.set`.
 pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &Envelope) -> Result<bool> {
     let peer = session.peer;
     match env.t.as_str() {
@@ -706,6 +833,13 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
             let reply = match env.body::<PcAudioSet>() {
                 Ok(req) => run_pc_audio_set(shared, &peer, req).await,
                 Err(_) => Envelope::error(ErrorCode::BadMessage, "invalid pc.audio.set body"),
+            };
+            session.send(reply.reply_to(env.id)).await?;
+        }
+        types::PC_RADIO_SET => {
+            let reply = match env.body::<PcRadioSet>() {
+                Ok(req) => run_pc_radio_set(shared, &peer, req).await,
+                Err(_) => Envelope::error(ErrorCode::BadMessage, "invalid pc.radio.set body"),
             };
             session.send(reply.reply_to(env.id)).await?;
         }
@@ -787,6 +921,39 @@ async fn run_pc_audio_set(shared: &Arc<Shared>, peer: &DeviceId, req: PcAudioSet
     }
 }
 
+/// Turns this PC's radios on or off for a phone, with the same permission
+/// as its volume: PC actions or remote input on for that phone.
+async fn run_pc_radio_set(shared: &Arc<Shared>, peer: &DeviceId, req: PcRadioSet) -> Envelope {
+    if !req.is_valid() {
+        return Envelope::error(ErrorCode::BadMessage, "nothing to turn on or off");
+    }
+    if !shared.offers_pc_radios() {
+        return Envelope::error(ErrorCode::Unsupported, "this PC can't switch its radios");
+    }
+    if !shared.toggle_on(peer, crate::actions::POWER_TOGGLE) && !shared.toggle_on(peer, INPUT_TOGGLE) {
+        return Envelope::error(ErrorCode::Denied, "PC actions are turned off for this device");
+    }
+    let platform = shared.platform.clone();
+    let from = *peer;
+    let (wifi, bluetooth) = (req.wifi, req.bluetooth);
+    let ran = tokio::task::spawn_blocking(move || platform.set_pc_radio(&from, wifi, bluetooth))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match ran {
+        Ok(()) => {
+            let mut state = shared.deck.local_state();
+            state.wifi = wifi.or(state.wifi);
+            state.bluetooth = bluetooth.or(state.bluetooth);
+            let _ = shared.set_deck_state(state).await;
+            Envelope::empty(types::OK)
+        }
+        Err(reason) => {
+            tracing::warn!(reason, "pc.radio.set failed");
+            Envelope::error(ErrorCode::Internal, "failed")
+        }
+    }
+}
+
 async fn run_press(shared: &Arc<Shared>, peer: &DeviceId, req: DeckPress) -> Envelope {
     if !req.is_valid() {
         return Envelope::error(ErrorCode::BadMessage, "invalid tile ID");
@@ -805,7 +972,9 @@ async fn run_press(shared: &Arc<Shared>, peer: &DeviceId, req: DeckPress) -> Env
     let Some(tile) = layout.tile(&req.tile).cloned() else {
         return Envelope::error(ErrorCode::NotFound, "unknown tile");
     };
-    if tile.kind == deck_kinds::RUN_COMMAND && !shared.toggle_on(peer, COMMANDS_TOGGLE) {
+    if (tile.kind == deck_kinds::RUN_COMMAND || tile.needs_commands)
+        && !shared.toggle_on(peer, COMMANDS_TOGGLE)
+    {
         return Envelope::error(ErrorCode::Denied, "commands are turned off for this device");
     }
     let platform = shared.platform.clone();
@@ -826,6 +995,183 @@ async fn run_press(shared: &Arc<Shared>, peer: &DeviceId, req: DeckPress) -> Env
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step(action: DeckAction, delay_ms: u32) -> MacroStep {
+        MacroStep { action, delay_ms }
+    }
+
+    #[test]
+    fn a_macro_is_some_ordinary_actions_with_short_pauses() {
+        let ok = DeckAction::Macro {
+            steps: vec![step(DeckAction::MediaPlayPause, 500), step(DeckAction::LockPc, 0)],
+        };
+        assert!(ok.is_valid());
+        assert_eq!(ok.kind(), deck_kinds::MACRO);
+        assert!(!ok.requires_commands_toggle());
+        assert_eq!(ok.summary(), "Play or pause media, then Lock this PC");
+
+        assert!(!DeckAction::Macro { steps: Vec::new() }.is_valid());
+        let too_many = vec![step(DeckAction::VolumeUp, 0); MAX_MACRO_STEPS + 1];
+        assert!(!DeckAction::Macro { steps: too_many }.is_valid());
+        let long_pause = vec![step(DeckAction::VolumeUp, MAX_MACRO_DELAY_MS + 1)];
+        assert!(!DeckAction::Macro { steps: long_pause }.is_valid());
+        let long_in_all = vec![step(DeckAction::VolumeUp, MAX_MACRO_DELAY_MS); 4];
+        assert!(!DeckAction::Macro { steps: long_in_all }.is_valid());
+        // Nothing nested, and no unconfirmed restart or shut down.
+        for inner in [ok.clone(), DeckAction::RestartPc, DeckAction::ShutDownPc] {
+            assert!(!DeckAction::Macro { steps: vec![step(inner, 0)] }.is_valid());
+        }
+        let bad_step = DeckAction::OpenUrl { url: "javascript:alert(1)".into() };
+        assert!(!DeckAction::Macro { steps: vec![step(bad_step, 0)] }.is_valid());
+    }
+
+    #[test]
+    fn a_macro_with_a_command_needs_the_commands_toggle_on_the_wire() {
+        let action = DeckAction::Macro {
+            steps: vec![
+                step(DeckAction::RunCommand { command: "echo hi".into() }, 100),
+                step(DeckAction::VolumeMute, 0),
+            ],
+        };
+        assert!(action.requires_commands_toggle());
+        let tile = DeckTileConfig {
+            id: "m1".into(),
+            label: "Wind down".into(),
+            icon: deck_icons::BOLT.into(),
+            color: deck_colors::VIOLET.into(),
+            action,
+        };
+        assert!(tile.is_valid());
+        let wire = tile.to_wire();
+        assert_eq!(wire.kind, deck_kinds::MACRO);
+        assert!(wire.needs_commands);
+        // The command itself never goes to the phone.
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(!json.contains("echo"));
+        // A run_command tile says so by its kind, and the flag stays off the wire.
+        let plain =
+            DeckTileConfig { action: DeckAction::RunCommand { command: "echo hi".into() }, ..tile }.to_wire();
+        assert!(!plain.needs_commands);
+        assert!(!serde_json::to_string(&plain).unwrap().contains("needs_commands"));
+    }
+
+    #[test]
+    fn power_tiles_and_macros_keep_their_steps_on_the_pc() {
+        let config = DeckConfig {
+            pages: vec![DeckPageConfig {
+                id: "p".into(),
+                name: "Main".into(),
+                tiles: vec![
+                    DeckTileConfig {
+                        id: "off".into(),
+                        label: "Shut down".into(),
+                        icon: deck_icons::POWER.into(),
+                        color: deck_colors::RED.into(),
+                        action: DeckAction::ShutDownPc,
+                    },
+                    DeckTileConfig {
+                        id: "m".into(),
+                        label: "Pause and lock".into(),
+                        icon: deck_icons::BOLT.into(),
+                        color: deck_colors::VIOLET.into(),
+                        action: DeckAction::Macro {
+                            steps: vec![step(DeckAction::MediaPlayPause, 1000), step(DeckAction::LockPc, 0)],
+                        },
+                    },
+                ],
+            }],
+            toggles_on: BTreeSet::new(),
+        };
+        let saved = serde_json::to_string(&config).unwrap();
+        let back: DeckConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, config);
+        assert!(back.sanitized().is_some_and(|c| c.pages[0].tiles.len() == 2));
+        let layout = config.to_wire_layout();
+        assert!(layout.is_valid());
+        assert!(deck_kinds::needs_confirmation(&layout.pages[0].tiles[0].kind));
+        assert!(!deck_kinds::needs_confirmation(&layout.pages[0].tiles[1].kind));
+    }
+
+    fn toggle_tile(id: &str, on: DeckAction, off: DeckAction) -> DeckTileConfig {
+        DeckTileConfig {
+            id: id.into(),
+            label: "Monitors".into(),
+            icon: deck_icons::TOGGLE.into(),
+            color: deck_colors::GREEN.into(),
+            action: DeckAction::Toggle { on: Box::new(on), off: Box::new(off) },
+        }
+    }
+
+    fn deck_with(tiles: Vec<DeckTileConfig>) -> DeckConfig {
+        DeckConfig {
+            pages: vec![DeckPageConfig { id: "p".into(), name: "Main".into(), tiles }],
+            toggles_on: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn a_toggle_runs_on_then_off_in_turn_and_keeps_where_it_is() {
+        let on = DeckAction::RunCommand { command: "niri msg action power-on-monitors".into() };
+        let off = DeckAction::RunCommand { command: "niri msg action power-off-monitors".into() };
+        let mut deck = deck_with(vec![toggle_tile("mon", on.clone(), off.clone())]);
+        assert!(deck.is_valid());
+
+        let (run, after) = deck.toggle_press("mon").unwrap();
+        assert_eq!((run, after), (on.clone(), true));
+        deck.set_toggle("mon", after);
+        assert_eq!(deck.toggles_on_list(), vec!["mon".to_owned()]);
+        let (run, after) = deck.toggle_press("mon").unwrap();
+        assert_eq!((run, after), (off, false));
+        deck.set_toggle("mon", after);
+        assert!(deck.toggles_on_list().is_empty());
+
+        // Kept in deck.json, and only for toggles that are still there.
+        deck.set_toggle("mon", true);
+        deck.set_toggle("gone", true);
+        let back: DeckConfig = serde_json::from_str(&serde_json::to_string(&deck).unwrap()).unwrap();
+        assert_eq!(back.sanitized().unwrap().toggles_on_list(), vec!["mon".to_owned()]);
+        // Any other tile isn't a toggle.
+        assert!(DeckConfig::default_deck().toggle_press("play_pause").is_none());
+    }
+
+    #[test]
+    fn a_toggle_sides_are_plain_actions_and_commands_need_the_toggle() {
+        let command = DeckAction::RunCommand { command: "echo on".into() };
+        let toggle = |on, off| DeckAction::Toggle { on: Box::new(on), off: Box::new(off) };
+        assert!(toggle(DeckAction::MicMute, DeckAction::MicMute).is_valid());
+        assert!(!toggle(DeckAction::ShutDownPc, DeckAction::MicMute).is_valid());
+        assert!(!toggle(DeckAction::MicMute, toggle(DeckAction::MicMute, DeckAction::MicMute)).is_valid());
+        let with_command = toggle(command, DeckAction::MicMute);
+        assert!(with_command.requires_commands_toggle());
+        assert!(!with_command.fits_in_macro());
+        let wire =
+            toggle_tile("t", DeckAction::MicMute, DeckAction::RunCommand { command: "x".into() }).to_wire();
+        assert_eq!(wire.kind, deck_kinds::TOGGLE);
+        assert!(wire.needs_commands && wire.is_valid());
+    }
+
+    #[test]
+    fn a_phone_reads_which_toggles_are_on() {
+        let state = DeckState { toggles_on: vec!["mon".into()], ..DeckState::default() };
+        let back: DeckState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(back.is_valid() && back.is_on("mon") && !back.is_on("other"));
+        // None on: left out, so older phones see what they always did.
+        assert!(!serde_json::to_string(&DeckState::default()).unwrap().contains("toggles_on"));
+    }
+
+    #[test]
+    fn an_older_phone_drops_tiles_it_does_not_know_and_keeps_the_rest() {
+        // What a phone from before these kinds makes of a layout with them:
+        // the tile goes, the page stays.
+        let json = r#"{"pages":[{"id":"p","name":"Main","tiles":[
+            {"id":"a","label":"Mute","icon":"volume_off","color":"teal","kind":"volume_mute"},
+            {"id":"b","label":"Later","icon":"bolt","color":"violet","kind":"some_future_kind","needs_commands":true}
+        ]}]}"#;
+        let layout: DeckLayout = serde_json::from_str(json).unwrap();
+        let clean = layout.sanitized().unwrap();
+        assert_eq!(clean.pages[0].tiles.len(), 1);
+        assert_eq!(clean.pages[0].tiles[0].id, "a");
+    }
 
     #[test]
     fn default_deck_matches_wire_layout_and_is_valid() {

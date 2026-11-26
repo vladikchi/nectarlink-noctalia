@@ -43,6 +43,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -109,9 +110,64 @@ fun DeckScreen(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val scope = rememberCoroutineScope()
 
-    var fullScreen by rememberSaveable { mutableStateOf(false) }
+    // Its own key: by position alone, a value another screen saved there could
+    // come back here after Android restores the app, as another type (eccd0ad7cb0b).
+    var fullScreen by rememberSaveable(key = "deck_full_screen") { mutableStateOf(false) }
     var access by remember(device.id) { mutableStateOf(Core.RemoteAccess.Allowed) }
     var commandsDenied by remember(device.id) { mutableStateOf(false) }
+    // A restart or shut down tile waiting for "are you sure" (#490).
+    var confirming by remember(device.id) { mutableStateOf<DeckTile?>(null) }
+
+    fun pressTile(tile: DeckTile) {
+        // A macro with a command step is held back by the same switch as a command tile.
+        val runsCommands = tile.kind == "run_command" || tile.kind == KIND_MACRO
+        scope.launch {
+            when (core.deckPress(device.id, tile.id)) {
+                Core.DeckPressResult.Ok -> {
+                    access = Core.RemoteAccess.Allowed
+                    if (runsCommands) commandsDenied = false
+                }
+                Core.DeckPressResult.Denied -> {
+                    val chk = core.remoteCheck(device.id)
+                    access = chk
+                    if (chk == Core.RemoteAccess.Allowed && runsCommands) {
+                        commandsDenied = true
+                    }
+                }
+                Core.DeckPressResult.Offline -> {
+                    access = Core.RemoteAccess.Offline
+                }
+                else -> {}
+            }
+        }
+    }
+
+    confirming?.let { tile ->
+        val restart = tile.kind == KIND_RESTART
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = {
+                Text(
+                    stringResource(
+                        if (restart) R.string.deck_confirm_restart_title else R.string.deck_confirm_shut_down_title,
+                        device.name,
+                    ),
+                )
+            },
+            text = { Text(stringResource(R.string.deck_confirm_power_text)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirming = null
+                    pressTile(tile)
+                }) {
+                    Text(stringResource(if (restart) R.string.deck_confirm_restart else R.string.deck_confirm_shut_down))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) { Text(stringResource(android.R.string.cancel)) }
+            },
+        )
+    }
 
     // The screen stays on while Deck is in use with its PC there: on a charger, or
     // for a while after each tap. Restore system bars on exit.
@@ -165,6 +221,9 @@ fun DeckScreen(
         muted = false,
         micMuted = false,
         outputDevices = emptyList(),
+        togglesOn = emptyList(),
+        wifi = null,
+        bluetooth = null,
     )
     val pages = layout.pages.ifEmpty { fallbackDefaultLayout(context).pages }
     val pagerState = rememberPagerState(pageCount = { pages.size })
@@ -233,6 +292,7 @@ fun DeckScreen(
                 liveState = liveState,
                 onSetPcAudio = { vol, muted -> core.setPcAudio(device.id, vol, muted) },
                 onPickOutput = { output -> core.setPcAudioOutput(device.id, output) },
+                onSetRadio = { wifi, bluetooth -> core.setPcRadio(device.id, wifi, bluetooth) },
             )
         }
 
@@ -328,24 +388,11 @@ fun DeckScreen(
                             enabled = device.online,
                             onPress = {
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                scope.launch {
-                                    when (core.deckPress(device.id, tile.id)) {
-                                        Core.DeckPressResult.Ok -> {
-                                            access = Core.RemoteAccess.Allowed
-                                            if (tile.kind == "run_command") commandsDenied = false
-                                        }
-                                        Core.DeckPressResult.Denied -> {
-                                            val chk = core.remoteCheck(device.id)
-                                            access = chk
-                                            if (chk == Core.RemoteAccess.Allowed && tile.kind == "run_command") {
-                                                commandsDenied = true
-                                            }
-                                        }
-                                        Core.DeckPressResult.Offline -> {
-                                            access = Core.RemoteAccess.Offline
-                                        }
-                                        else -> {}
-                                    }
+                                // Restart and shut down end what's running on the PC: asked first (#490).
+                                if (tile.kind == KIND_RESTART || tile.kind == KIND_SHUT_DOWN) {
+                                    confirming = tile
+                                } else {
+                                    pressTile(tile)
                                 }
                             },
                         )
@@ -355,6 +402,10 @@ fun DeckScreen(
         }
     }
 }
+
+private const val KIND_RESTART = "restart_pc"
+private const val KIND_SHUT_DOWN = "shut_down_pc"
+private const val KIND_MACRO = "macro"
 
 private object MaterialResource {
     @Composable
@@ -367,6 +418,7 @@ private fun DeckAudioHeaderBar(
     liveState: DeckState,
     onSetPcAudio: (volume: Int?, muted: Boolean?) -> Unit,
     onPickOutput: (String) -> Unit,
+    onSetRadio: (wifi: Boolean?, bluetooth: Boolean?) -> Unit,
 ) {
     var draggingVolume by remember { mutableStateOf<Float?>(null) }
     var lastSentVolume by remember { mutableStateOf(liveState.volume.toInt()) }
@@ -454,6 +506,13 @@ private fun DeckAudioHeaderBar(
                     }
                 }
             }
+            // The PC's Wi-Fi and Bluetooth (#636).
+            app.nectarlink.android.ui.home.PcRadioSwitches(
+                pcName = pcName,
+                state = liveState,
+                onSet = onSetRadio,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
     }
 
@@ -541,7 +600,9 @@ private fun tilePalette(
 }
 
 @Composable
-private fun liveBadgeText(kind: String, state: DeckState): String? = when (kind) {
+private fun liveBadgeText(tile: DeckTile, state: DeckState): String? = when (tile.kind) {
+    // On and off in turn (#640).
+    "toggle" -> stringResource(if (tile.id in state.togglesOn) R.string.deck_on else R.string.deck_off)
     "media_play_pause" -> stringResource(if (state.playing) R.string.deck_playing else R.string.deck_paused)
     "volume_mute" ->
         if (state.muted) stringResource(R.string.deck_muted)
@@ -555,7 +616,8 @@ private fun liveBadgeText(kind: String, state: DeckState): String? = when (kind)
     else -> null
 }
 
-private fun isLiveHighlighted(kind: String, state: DeckState): Boolean = when (kind) {
+private fun isLiveHighlighted(tile: DeckTile, state: DeckState): Boolean = when (tile.kind) {
+    "toggle" -> tile.id in state.togglesOn
     "media_play_pause" -> state.playing
     "volume_mute" -> state.muted
     "mic_mute" -> state.micMuted == true
@@ -566,6 +628,7 @@ private fun effectiveIcon(tile: DeckTile, state: DeckState): String = when {
     tile.kind == "media_play_pause" && state.playing -> "pause"
     tile.kind == "mic_mute" && state.micMuted == true -> "mic_off"
     tile.kind == "volume_mute" && state.muted -> "volume_off"
+    tile.kind == "toggle" && tile.icon == "toggle" && tile.id in state.togglesOn -> "toggle_on"
     else -> tile.icon
 }
 
@@ -578,8 +641,8 @@ private fun DeckTileButton(
     onPress: () -> Unit,
 ) {
     val reducedMotion = LocalReducedMotion.current
-    val badge = liveBadgeText(tile.kind, liveState)
-    val highlighted = isLiveHighlighted(tile.kind, liveState)
+    val badge = liveBadgeText(tile, liveState)
+    val highlighted = isLiveHighlighted(tile, liveState)
     val palette = tilePalette(tile.color, highlighted)
     val iconName = effectiveIcon(tile, liveState)
 
@@ -915,6 +978,37 @@ private fun DrawScope.drawDeckIcon(name: String, color: Color, scratchPath: Path
             drawPath(scratchPath, color = color, style = stroke)
             drawLine(color, pt(12f, 17f), pt(20f, 17f), strokeWidth = stroke.width, cap = StrokeCap.Round)
         }
+        "restart" -> {
+            drawArc(
+                color = color,
+                startAngle = -60f,
+                sweepAngle = 300f,
+                useCenter = false,
+                topLeft = pt(4f, 4f),
+                size = Size(sx(16f), sy(16f)),
+                style = stroke,
+            )
+            scratchPath.rewind()
+            scratchPath.moveTo(sx(14.5f), sy(2.5f))
+            scratchPath.lineTo(sx(16.5f), sy(5.2f))
+            scratchPath.lineTo(sx(13.4f), sy(6.6f))
+            drawPath(scratchPath, color = color, style = stroke)
+        }
+        // A switch, its knob filled on the right when on (#640).
+        "toggle", "toggle_on" -> {
+            drawRoundRect(
+                color = color,
+                topLeft = pt(2f, 7f),
+                size = Size(sx(20f), sy(10f)),
+                cornerRadius = CornerRadius(sx(5f), sy(5f)),
+                style = stroke,
+            )
+            if (name == "toggle_on") {
+                drawCircle(color = color, radius = sx(3f), center = pt(17f, 12f))
+            } else {
+                drawCircle(color = color, radius = sx(3f), center = pt(7f, 12f), style = stroke)
+            }
+        }
         "spark", "bolt" -> {
             scratchPath.rewind()
             scratchPath.moveTo(sx(13f), sy(2f))
@@ -1061,6 +1155,9 @@ internal fun defaultDeckLabel(label: String): Int? = when (label) {
     "Switch window" -> R.string.deck_default_switch_window
     "Screenshot" -> R.string.deck_default_screenshot
     "Lock PC" -> R.string.deck_default_lock_pc
+    "Restart" -> R.string.deck_default_restart
+    "Shut down" -> R.string.deck_default_shut_down
+    "Macro" -> R.string.deck_default_macro
     else -> null
 }
 

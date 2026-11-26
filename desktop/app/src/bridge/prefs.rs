@@ -60,6 +60,8 @@ pub mod qobject {
         #[qproperty(bool, suggest_clipboard_actions)]
         /// Copy one-time codes from phone notifications and SMS automatically.
         #[qproperty(bool, auto_copy_otp)]
+        /// Mark a text conversation read on the phone when it's read here.
+        #[qproperty(bool, mark_read_on_phone)]
         /// Pause PC media playback while a phone call is ringing or active.
         #[qproperty(bool, pause_media_on_call)]
         /// Mute this PC while a phone watches its playback (Play on phone).
@@ -77,6 +79,7 @@ pub mod qobject {
         /// Where that toolbar sits: dragged to a corner of the window.
         #[qproperty(bool, mirror_toolbar_bottom)]
         #[qproperty(bool, mirror_toolbar_left)]
+        #[qproperty(bool, mirror_toolbar_outside)]
         /// No pop-ups for phone notifications while this PC is locked.
         #[qproperty(bool, quiet_when_locked)]
         #[qproperty(bool, hold_when_locked)]
@@ -88,6 +91,8 @@ pub mod qobject {
         #[qproperty(bool, auto_update)]
         /// Install a newer release by itself at a quiet moment.
         #[qproperty(bool, install_updates)]
+        /// Send the anonymous daily count.
+        #[qproperty(bool, daily_count)]
         /// The update channel: "stable" or "nightly" (the build's own when unset).
         #[qproperty(QString, update_channel)]
         /// Whether the channel is this PC's, for every account on it (Windows'
@@ -142,6 +147,8 @@ pub mod qobject {
         #[qproperty(bool, keep_popups_paused, cxx_name = "keepPopupsPaused")]
         /// Use phones' USB debugging for USB features (#439); applies on restart.
         #[qproperty(bool, usb_debugging)]
+        /// Reach paired phones over Bluetooth when nothing else does.
+        #[qproperty(bool, bluetooth_link)]
         /// How many days notification history is kept: 1, 3, 7 or 30 (#442).
         #[qproperty(i32, notification_history_days)]
         #[qproperty(QString, mirror_quality)]
@@ -286,6 +293,21 @@ pub mod qobject {
         /// Removes a folder sync rule by ID.
         #[qinvokable]
         fn remove_folder_sync_rule(self: Pin<&mut Preferences>, rule_id: &QString);
+        /// Changes a folder sync rule: its folders, direction and deletions (#491).
+        #[qinvokable]
+        #[cxx_name = "updateFolderSyncRule"]
+        fn update_folder_sync_rule(
+            self: Pin<&mut Preferences>,
+            rule_id: &QString,
+            phone_folder: &QString,
+            pc_folder: &QString,
+            mode: &QString,
+            remove_deleted: bool,
+        );
+        /// `base` with the phone folder's name added, for "Keep each folder's name".
+        #[qinvokable]
+        #[cxx_name = "pcFolderKeepingName"]
+        fn pc_folder_keeping_name(self: &Preferences, base: &QString, phone_folder: &QString) -> QString;
         /// Enables or disables a folder sync rule by ID.
         #[qinvokable]
         fn set_folder_sync_rule_enabled(self: Pin<&mut Preferences>, rule_id: &QString, enabled: bool);
@@ -394,6 +416,7 @@ pub struct PreferencesRust {
     clipboard_history: bool,
     suggest_clipboard_actions: bool,
     auto_copy_otp: bool,
+    mark_read_on_phone: bool,
     pause_media_on_call: bool,
     mute_while_watched: bool,
     language: QString,
@@ -403,12 +426,14 @@ pub struct PreferencesRust {
     hide_mirror_toolbar: bool,
     mirror_toolbar_bottom: bool,
     mirror_toolbar_left: bool,
+    mirror_toolbar_outside: bool,
     quiet_when_locked: bool,
     hold_when_locked: bool,
     send_to_menu: bool,
     start_with_windows: bool,
     auto_update: bool,
     install_updates: bool,
+    daily_count: bool,
     update_channel: QString,
     update_channel_shared: bool,
     battery_alerts: bool,
@@ -437,6 +462,7 @@ pub struct PreferencesRust {
     sync_passwords: bool,
     keep_popups_paused: bool,
     usb_debugging: bool,
+    bluetooth_link: bool,
     notification_history_days: i32,
     mirror_quality: QString,
     mirror_fps: i32,
@@ -509,6 +535,8 @@ impl cxx_qt::Initialize for qobject::Preferences {
         crate::clipboard::set_suggest_actions(settings.suggest_clipboard_actions);
         self.as_mut().set_auto_copy_otp(settings.auto_copy_otp);
         crate::notifications::set_auto_copy_otp(settings.auto_copy_otp);
+        self.as_mut().set_mark_read_on_phone(settings.mark_read_on_phone);
+        crate::messages::set_mark_read_on_phone(settings.mark_read_on_phone);
         self.as_mut().set_pause_media_on_call(settings.pause_media_on_call);
         self.as_mut().set_mute_while_watched(settings.mute_while_watched);
         self.as_mut().set_language(QString::from(&settings.language));
@@ -521,6 +549,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().set_hide_mirror_toolbar(settings.hide_mirror_toolbar);
         self.as_mut().set_mirror_toolbar_bottom(settings.mirror_toolbar_bottom);
         self.as_mut().set_mirror_toolbar_left(settings.mirror_toolbar_left);
+        self.as_mut().set_mirror_toolbar_outside(settings.mirror_toolbar_outside);
         self.as_mut().set_quiet_when_locked(settings.quiet_when_locked);
         crate::notifications::set_quiet_when_locked(settings.quiet_when_locked);
         self.as_mut().set_hold_when_locked(settings.hold_when_locked);
@@ -528,6 +557,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().set_send_to_menu(settings.send_to_menu);
         self.as_mut().set_auto_update(settings.auto_update);
         self.as_mut().set_install_updates(settings.install_updates);
+        self.as_mut().set_daily_count(settings.daily_count);
         // Shown as the channel in use, whether picked or the build's own.
         let channel =
             crate::version::Channel::parse(&settings.update_channel).unwrap_or_else(crate::updater::channel);
@@ -565,6 +595,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().set_sync_passwords(settings.sync_passwords);
         self.as_mut().set_keep_popups_paused(settings.keep_popups_paused);
         self.as_mut().set_usb_debugging(settings.usb_debugging);
+        self.as_mut().set_bluetooth_link(settings.bluetooth_link);
         self.as_mut().set_notification_history_days(settings.notification_history_days as i32);
         self.as_mut().set_mirror_quality(QString::from(crate::settings::mirror_quality().name()));
         self.as_mut().set_mirror_fps(crate::settings::sane_mirror_fps(settings.mirror_fps) as i32);
@@ -629,7 +660,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().on_close_to_tray_changed(|p| p.save()).release();
         self.as_mut()
             .on_tray_one_colour_changed(|p| {
-                #[cfg(windows)]
+                #[cfg(any(windows, target_os = "linux"))]
                 crate::win::tray::set_one_colour(p.tray_one_colour);
                 p.save();
             })
@@ -655,6 +686,12 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut()
             .on_auto_copy_otp_changed(|p| {
                 crate::notifications::set_auto_copy_otp(p.auto_copy_otp);
+                p.save();
+            })
+            .release();
+        self.as_mut()
+            .on_mark_read_on_phone_changed(|p| {
+                crate::messages::set_mark_read_on_phone(p.mark_read_on_phone);
                 p.save();
             })
             .release();
@@ -693,6 +730,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut().on_hide_mirror_toolbar_changed(|p| p.save()).release();
         self.as_mut().on_mirror_toolbar_bottom_changed(|p| p.save()).release();
         self.as_mut().on_mirror_toolbar_left_changed(|p| p.save()).release();
+        self.as_mut().on_mirror_toolbar_outside_changed(|p| p.save()).release();
         self.as_mut()
             .on_sync_dnd_changed(|p| {
                 crate::notifications::set_sync_dnd(p.sync_dnd);
@@ -708,6 +746,12 @@ impl cxx_qt::Initialize for qobject::Preferences {
         self.as_mut()
             .on_auto_update_changed(|p| {
                 crate::updater::set_auto(p.auto_update);
+                p.save();
+            })
+            .release();
+        self.as_mut()
+            .on_daily_count_changed(|p| {
+                crate::bridge::report::set_daily_count(p.daily_count);
                 p.save();
             })
             .release();
@@ -914,6 +958,7 @@ impl cxx_qt::Initialize for qobject::Preferences {
             .release();
         // Saved for the next start: the core reads it once (#439).
         self.as_mut().on_usb_debugging_changed(|p| p.save()).release();
+        self.as_mut().on_bluetooth_link_changed(|p| p.save()).release();
         self.as_mut()
             .on_notification_history_days_changed(|p| {
                 crate::state::set_history_days(u32::try_from(p.notification_history_days).unwrap_or(1));
@@ -1251,6 +1296,57 @@ impl qobject::Preferences {
         QString::from(&folder_from_url(url).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
     }
 
+    pub fn update_folder_sync_rule(
+        mut self: Pin<&mut Self>,
+        rule_id: &QString,
+        phone_folder: &QString,
+        pc_folder: &QString,
+        mode: &QString,
+        remove_deleted: bool,
+    ) {
+        let id = String::from(rule_id);
+        let raw_pc = QUrl::from(pc_folder)
+            .to_local_file()
+            .map(|p| String::from(&p))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| String::from(pc_folder));
+        let pc_trimmed = raw_pc.trim().to_owned();
+        let Some(phone_trimmed) = crate::folder_sync::phone_folder_path(&String::from(phone_folder)) else {
+            return;
+        };
+        if pc_trimmed.is_empty() {
+            return;
+        }
+        let mode = match String::from(mode) {
+            m if m == crate::folder_sync::MODE_PC_TO_PHONE || m == crate::folder_sync::MODE_TWO_WAY => m,
+            _ => crate::folder_sync::MODE_PHONE_TO_PC.to_owned(),
+        };
+        let mut rules = crate::settings::folder_sync_rules();
+        let Some(rule) = rules.iter_mut().find(|r| r.id == id) else { return };
+        // Other folders: what was synced before says nothing about them.
+        if rule.phone_folder != phone_trimmed || rule.pc_folder != pc_trimmed {
+            crate::folder_sync::forget_rule(&id);
+        }
+        rule.phone_folder = phone_trimmed;
+        rule.pc_folder = pc_trimmed;
+        rule.remove_deleted = remove_deleted && mode != crate::folder_sync::MODE_PC_TO_PHONE;
+        rule.mode = mode;
+        let json = serde_json::to_string(&rules).unwrap_or_else(|_| "[]".into());
+        crate::settings::set_folder_sync_rules(rules);
+        self.as_mut().set_folder_sync_rules_json(QString::from(&json));
+        self.save();
+    }
+
+    pub fn pc_folder_keeping_name(&self, base: &QString, phone_folder: &QString) -> QString {
+        let base = folder_from_url(base)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from(base));
+        QString::from(
+            &crate::folder_sync::pc_folder_keeping_name(&base, &String::from(phone_folder))
+                .unwrap_or_default(),
+        )
+    }
+
     pub fn remove_folder_sync_rule(mut self: Pin<&mut Self>, rule_id: &QString) {
         let id = String::from(rule_id);
         let mut rules = crate::settings::folder_sync_rules();
@@ -1349,6 +1445,7 @@ impl qobject::Preferences {
             clipboard_history: p.clipboard_history,
             suggest_clipboard_actions: p.suggest_clipboard_actions,
             auto_copy_otp: p.auto_copy_otp,
+            mark_read_on_phone: p.mark_read_on_phone,
             pause_media_on_call: p.pause_media_on_call,
             mute_while_watched: p.mute_while_watched,
             language: String::from(&p.language),
@@ -1358,16 +1455,19 @@ impl qobject::Preferences {
             hide_mirror_toolbar: p.hide_mirror_toolbar,
             mirror_toolbar_bottom: p.mirror_toolbar_bottom,
             mirror_toolbar_left: p.mirror_toolbar_left,
+            mirror_toolbar_outside: p.mirror_toolbar_outside,
             quiet_when_locked: p.quiet_when_locked,
             hold_when_locked: p.hold_when_locked,
             send_to_menu: p.send_to_menu,
             auto_update: p.auto_update,
             install_updates: p.install_updates,
+            daily_count: p.daily_count,
             update_channel: String::from(&p.update_channel),
             battery_alerts: p.battery_alerts,
             battery_full_threshold: p.battery_full_threshold.clamp(50, 100) as u8,
             battery_low_threshold: p.battery_low_threshold.clamp(5, 50) as u8,
             phone_sound_buffer_ms: p.phone_sound_buffer_ms.clamp(20, 500) as u16,
+            phone_sound_volume: crate::settings::phone_sound_volume(),
             ui_scale: u16::try_from(p.ui_scale).unwrap_or(100),
             keep_screen_off: crate::settings::keep_screen_off_phones(),
             device_nicknames: crate::settings::device_nicknames(),
@@ -1403,6 +1503,7 @@ impl qobject::Preferences {
             keep_popups_paused: p.keep_popups_paused,
             popups_paused: p.keep_popups_paused && crate::notifications::paused(),
             usb_debugging: p.usb_debugging,
+            bluetooth_link: p.bluetooth_link,
             notification_history_days: u32::try_from(p.notification_history_days).unwrap_or(1),
             mirror_quality: String::from(&p.mirror_quality),
             mirror_fps: crate::settings::sane_mirror_fps(u32::try_from(p.mirror_fps).unwrap_or(60)),

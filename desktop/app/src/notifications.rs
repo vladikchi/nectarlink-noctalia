@@ -542,6 +542,15 @@ pub fn on_toast(event: ToastEvent) {
             return crate::calls::on_toast(key, action);
         }
         ToastEvent::Dismissed { device, .. } if device == crate::calls::TOAST_GROUP => return,
+        // A folder sync's progress: opening shows Files & Sync's list.
+        ToastEvent::Dismissed { device, .. } | ToastEvent::Action { device, .. }
+            if device == crate::folder_sync::TOAST_GROUP =>
+        {
+            return;
+        }
+        ToastEvent::Opened { device, .. } if device == crate::folder_sync::TOAST_GROUP => {
+            return crate::bridge::app::request_activation();
+        }
         ToastEvent::Dismissed { device, .. } | ToastEvent::Action { device, .. }
             if device == crate::battery::TOAST_GROUP =>
         {
@@ -561,6 +570,9 @@ pub fn on_toast(event: ToastEvent) {
         ToastEvent::Dismissed { device, key } if device == crate::report_requests::TOAST_GROUP => {
             return crate::report_requests::on_toast(key, None);
         }
+        ToastEvent::Reply { device, key, text, .. } if device == crate::report_requests::TOAST_GROUP => {
+            return crate::report_requests::on_reply(key, text);
+        }
         ToastEvent::Opened { device, key } if device == crate::report_requests::TOAST_GROUP => {
             return crate::report_requests::on_opened(key);
         }
@@ -569,6 +581,12 @@ pub fn on_toast(event: ToastEvent) {
     match event {
         ToastEvent::Opened { device, key } => {
             if let Ok(dev) = device.parse::<DeviceId>() {
+                // A text opens its conversation, at the message.
+                if let Some(text) = text_notification(dev, &key)
+                    && crate::messages::open_from_notification(dev, text)
+                {
+                    return;
+                }
                 let app_target = core_host::host().hub.read(|s| {
                     let can_open = s.matrices.get(&dev).and_then(|m| m.state("mirroring.app_windows"))
                         == Some(nectarlink_core::FeatureState::Available);
@@ -614,6 +632,24 @@ pub fn on_toast(event: ToastEvent) {
         ToastEvent::Reply { device, key, action, text } => run_action(&device, key, action, Some(text)),
         ToastEvent::Dismissed { device, key } => dismiss(&device, key),
     }
+}
+
+/// What a phone notification says, for finding the text it is about.
+fn text_notification(device: DeviceId, key: &str) -> Option<crate::messages::TextNotification> {
+    core_host::host().hub.read(|s| {
+        let live = s.notifications.iter().find(|n| n.device == device && n.notification.key == key);
+        let n = match live {
+            Some(n) => &n.notification,
+            None => &s.history.iter().find(|h| h.device == device && h.notification.key == key)?.notification,
+        };
+        Some(crate::messages::TextNotification {
+            app: n.app.clone(),
+            title: n.title.clone().unwrap_or_default(),
+            text: n.text.clone().unwrap_or_default(),
+            when: n.when,
+            conversation: n.conversation.as_ref().map(|c| c.title.clone()),
+        })
+    })
 }
 
 /// Sets what an app's notifications do on this PC. Pop-ups it no longer

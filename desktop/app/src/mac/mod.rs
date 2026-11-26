@@ -6,6 +6,7 @@ pub mod audio;
 pub mod audio_out;
 pub mod autostart;
 pub mod ble_beacon;
+pub mod bluetooth_link;
 pub mod browser;
 pub mod bt_hfp;
 pub mod clipboard;
@@ -20,6 +21,7 @@ pub mod media_sessions;
 #[path = "../linux/mp4.rs"]
 pub mod mp4;
 pub mod net;
+pub mod radios;
 pub mod share;
 pub mod share_target;
 pub mod shell;

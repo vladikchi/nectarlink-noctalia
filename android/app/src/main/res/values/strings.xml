@@ -36,6 +36,7 @@
     <string name="link_online_rtt">Connected · %1$d ms</string>
     <string name="link_usb">On USB</string>
     <string name="link_usb_rtt">On USB · %1$d ms</string>
+    <string name="link_bluetooth">On Bluetooth</string>
     <string name="link_away">Connected while away</string>
     <string name="link_connecting">Connecting…</string>
     <string name="link_offline_seen">Offline · seen %1$s</string>
@@ -51,6 +52,8 @@
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
+    <string name="settings_search">Search settings</string>
+    <string name="settings_search_none">No setting matches that.</string>
     <string name="settings_appearance">Appearance</string>
     <string name="settings_theme">Theme</string>
     <string name="settings_mode">Mode</string>
@@ -126,6 +129,7 @@
     <string name="elevated_pair_text">In Wireless debugging, tap Pair device with pairing code, then type the code here.</string>
     <string name="elevated_pair_action">Enter code</string>
     <string name="elevated_pair_collapsed">Swipe this notification down (on Xiaomi phones, long-press it), then tap Enter code.</string>
+    <string name="elevated_pair_dnd">Do Not Disturb is on, so the pairing code notification may not show. Turn it off until pairing is done.</string>
     <string name="elevated_pair_hint">6-digit pairing code</string>
     <string name="elevated_pairing">Pairing…</string>
     <string name="elevated_no_dialog">The pairing code isn\'t showing. In Wireless debugging, tap Pair device with pairing code, then type it here.</string>
@@ -301,12 +305,18 @@
     <string name="update_current_version">You have NectarLink %1$s.</string>
     <string name="update_check_failed">Couldn’t check for updates. Check your internet connection.</string>
     <string name="action_lock_pc">Lock PC</string>
+    <string name="action_unlock_pc">Unlock PC</string>
+    <string name="pc_unlock_unavailable">Lock the PC, then try again while connected to the same network.</string>
     <string name="action_sleep_pc">Sleep</string>
     <string name="action_hibernate_pc">Hibernate</string>
     <string name="action_phone_sound_on_pc">Play phone sound on the PC</string>
     <string name="action_phone_sound_back">Play the sound on the phone again</string>
     <string name="phone_sound_on_pc_off">%1$s doesn\'t play this phone\'s sound. On the PC, turn on Screen mirroring for this phone in Settings › Devices.</string>
     <string name="action_shutdown_pc">Shut down</string>
+    <string name="action_restart_pc">Restart</string>
+    <string name="restart_pc_title">Restart %1$s?</string>
+    <string name="restart_pc_text">Windows will close open apps and restart. An app with unsaved work can still stop it.</string>
+    <string name="pc_restart_requested">Restart requested for %1$s.</string>
     <string name="shutdown_pc_title">Shut down %1$s?</string>
     <string name="shutdown_pc_text">Open apps close. One with unsaved work can still stop it.</string>
     <string name="action_wake_pc">Wake</string>
@@ -349,6 +359,7 @@
         <item quantity="other">Connected to %1$d PCs</item>
     </plurals>
     <string name="notification_waiting">Waiting for your PC</string>
+    <string name="notification_usb_only">USB only: waiting for a cable</string>
     <string name="notification_waiting_network">Waiting for Wi-Fi to reach your PC</string>
     <string name="reconnect_known_only_title">Only on networks where a PC was found</string>
     <string name="reconnect_known_only_body">Looks for your PCs by itself only on Wi-Fi where it reached one before. Elsewhere a PC can still reach the phone.</string>
@@ -1455,7 +1466,12 @@
     <string name="settings_category_devices">Devices</string>
     <string name="settings_category_features">Features &amp; Data</string>
     <string name="settings_theme_artwork_color">Media artwork color</string>
+    <string name="settings_usb_only_title">USB only</string>
+    <string name="settings_usb_only_body">Connect to PCs only through a USB cable: no Wi-Fi, mobile data or local discovery</string>
+    <string name="usb_only_tile_label">USB only</string>
     <string name="settings_mobile_data_body">Stay connected over LTE/5G or relay when away from Wi-Fi</string>
+    <string name="settings_bluetooth_link_title">Bluetooth when there\'s no network</string>
+    <string name="settings_bluetooth_link_body">A PC paired with this phone in Bluetooth settings stays connected without Wi-Fi or data, for notifications, texts, calls and the clipboard</string>
     <string name="settings_background_clipboard_title">Background clipboard access</string>
     <string name="settings_guide_card_body">Browse every feature, check live requirements, or jump straight to its controls.</string>
     <string name="settings_walkthrough_body">Reopen the setup guide for permissions, pairing, and power levels.</string>
@@ -1596,7 +1612,6 @@
     <string name="channel_report_replies">Replies to your reports</string>
     <string name="report_reply_title">There\'s a reply to your report</string>
     <string name="report_closed_title">Your report was closed</string>
-    <string name="report_notice_text">Report #%1$d. Tap to read it on GitHub.</string>
     <string name="crash_card_sent">Thanks, the crash report is sent</string>
     <string name="crash_card_title">NectarLink closed unexpectedly</string>
     <string name="crash_card_failed">The crash report couldn\'t be sent. Use Look first to send it another way.</string>
@@ -1633,6 +1648,53 @@
     <string name="community_invite_text">Questions, ideas and early builds, with the people who make and use NectarLink.</string>
     <string name="community_invite_join">Join Discord</string>
     <string name="community_invite_later">Not now</string>
+    <string name="settings_daily_count_title">Send an anonymous daily count</string>
+    <string name="settings_daily_count_body">Once a day: the app\'s version, the platform and model, and how often each feature worked or failed. No ID and nothing personal.</string>
+    <string name="deck_confirm_restart_title">Restart %1$s?</string>
+    <string name="deck_confirm_shut_down_title">Shut down %1$s?</string>
+    <string name="deck_confirm_power_text">Apps on it with unsaved work can still stop it.</string>
+    <string name="deck_confirm_restart">Restart</string>
+    <string name="deck_confirm_shut_down">Shut down</string>
+    <string name="deck_default_restart">Restart</string>
+    <string name="deck_default_shut_down">Shut down</string>
+    <string name="deck_default_macro">Macro</string>
+    <string name="report_answer_line">%1$s: %2$s</string>
+    <string name="report_notice_open_text">Report #%1$d. Tap to read it.</string>
+    <string name="report_reply_action">Reply</string>
+    <string name="report_reply_hint">Your reply</string>
+    <string name="report_who_you">You</string>
+    <string name="report_who_other">Someone with the same problem</string>
+    <string name="report_reply_not_sent">Your reply wasn\'t sent</string>
+    <string name="report_reply_limited">That\'s the most replies for today. Try again tomorrow.</string>
+    <string name="report_reply_refused">This report can\'t take replies any more.</string>
+    <string name="report_reply_later">It couldn\'t be sent. Check the connection and try again.</string>
+    <string name="your_reports_title">Your reports</string>
+    <string name="your_reports_check">Check for answers</string>
+    <string name="your_reports_intro">Reports sent from NectarLink stay here for 30 days, with the answers to them. You can reply from here without a GitHub account. Replies are public on GitHub, like the report.</string>
+    <string name="your_reports_none">No reports sent from this phone yet.</string>
+    <string name="your_reports_waiting">Waiting to be filed</string>
+    <string name="your_reports_closed">Report #%1$d · closed</string>
+    <string name="your_reports_number">Report #%1$d</string>
+    <string name="your_reports_sent">Sent %1$s</string>
+    <string name="your_reports_on_github">On GitHub</string>
+    <string name="your_reports_load_failed">The answers couldn\'t be loaded. Check the connection and try again.</string>
+    <string name="your_reports_no_answers">No answers yet. You\'ll get a notification when there is one.</string>
+    <string name="your_reports_reply_on_github">This report was sent before replies from NectarLink, so answer it on GitHub.</string>
+    <string name="your_reports_reply_sent">Sent. It\'s on the report now.</string>
+    <string name="your_reports_sending">Sending</string>
+    <string name="your_reports_send">Send</string>
+    <string name="deck_on">On</string>
+    <string name="deck_off">Off</string>
+    <string name="media_center_title">Now playing</string>
+    <string name="media_center_on_phone">this phone</string>
+    <string name="media_center_page">%1$d of %2$d</string>
+    <string name="media_center_phone_volume">Phone volume</string>
+    <string name="media_center_output">Choose where it plays</string>
+    <string name="pc_radio_wifi">Wi-Fi</string>
+    <string name="pc_radio_bluetooth">Bluetooth</string>
+    <string name="pc_radio_wifi_off_title">Turn off %1$s\'s Wi-Fi?</string>
+    <string name="pc_radio_wifi_off_text">If this phone reaches the PC over Wi-Fi, they\'ll lose the connection, and you\'ll need to turn Wi-Fi back on at the PC.</string>
+    <string name="pc_radio_wifi_off_confirm">Turn off</string>
 </resources>
 
 

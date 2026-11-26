@@ -2772,6 +2772,9 @@ async fn start_node(cli: &Cli) -> Result<Node> {
                     name: "Speakers (CLI)".into(),
                     is_default: true,
                 }],
+                toggles_on: Vec::new(),
+                wifi: None,
+                bluetooth: None,
             })
             .await;
     }

@@ -10,6 +10,83 @@ Item {
     id: page
     property bool active: false
     property string currentSection: "appearance"
+
+    // ---- Search (#522): every row's title and description, in every section ----
+    property string searchQuery: ""
+    property var searchResults: []
+    onSearchQueryChanged: searchResults = findSettings(searchQuery)
+
+    function sectionTitle(id) {
+        for (let i = 0; i < categories.length; i++)
+            if (categories[i].id === id) return categories[i].title
+        return ""
+    }
+
+    // Rows are anything with a title and a description (ListRow, SwitchBar...).
+    function collectRows(item, section, into) {
+        if (!item) return
+        if (typeof item.title === "string" && typeof item.description === "string" && item.title.length > 0)
+            into.push({ section: section, title: item.title, description: item.description, item: item })
+        const kids = item.children
+        for (let i = 0; i < kids.length; i++)
+            collectRows(kids[i], section, into)
+    }
+
+    function findSettings(query) {
+        const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 0)
+        if (words.length === 0) return []
+        const rows = []
+        const kids = column.children
+        for (let i = 0; i < kids.length; i++) {
+            const section = kids[i].settingsSection
+            if (typeof section === "string" && section.length > 0)
+                collectRows(kids[i], section, rows)
+        }
+        // Sections by name too, so "camera" finds Camera & Audio.
+        for (let i = 0; i < categories.length; i++)
+            rows.push({ section: categories[i].id, title: categories[i].title, description: categories[i].subtitle, item: null })
+        const matches = (row) => {
+            const text = (row.title + " " + row.description + " " + sectionTitle(row.section)).toLowerCase()
+            return words.every(w => text.indexOf(w) >= 0)
+        }
+        const seen = {}
+        const found = []
+        for (let i = 0; i < rows.length && found.length < 12; i++) {
+            const key = rows[i].section + "|" + rows[i].title
+            if (seen[key] || !matches(rows[i])) continue
+            seen[key] = true
+            found.push(rows[i])
+        }
+        return found
+    }
+
+    // Opens a result's section, scrolls to its row and flashes it.
+    function openResult(result) {
+        searchQuery = ""
+        searchInput.text = ""
+        currentSection = result.section
+        pendingRow = result.item
+        scrollToRow.restart()
+    }
+    property var pendingRow: null
+    Timer {
+        id: scrollToRow
+        // After the section's own scroll-to-top and fade-in.
+        interval: 180
+        onTriggered: {
+            const row = page.pendingRow
+            page.pendingRow = null
+            if (!row || !row.visible) return
+            const pos = row.mapToItem(column, 0, 0)
+            const max = Math.max(0, contentFlickable.contentHeight - contentFlickable.height)
+            contentFlickable.contentY = Math.max(0, Math.min(max, pos.y - 24))
+            rowFlash.x = pos.x - 6
+            rowFlash.y = pos.y - 4
+            rowFlash.width = row.width + 12
+            rowFlash.height = row.height + 8
+            rowFlashAnim.restart()
+        }
+    }
     property int selectedDeviceIndex: 0
     signal pairRequested
 
@@ -27,6 +104,7 @@ Item {
         { id: "agents", title: qsTr("AI agents"), icon: Icons.terminal, subtitle: qsTr("Assistants that use your devices") },
         { id: "storage", title: qsTr("Storage & Privacy"), icon: Icons.clipboardList, subtitle: qsTr("History, caches & retention") },
         { id: "connection", title: qsTr("Connection & About"), icon: Icons.wifi, subtitle: qsTr("Doctor, Wake-on-LAN, API & version") },
+        { id: "updates", title: qsTr("Updates"), icon: Icons.download, subtitle: qsTr("Checks, channel & what's new") },
         { id: "support", title: qsTr("Community"), icon: Icons.heart, subtitle: qsTr("Discord, news and support") },
         { id: "report", title: qsTr("Report a problem"), icon: Icons.warning, subtitle: qsTr("Tell us what went wrong") }
     ]
@@ -280,7 +358,7 @@ Item {
     FolderDialog {
         id: folderSyncPcPicker
         title: qsTr("Sync into")
-        onAccepted: folderSyncSheet.pcFolder = Preferences.localFolder(selectedFolder.toString())
+        onAccepted: folderSyncSheet.pcBase = Preferences.localFolder(selectedFolder.toString())
     }
 
     FolderDialog {
@@ -425,21 +503,22 @@ Item {
         opacity: 0.6
     }
 
-    // ---- Compact Top Category Pill Bar (narrow windows < 680px) ----
-    Flickable {
+    // ---- Compact Top Category Pills (narrow windows < 680px) ----
+    // They wrap onto more lines rather than scroll sideways: a tiling window
+    // manager can make the window narrower than its minimum, and a sideways
+    // strip can't be scrolled with a mouse wheel, so the last pills were out
+    // of reach.
+    Item {
         id: compactCategoryBar
         visible: !page.wideLayout
         x: Theme.contentPadding
         y: 12
         width: parent.width - Theme.contentPadding * 2
-        height: 38
-        contentWidth: compactRow.width
-        boundsBehavior: Flickable.StopAtBounds
-        clip: true
+        height: compactRow.implicitHeight
 
-        Row {
+        Flow {
             id: compactRow
-            height: parent.height
+            width: parent.width
             spacing: 6
             Repeater {
                 model: page.categories
@@ -452,13 +531,23 @@ Item {
                         : Theme.surfaceContent
                     height: 34
                     width: compactTabRow.implicitWidth + 22
-                    anchors.verticalCenter: parent.verticalCenter
                     radius: Theme.pill(height)
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.PageTab
+                    Accessible.name: modelData.title
+                    Accessible.selected: selected
+                    Accessible.onPressAction: page.currentSection = modelData.id
+                    Keys.onPressed: (event) => {
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                            page.currentSection = compactTab.modelData.id
+                            event.accepted = true
+                        }
+                    }
                     color: selected
                         ? (Theme.graphite ? Theme.surfaceContent : Theme.secondaryContainer)
                         : Theme.surfaceContainerHigh
-                    border.width: Theme.graphite ? 1 : 0
-                    border.color: Theme.outlineVariant
+                    border.width: Theme.focusVisible(compactTab) ? 2 : (Theme.graphite ? 1 : 0)
+                    border.color: Theme.focusVisible(compactTab) ? Theme.primary : Theme.outlineVariant
                     Row {
                         id: compactTabRow
                         anchors.centerIn: parent
@@ -496,6 +585,24 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         clip: true
 
+        // A found row flashes once (#522).
+        Rectangle {
+            id: rowFlash
+            parent: column
+            z: 10
+            radius: Theme.radiusMd
+            color: "transparent"
+            border.width: 2
+            border.color: Theme.primary
+            opacity: 0
+            SequentialAnimation {
+                id: rowFlashAnim
+                NumberAnimation { target: rowFlash; property: "opacity"; to: 1; duration: Theme.reduceMotion ? 0 : 120 }
+                PauseAnimation { duration: 900 }
+                NumberAnimation { target: rowFlash; property: "opacity"; to: 0; duration: Theme.reduceMotion ? 0 : 400 }
+            }
+        }
+
         Column {
             id: column
             width: Math.min(840, contentFlickable.width - Theme.contentPadding * 2)
@@ -521,6 +628,111 @@ Item {
                     to: 0
                     duration: 135
                     easing.type: Easing.OutCubic
+                }
+            }
+
+            // Search across every section (#522).
+            Rectangle {
+                id: searchBox
+                width: parent.width
+                height: 40
+                radius: Theme.graphite ? Theme.radiusSm : height / 2
+                color: Theme.graphite ? "transparent" : Theme.surfaceContainerHighest
+                border.width: searchInput.activeFocus ? 2 : 1
+                border.color: searchInput.activeFocus ? Theme.primary : Theme.outlineVariant
+                Icon {
+                    id: searchIconSettings
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 18; height: 18
+                    path: Icons.search
+                    color: Theme.surfaceContentVariant
+                }
+                TextInput {
+                    id: searchInput
+                    anchors.left: searchIconSettings.right
+                    anchors.leftMargin: 10
+                    anchors.right: parent.right
+                    anchors.rightMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    font.family: Theme.fontUi
+                    font.pixelSize: 14
+                    color: Theme.surfaceContent
+                    selectionColor: Theme.primaryContainer
+                    selectedTextColor: Theme.primaryContainerContent
+                    clip: true
+                    Accessible.name: qsTr("Search settings")
+                    onTextChanged: page.searchQuery = text
+                    Keys.onReturnPressed: if (page.searchResults.length > 0) page.openResult(page.searchResults[0])
+                    Keys.onEnterPressed: if (page.searchResults.length > 0) page.openResult(page.searchResults[0])
+                    Keys.onEscapePressed: text = ""
+                    Txt {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: searchInput.text.length === 0
+                        role: "body"
+                        muted: true
+                        text: qsTr("Search settings")
+                    }
+                }
+            }
+            Card {
+                width: parent.width
+                visible: page.searchQuery.trim().length > 0
+                Column {
+                    width: parent.width
+                    Txt {
+                        visible: page.searchResults.length === 0
+                        width: parent.width
+                        topPadding: 8
+                        bottomPadding: 8
+                        role: "body"
+                        muted: true
+                        text: qsTr("No setting matches \"%1\".").arg(page.searchQuery.trim())
+                    }
+                    Repeater {
+                        model: page.searchResults
+                        delegate: Rectangle {
+                            id: resultRow
+                            required property var modelData
+                            required property int index
+                            width: parent.width
+                            height: resultText.implicitHeight + 16
+                            radius: Theme.radiusMd
+                            color: resultMouse.containsMouse ? Theme.subtleFillSecondary : "transparent"
+                            activeFocusOnTab: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: modelData.title + ", " + page.sectionTitle(modelData.section)
+                            Keys.onReturnPressed: page.openResult(modelData)
+                            Keys.onSpacePressed: page.openResult(modelData)
+                            Column {
+                                id: resultText
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 2
+                                Txt { width: parent.width; role: "label"; text: resultRow.modelData.title; elide: Text.ElideRight }
+                                Txt {
+                                    width: parent.width
+                                    role: "caption"
+                                    muted: true
+                                    elide: Text.ElideRight
+                                    text: page.sectionTitle(resultRow.modelData.section)
+                                        + (resultRow.modelData.item && resultRow.modelData.description.length > 0
+                                           ? " · " + resultRow.modelData.description : "")
+                                }
+                            }
+                            MouseArea {
+                                id: resultMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: page.openResult(resultRow.modelData)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -555,6 +767,7 @@ Item {
             // 1. APPEARANCE
             // ================================================================
             Column {
+                readonly property string settingsSection: "appearance"
                 visible: page.currentSection === "appearance"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -972,6 +1185,7 @@ Item {
             // 2. GENERAL
             // ================================================================
             Column {
+                readonly property string settingsSection: "general"
                 visible: page.currentSection === "general"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -1069,14 +1283,16 @@ Item {
                             }
                         }
 
-                        Divider { width: parent.width; visible: Qt.platform.os === "windows" }
+                        Divider { width: parent.width; visible: Qt.platform.os !== "osx" }
 
                         ListRow {
                             width: parent.width
-                            visible: Qt.platform.os === "windows"
+                            visible: Qt.platform.os !== "osx"
                             iconPath: Icons.palette
                             title: qsTr("Tray icon")
-                            description: qsTr("One color turns white or black to match the taskbar.")
+                            description: Qt.platform.os === "windows"
+                                ? qsTr("One color turns white or black to match the taskbar.")
+                                : qsTr("One color takes the panel's colors where the desktop recolors tray icons, as KDE Plasma does.")
                             Segmented {
                                 options: [
                                     { value: "colour", label: qsTr("Color") },
@@ -1371,6 +1587,18 @@ Item {
                                 onToggled: (on) => Preferences.hideMirrorToolbar = !on
                             }
                         }
+                        ListRow {
+                            width: parent.width
+                            visible: !Preferences.hideMirrorToolbar
+                            iconPath: Icons.window
+                            title: qsTr("Toolbar beside the picture")
+                            description: qsTr("Gives the toolbar a strip of the window above or below the phone's picture, so it never covers the app. The window grows by its height.")
+                            Toggle {
+                                label: qsTr("Toolbar beside the picture")
+                                checked: Preferences.mirrorToolbarOutside
+                                onToggled: (on) => Preferences.mirrorToolbarOutside = on
+                            }
+                        }
 
                         Divider { width: parent.width }
 
@@ -1463,6 +1691,21 @@ Item {
 
                         Divider { width: parent.width }
 
+                        // Mark read on the phone
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.messages
+                            title: qsTr("Mark texts read on the phone")
+                            description: qsTr("Reading a conversation here marks it read on the phone too, in its messaging app.")
+                            Toggle {
+                                label: qsTr("Mark texts read on the phone")
+                                checked: Preferences.markReadOnPhone
+                                onToggled: (on) => Preferences.markReadOnPhone = on
+                            }
+                        }
+
+                        Divider { width: parent.width }
+
                         // Row 5: Suggest clipboard actions
                         ListRow {
                             width: parent.width
@@ -1483,6 +1726,7 @@ Item {
             // 3. DEVICES
             // ================================================================
             Column {
+                readonly property string settingsSection: "devices"
                 visible: page.currentSection === "devices"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -1577,14 +1821,14 @@ Item {
                         visible: index === page.selectedDeviceIndex
                         width: visible ? column.width : 0
 
-                        // Another PC (#432): only its clipboard and files switches mean anything.
+                        // Another PC (#432): its clipboard and files switches, and remote input for its mouse and keyboard here.
                         readonly property bool isPc: kind === "desktop" || kind === "laptop"
                             || (kind === "unknown" && (os === "windows" || os === "macos" || os === "linux"))
 
                         // Re-read when toggles (and so capabilities) change.
                         readonly property var toggles: AppController.capsRevision >= 0 && AppController.togglesRevision >= 0
                                                        ? AppController.deviceToggles(deviceId)
-                                                             .filter(t => !isPc || t.name === "clipboard" || t.name === "files")
+                                                             .filter(t => !isPc || t.name === "clipboard" || t.name === "files" || t.name === "remote_input")
                                                        : []
 
                         Column {
@@ -1672,12 +1916,15 @@ Item {
                                 }
                             }
                             // The phone beside the PC: the mouse goes over the edge of the screen to it (#107).
+                            // Another PC too: its mouse and keyboard, over that edge (D432).
                             ListRow {
                                 width: parent.width
-                                visible: Qt.platform.os === "windows" && !deviceCard.isPc
+                                visible: Qt.platform.os === "windows"
                                 iconPath: Icons.desktop
                                 title: qsTr("Beside this PC")
-                                description: qsTr("Move the mouse past that edge of the screen to use it on this phone, and type there. Move it back, or press Ctrl+Alt+Esc, to return. Needs Elevated.")
+                                description: deviceCard.isPc
+                                    ? qsTr("Move the mouse past that edge of the screen to use it on that PC, and type there with this keyboard. Move it back, or press Ctrl+Alt+Esc, to return. That PC asks the first time, or turn on Remote mouse, keyboard & Deck for this PC there.")
+                                    : qsTr("Move the mouse past that edge of the screen to use it on this phone, and type there. Move it back, or press Ctrl+Alt+Esc, to return. Needs Elevated.")
                                 Segmented {
                                     options: [
                                         { value: "", label: qsTr("Off") },
@@ -1737,6 +1984,7 @@ Item {
                                             declined: qsTr("Not confirmed on the phone."),
                                             phone_away: qsTr("The phone isn't connected on this network."),
                                             phone_cant: qsTr("Turn on Unlock this PC with your fingerprint for this PC on the phone too."),
+                                            no_biometric: qsTr("The phone can't do this: it needs Android 11 or later and a fingerprint that Android counts as strong."),
                                             failed: qsTr("Couldn't set it up. Try again."),
                                             registered: "",
                                             register_failed: qsTr("Windows didn't allow it. Turn it off and on to try again.")
@@ -1960,6 +2208,7 @@ Item {
             // 4. CAMERA & AUDIO
             // ================================================================
             Column {
+                readonly property string settingsSection: "camera_audio"
                 visible: page.currentSection === "camera_audio"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -1976,12 +2225,15 @@ Item {
                                 ? qsTr("The phone's full resolution. Uses more of its battery, and needs good Wi-Fi or USB and a GPU on this PC.")
                                 : Preferences.mirrorQuality === "smoother"
                                 ? qsTr("A softer picture that holds up better on weak Wi-Fi.")
+                                : Preferences.mirrorQuality === "adaptive"
+                                ? qsTr("Starts at Balanced and lowers the picture while this PC can't keep up, then goes back up once it can.")
                                 : qsTr("For the phone's screen and app windows, from the next time you open them.")
                             Segmented {
                                 options: [
                                     { value: "balanced", label: qsTr("Balanced") },
                                     { value: "sharper", label: qsTr("Sharper") },
-                                    { value: "smoother", label: qsTr("Smoother") }
+                                    { value: "smoother", label: qsTr("Smoother") },
+                                    { value: "adaptive", label: qsTr("Adaptive") }
                                 ]
                                 value: Preferences.mirrorQuality
                                 onPicked: (value) => Preferences.mirrorQuality = value
@@ -2411,6 +2663,7 @@ Item {
             // 5. NOTIFICATIONS
             // ================================================================
             Column {
+                readonly property string settingsSection: "notifications"
                 visible: page.currentSection === "notifications"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -2506,7 +2759,10 @@ Item {
                                 width: notifPairRow.colWidth
                                 iconPath: Icons.bell
                                 title: qsTr("Forward PC notifications")
-                                description: qsTr("Send PC alerts to phone while away.")
+                                // Other apps' notifications are only read on Linux (#604).
+                                description: Qt.platform.os === "linux"
+                                    ? qsTr("Send PC alerts to phone while away.")
+                                    : qsTr("Send your automations' alerts to the phone. Other apps' alerts are Linux only for now.")
                                 Toggle {
                                     label: qsTr("Forward PC notifications")
                                     checked: Preferences.forwardPcNotificationsToPhone
@@ -2587,6 +2843,7 @@ Item {
             // 6. FILES & SYNC
             // ================================================================
             Column {
+                readonly property string settingsSection: "files_sync"
                 visible: page.currentSection === "files_sync"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -2884,6 +3141,14 @@ Item {
                                             anchors.verticalCenter: parent.verticalCenter
                                             variant: "text"
                                             size: "sm"
+                                            iconPath: Icons.edit
+                                            text: qsTr("Edit")
+                                            onClicked: folderSyncSheet.openToEdit(syncRuleDelegate.modelData)
+                                        }
+                                        Button {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            variant: "text"
+                                            size: "sm"
                                             iconPath: Icons.trash
                                             text: qsTr("Remove")
                                             onClicked: Preferences.removeFolderSyncRule(syncRuleDelegate.modelData.id)
@@ -2906,6 +3171,7 @@ Item {
             // 7. SHORTCUTS & RULES
             // ================================================================
             Column {
+                readonly property string settingsSection: "shortcuts"
                 visible: page.currentSection === "shortcuts"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -3392,6 +3658,7 @@ Item {
             // 8. STORAGE & PRIVACY
             // ================================================================
             Column {
+                readonly property string settingsSection: "storage"
                 visible: page.currentSection === "storage"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -3417,6 +3684,19 @@ Item {
                             width: parent.width
                             visible: Qt.platform.os !== "osx"
                         }
+                        // The one call home that isn't asked for each time (#534).
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.shield
+                            title: qsTr("Send an anonymous daily count")
+                            description: qsTr("Once a day: the app's version, the platform and model, and how often each feature worked or failed. No ID and nothing personal.")
+                            Toggle {
+                                label: qsTr("Send an anonymous daily count")
+                                checked: Preferences.dailyCount
+                                onToggled: (on) => Preferences.dailyCount = on
+                            }
+                        }
+                        Divider { width: parent.width }
 
                         // Row 1: Clipboard history | Notification history
                         Item {
@@ -3740,6 +4020,7 @@ Item {
             // AI AGENTS
             // ================================================================
             AgentsSection {
+                readonly property string settingsSection: "agents"
                 visible: page.currentSection === "agents"
                 width: visible ? parent.width : 0
             }
@@ -3748,6 +4029,7 @@ Item {
             // 9. CONNECTION & ABOUT
             // ================================================================
             Column {
+                readonly property string settingsSection: "connection"
                 visible: page.currentSection === "connection"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -3794,6 +4076,20 @@ Item {
                                 label: qsTr("Use USB debugging")
                                 checked: Preferences.usbDebugging
                                 onToggled: function(v) { Preferences.usbDebugging = v }
+                            }
+                        }
+                        Divider { width: parent.width; visible: Qt.platform.os !== "osx" }
+                        // #313: a phone paired over Bluetooth stays reachable without Wi-Fi or data.
+                        ListRow {
+                            width: parent.width
+                            visible: Qt.platform.os !== "osx"
+                            iconPath: Icons.bluetooth
+                            title: qsTr("Bluetooth when there's no network")
+                            description: qsTr("A phone paired with this PC in Bluetooth settings stays connected without Wi-Fi or data, for notifications, texts, calls and the clipboard. Turn it on in the phone's Settings too.")
+                            Toggle {
+                                label: qsTr("Bluetooth when there's no network")
+                                checked: Preferences.bluetoothLink
+                                onToggled: function(v) { Preferences.bluetoothLink = v }
                             }
                         }
                         Divider { width: parent.width; visible: Qt.platform.os === "linux" }
@@ -3927,9 +4223,87 @@ Item {
                             width: parent.width
                             iconPath: Icons.desktop
                             title: qsTr("NectarLink %1").arg(AppController.version)
+                            description: qsTr("This PC: %1").arg(AppController.deviceName)
+                            Row {
+                                spacing: 8
+                                Button {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    variant: "outline"
+                                    size: "sm"
+                                    iconPath: Icons.folder
+                                    text: qsTr("Open logs")
+                                    onClicked: Qt.openUrlExternally(AppController.logsUrl())
+                                }
+                                Button {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    variant: "outline"
+                                    size: "sm"
+                                    iconPath: Icons.warning
+                                    text: qsTr("Report a problem")
+                                    onClicked: Report.open()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Card {
+                    width: parent.width
+                    Column {
+                        width: parent.width
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.compass
+                            title: qsTr("Setup walkthrough")
+                            description: qsTr("Re-open the setup guide.")
+                            Button {
+                                variant: "tonal"
+                                size: "sm"
+                                text: qsTr("Open")
+                                onClicked: Preferences.restartWalkthrough()
+                            }
+                        }
+                        Divider { width: parent.width }
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.book
+                            title: qsTr("Features guide")
+                            description: qsTr("What each feature needs and where to find it.")
+                            Button {
+                                variant: "tonal"
+                                size: "sm"
+                                text: qsTr("Open")
+                                onClicked: AppController.currentPage = "guide"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ================================================================
+            // 10. UPDATES (#558)
+            // ================================================================
+            Column {
+                readonly property string settingsSection: "updates"
+                visible: page.currentSection === "updates"
+                width: visible ? parent.width : 0
+                spacing: Theme.gutter
+
+                Card {
+                    width: parent.width
+                    Column {
+                        width: parent.width
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.download
+                            title: qsTr("NectarLink %1").arg(AppController.version)
                             description: AppController.updateStatus.length > 0
                                          ? AppController.updateStatus
-                                         : qsTr("This PC: %1").arg(AppController.deviceName)
+                                         : !AppController.canUpdate
+                                         ? qsTr("This copy doesn't update itself: it runs from its folder, or it's the Mac app, which doesn't yet.")
+                                         : AppController.updateCheckedAt > 0
+                                         ? qsTr("Last checked %1").arg(new Date(AppController.updateCheckedAt * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat))
+                                         : qsTr("Not checked yet.")
                             Row {
                                 spacing: 8
                                 // The download's progress, or a spinner while its size isn't known.
@@ -3966,22 +4340,6 @@ Item {
                                           : qsTr("Check for updates")
                                     onClicked: AppController.updateVersion.length > 0
                                                ? AppController.installUpdate() : AppController.checkForUpdates()
-                                }
-                                Button {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    variant: "outline"
-                                    size: "sm"
-                                    iconPath: Icons.folder
-                                    text: qsTr("Open logs")
-                                    onClicked: Qt.openUrlExternally(AppController.logsUrl())
-                                }
-                                Button {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    variant: "outline"
-                                    size: "sm"
-                                    iconPath: Icons.warning
-                                    text: qsTr("Report a problem")
-                                    onClicked: Report.open()
                                 }
                             }
                         }
@@ -4049,44 +4407,13 @@ Item {
                         }
                     }
                 }
-
-                Card {
-                    width: parent.width
-                    Column {
-                        width: parent.width
-                        ListRow {
-                            width: parent.width
-                            iconPath: Icons.compass
-                            title: qsTr("Setup walkthrough")
-                            description: qsTr("Re-open the setup guide.")
-                            Button {
-                                variant: "tonal"
-                                size: "sm"
-                                text: qsTr("Open")
-                                onClicked: Preferences.restartWalkthrough()
-                            }
-                        }
-                        Divider { width: parent.width }
-                        ListRow {
-                            width: parent.width
-                            iconPath: Icons.book
-                            title: qsTr("Features guide")
-                            description: qsTr("What each feature needs and where to find it.")
-                            Button {
-                                variant: "tonal"
-                                size: "sm"
-                                text: qsTr("Open")
-                                onClicked: AppController.currentPage = "guide"
-                            }
-                        }
-                    }
-                }
             }
 
             // ================================================================
-            // 10. COMMUNITY (id "support", as links to it already say)
+            // 11. COMMUNITY (id "support", as links to it already say)
             // ================================================================
             Column {
+                readonly property string settingsSection: "support"
                 visible: page.currentSection === "support"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
@@ -4159,22 +4486,39 @@ Item {
             // REPORT A PROBLEM
             // ================================================================
             Column {
+                readonly property string settingsSection: "report"
                 visible: page.currentSection === "report"
                 width: visible ? parent.width : 0
                 spacing: Theme.gutter
 
                 Card {
                     width: parent.width
-                    ListRow {
+                    Column {
                         width: parent.width
-                        iconPath: Icons.warning
-                        title: qsTr("Report a problem")
-                        description: qsTr("Tell us what went wrong. You see the whole report before it goes anywhere.")
-                        Button {
-                            variant: "fill"
-                            size: "sm"
-                            text: qsTr("Start")
-                            onClicked: Report.open()
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.warning
+                            title: qsTr("Report a problem")
+                            description: qsTr("Tell us what went wrong. You see the whole report before it goes anywhere.")
+                            Button {
+                                variant: "fill"
+                                size: "sm"
+                                text: qsTr("Start")
+                                onClicked: Report.open()
+                            }
+                        }
+                        Divider { width: parent.width }
+                        ListRow {
+                            width: parent.width
+                            iconPath: Icons.messages
+                            title: qsTr("Your reports")
+                            description: qsTr("The reports you sent, the answers to them, and a place to reply without a GitHub account.")
+                            Button {
+                                variant: "tonal"
+                                size: "sm"
+                                text: qsTr("Open")
+                                onClicked: Report.openConversations("")
+                            }
                         }
                     }
                 }
@@ -4215,37 +4559,85 @@ Item {
     Sheet {
         id: folderSyncSheet
         property string phoneId
-        property string phoneFolder
-        property string pcFolder
+        // Editing this rule, or adding when empty (#491).
+        property string editId: ""
+        // Phone folders picked from the chips (several at once when adding),
+        // plus one typed in.
+        property var picked: []
+        property string typed: ""
+        // The PC folder the user chose; empty until then, when each phone
+        // folder gets its own suggested one.
+        property string pcBase: ""
+        // In the chosen folder, each phone folder gets a folder of its name (#491).
+        property bool keepNames: true
         property string mode: "one_way_phone_to_pc"
         property bool removeDeleted: false
-        // The PC folder follows the phone folder until the user picks one.
-        property bool pcChosen: false
         readonly property var common: ["DCIM/Camera", "Pictures/Screenshots", "Download", "Documents", "Music", "Movies", "Recordings"]
-        readonly property string tidyPhoneFolder: phoneFolder.split(/[\/\\]/).map(p => p.trim()).filter(p => p.length > 0 && p !== ".").join("/")
-        readonly property bool phoneFolderOk: tidyPhoneFolder.length > 0 && tidyPhoneFolder.split("/").indexOf("..") < 0
+        function tidy(folder) {
+            return folder.split(/[\/\\]/).map(p => p.trim()).filter(p => p.length > 0 && p !== ".").join("/")
+        }
+        function folderOk(folder) { return folder.length > 0 && folder.split("/").indexOf("..") < 0 }
+        readonly property var phoneFolders: {
+            const all = picked.slice()
+            const t = tidy(typed)
+            if (folderOk(t) && all.indexOf(t) < 0) all.push(t)
+            return all
+        }
+        // Where each phone folder goes on this PC.
+        function pcFolderFor(folder) {
+            if (pcBase.length === 0) return Preferences.suggestedSyncFolder(folder)
+            return keepNames ? Preferences.pcFolderKeepingName(pcBase, folder) : pcBase
+        }
+        readonly property bool ready: phoneFolders.length > 0
+            && phoneFolders.every(f => pcFolderFor(f).length > 0)
+            && (editId.length > 0 ? phoneFolders.length === 1 : true)
         cardWidth: 480
 
         function openFor(id) {
             phoneId = id
+            editId = ""
             mode = "one_way_phone_to_pc"
             removeDeleted = false
-            pcChosen = false
-            choosePhoneFolder("DCIM/Camera")
+            pcBase = ""
+            keepNames = true
+            picked = ["DCIM/Camera"]
+            typed = ""
+            phoneFolderInput.text = ""
             open()
         }
-        function choosePhoneFolder(folder) {
-            phoneFolder = folder
-            if (phoneFolderInput.text !== folder)
-                phoneFolderInput.text = folder
-            if (!pcChosen)
-                pcFolder = Preferences.suggestedSyncFolder(folder)
+        function openToEdit(rule) {
+            phoneId = rule.phoneId
+            editId = rule.id
+            mode = rule.mode
+            removeDeleted = Boolean(rule.removeDeleted)
+            picked = [rule.phoneFolder]
+            typed = ""
+            phoneFolderInput.text = ""
+            // Kept as it is: the chosen folder, exactly.
+            pcBase = rule.pcFolder
+            keepNames = false
+            open()
+        }
+        function togglePhoneFolder(folder) {
+            const at = picked.indexOf(folder)
+            if (editId.length > 0) {
+                picked = [folder]
+            } else if (at >= 0) {
+                picked = picked.filter(f => f !== folder)
+            } else {
+                picked = picked.concat([folder])
+            }
         }
 
         Column {
             width: parent.width
             spacing: 12
-            Txt { width: parent.width; text: qsTr("Sync a folder"); role: "headline"; wrapMode: Text.WordWrap }
+            Txt {
+                width: parent.width
+                text: folderSyncSheet.editId.length > 0 ? qsTr("Edit synced folder") : qsTr("Sync folders")
+                role: "headline"
+                wrapMode: Text.WordWrap
+            }
             Txt {
                 width: parent.width
                 wrapMode: Text.WordWrap
@@ -4264,8 +4656,8 @@ Item {
                         required property string modelData
                         text: modelData
                         interactive: true
-                        selected: folderSyncSheet.tidyPhoneFolder === modelData
-                        onClicked: folderSyncSheet.choosePhoneFolder(modelData)
+                        selected: folderSyncSheet.picked.indexOf(modelData) >= 0
+                        onClicked: folderSyncSheet.togglePhoneFolder(modelData)
                     }
                 }
             }
@@ -4285,8 +4677,20 @@ Item {
                     selectByMouse: true
                     clip: true
                     Accessible.role: Accessible.EditableText
-                    Accessible.name: qsTr("Folder on the phone")
-                    onTextEdited: folderSyncSheet.choosePhoneFolder(text)
+                    Accessible.name: qsTr("Another folder on the phone")
+                    onTextEdited: {
+                        folderSyncSheet.typed = text
+                        // Editing has one folder: what's typed replaces the chip.
+                        if (folderSyncSheet.editId.length > 0 && text.trim().length > 0)
+                            folderSyncSheet.picked = []
+                    }
+                    Txt {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: phoneFolderInput.text.length === 0
+                        role: "body"
+                        muted: true
+                        text: qsTr("Another folder, like WhatsApp/Media")
+                    }
                 }
             }
 
@@ -4297,18 +4701,46 @@ Item {
                 Txt {
                     width: parent.width - choosePcFolder.width - 8
                     anchors.verticalCenter: parent.verticalCenter
-                    text: folderSyncSheet.pcFolder
+                    text: folderSyncSheet.pcBase.length > 0 ? folderSyncSheet.pcBase : qsTr("A folder of its own for each, in Pictures, Music, Videos or Documents")
                     elide: Text.ElideMiddle
+                    wrapMode: folderSyncSheet.pcBase.length > 0 ? Text.NoWrap : Text.WordWrap
                     role: "body"
+                    muted: folderSyncSheet.pcBase.length === 0
                 }
                 Button {
                     id: choosePcFolder
                     variant: "text"
                     size: "sm"
                     text: qsTr("Choose…")
-                    onClicked: {
-                        folderSyncSheet.pcChosen = true
-                        folderSyncPcPicker.open()
+                    onClicked: folderSyncPcPicker.open()
+                }
+            }
+            ListRow {
+                width: parent.width
+                visible: folderSyncSheet.pcBase.length > 0
+                title: qsTr("Keep each folder's name")
+                description: qsTr("Each phone folder goes into a folder of its own name in the one you chose, instead of straight into it.")
+                Toggle {
+                    label: qsTr("Keep each folder's name")
+                    checked: folderSyncSheet.keepNames
+                    onToggled: (on) => folderSyncSheet.keepNames = on
+                }
+            }
+            // Where each goes, when there's more than one or a name is added.
+            Column {
+                width: parent.width
+                spacing: 2
+                visible: folderSyncSheet.phoneFolders.length > 1
+                    || (folderSyncSheet.pcBase.length > 0 && folderSyncSheet.keepNames)
+                Repeater {
+                    model: folderSyncSheet.phoneFolders
+                    delegate: Txt {
+                        required property string modelData
+                        width: parent.width
+                        role: "caption"
+                        muted: true
+                        elide: Text.ElideMiddle
+                        text: modelData + "  →  " + folderSyncSheet.pcFolderFor(modelData)
                     }
                 }
             }
@@ -4353,13 +4785,22 @@ Item {
                 spacing: 10
                 Button { variant: "text"; text: qsTr("Cancel"); onClicked: folderSyncSheet.close() }
                 Button {
-                    text: qsTr("Add")
-                    enabled: folderSyncSheet.phoneFolderOk && folderSyncSheet.pcFolder.length > 0
+                    text: folderSyncSheet.editId.length > 0 ? qsTr("Save")
+                        : folderSyncSheet.phoneFolders.length > 1 ? qsTr("Add %1 folders").arg(folderSyncSheet.phoneFolders.length)
+                        : qsTr("Add")
+                    enabled: folderSyncSheet.ready
                     onClicked: {
-                        Preferences.addFolderSyncRule(folderSyncSheet.phoneId, folderSyncSheet.tidyPhoneFolder,
-                                                      folderSyncSheet.pcFolder, folderSyncSheet.mode,
-                                                      folderSyncSheet.removeDeleted)
-                        folderSyncSheet.close()
+                        const sheet = folderSyncSheet
+                        if (sheet.editId.length > 0) {
+                            const folder = sheet.phoneFolders[0]
+                            Preferences.updateFolderSyncRule(sheet.editId, folder, sheet.pcFolderFor(folder),
+                                                             sheet.mode, sheet.removeDeleted)
+                        } else {
+                            for (const folder of sheet.phoneFolders)
+                                Preferences.addFolderSyncRule(sheet.phoneId, folder, sheet.pcFolderFor(folder),
+                                                              sheet.mode, sheet.removeDeleted)
+                        }
+                        sheet.close()
                     }
                 }
             }

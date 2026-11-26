@@ -39,6 +39,7 @@ pub const ENROLL_TTL: Duration = Duration::from_secs(90);
 pub const KEY: &str = unlock::CAP_KEY;
 /// Capability a PC offers when it can unlock its locked session with a phone.
 pub const PC: &str = unlock::CAP_PC;
+pub const FROM_PHONE: &str = unlock::CAP_FROM_PHONE;
 /// The per-device toggle, off by default on both sides.
 pub const TOGGLE: &str = unlock::TOGGLE;
 /// Failed unlocks allowed within [`FAILURE_WINDOW`] before a lockout.
@@ -339,8 +340,12 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
         // Phone side: wrap a key for this PC.
         types::UNLOCK_ENROLL => match env.body::<UnlockEnroll>() {
             Ok(enroll) if enroll.is_valid() => {
-                if !allowed(shared, session) {
-                    Envelope::error(ErrorCode::Denied, "unlocking is off")
+                // Unsupported, not Denied: the PC then says to turn it on here,
+                // rather than that the phone's owner said no (#579).
+                if !shared.toggle_on(&session.peer, TOGGLE) {
+                    Envelope::error(ErrorCode::Unsupported, "unlocking is off")
+                } else if !on_local_network(shared, session) {
+                    Envelope::error(ErrorCode::Denied, "not on this network")
                 } else {
                     let ask = Ask {
                         pc_name: shown_name(&shared.peer_name(&session.peer)),
@@ -419,6 +424,15 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
             }
             _ => Envelope::error(ErrorCode::BadMessage, "invalid unlock.request"),
         },
+        types::UNLOCK_FROM_PHONE => {
+            if env.b.is_some() {
+                Envelope::error(ErrorCode::BadMessage, "invalid unlock.from-phone")
+            } else if !allowed(shared, session) || !shared.platform.unlock_from_phone(session.peer) {
+                Envelope::error(ErrorCode::Denied, "unlock needs an enrolled phone and a locked session")
+            } else {
+                Envelope::empty(types::UNLOCK_FROM_PHONE)
+            }
+        }
         // Either side: the other one turned it off.
         types::UNLOCK_FORGET => {
             // No user means every user; a body that doesn't parse, or names a user
@@ -443,6 +457,18 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
     Ok(true)
 }
 
+pub(crate) async fn request_from_phone(shared: &Shared, session: &Session) -> Result<()> {
+    if !allowed(shared, session) {
+        return Err(Error::Denied);
+    }
+    if !shared.offers(&session.peer, FROM_PHONE).unwrap_or(false) {
+        return Err(Error::Unsupported);
+    }
+    let reply =
+        session.request(Envelope::empty(types::UNLOCK_FROM_PHONE), crate::session::REQUEST_TIMEOUT).await?;
+    Ok(reply.expect(types::UNLOCK_FROM_PHONE)?)
+}
+
 /// PC side: enrolls `user` to unlock with `phone`. The phone's owner agrees
 /// and confirms with a strong biometric; the password is then kept only
 /// sealed under a key the phone holds.
@@ -456,8 +482,11 @@ pub(crate) async fn enroll(
     if !shared.offers(&session.peer, KEY)? || !shared.we_offer(PC) {
         return Err(Error::Unsupported);
     }
-    if !allowed(shared, session) {
+    if !shared.toggle_on(&session.peer, TOGGLE) {
         return Err(Error::Denied);
+    }
+    if !on_local_network(shared, session) {
+        return Err(Error::Offline);
     }
     let key = new_key().map_err(|e| Error::Internal(e.to_string()))?;
     let enroll = UnlockEnroll {
@@ -497,8 +526,13 @@ pub(crate) async fn password(shared: &Arc<Shared>, session: &Arc<Session>, user:
     if !shared.offers(&session.peer, KEY)? || !shared.we_offer(PC) {
         return Err(Error::Unsupported);
     }
-    if !allowed(shared, session) {
-        return Err(Error::Denied);
+    // Not a no from the phone's owner, so the PC can go on to another phone
+    // (#535): one with unlocking off can't, one away from this network is away.
+    if !shared.toggle_on(&session.peer, TOGGLE) {
+        return Err(Error::Unsupported);
+    }
+    if !on_local_network(shared, session) {
+        return Err(Error::Offline);
     }
     let entry = shared.store.unlock_entry(&session.peer, user)?.ok_or(Error::NotFound)?;
     let id = lock(&shared.unlock_requests).begin(session.peer, user, Instant::now()).map_err(refused)?;

@@ -407,6 +407,33 @@ pub fn set_phone_sound_buffer_ms(ms: u16) {
     PHONE_SOUND_BUFFER_MS.store(u32::from(ms.clamp(20, 500)), std::sync::atomic::Ordering::Relaxed);
 }
 
+fn default_phone_sound_volume() -> u8 {
+    100
+}
+
+static PHONE_SOUND_VOLUME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(100);
+
+/// How loud a phone's sound plays here, `0..=100` of what it sends (#577).
+pub fn phone_sound_volume() -> u8 {
+    PHONE_SOUND_VOLUME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_phone_sound_volume(level: u8) {
+    PHONE_SOUND_VOLUME.store(level.min(100), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Sets and saves it, for a change from the phone (its volume keys).
+pub fn remember_phone_sound_volume(level: u8) {
+    set_phone_sound_volume(level);
+    let level = phone_sound_volume();
+    let dir = crate::core_host::host().data_dir.clone();
+    let _ = std::thread::Builder::new().name("save-phone-sound-volume".into()).spawn(move || {
+        if let Err(e) = Settings::update(&dir, |settings| settings.phone_sound_volume = level) {
+            tracing::warn!(error = %e, "can't save the phone's sound volume");
+        }
+    });
+}
+
 fn default_battery_low_threshold() -> u8 {
     15
 }
@@ -628,6 +655,10 @@ pub struct Settings {
     /// Copy one-time codes from phone notifications and SMS automatically.
     #[serde(alias = "auto_copy_otp", alias = "smart_otp_auto_copy")]
     pub auto_copy_otp: bool,
+    /// Mark a text conversation read on the phone too when it's read here
+    /// (needs Elevated on the phone).
+    #[serde(alias = "mark_read_on_phone")]
+    pub mark_read_on_phone: bool,
     /// Pause PC media playback while a phone call is ringing or active.
     #[serde(alias = "pause_media_on_call", alias = "auto_pause_media")]
     pub pause_media_on_call: bool,
@@ -655,6 +686,10 @@ pub struct Settings {
     pub mirror_toolbar_bottom: bool,
     #[serde(default)]
     pub mirror_toolbar_left: bool,
+    /// That toolbar gets a strip of the window to itself, above or below the
+    /// picture, instead of floating over it (#549).
+    #[serde(default)]
+    pub mirror_toolbar_outside: bool,
     /// No pop-ups for phone notifications while this PC is locked.
     #[serde(default, alias = "quiet_when_locked")]
     pub quiet_when_locked: bool,
@@ -670,6 +705,9 @@ pub struct Settings {
     /// Install a newer release by itself at a quiet moment (with `auto_update`).
     #[serde(alias = "install_updates")]
     pub install_updates: bool,
+    /// Send the anonymous daily count to the report service (#534).
+    #[serde(alias = "daily_count")]
+    pub daily_count: bool,
     /// Which builds to update to: "stable", "nightly", or empty to follow
     /// the installed build's own channel.
     #[serde(alias = "update_channel")]
@@ -684,6 +722,10 @@ pub struct Settings {
     /// survives a busy Wi-Fi, less is closer to live.
     #[serde(default = "default_sound_buffer_ms", alias = "phone_sound_buffer_ms")]
     pub phone_sound_buffer_ms: u16,
+    /// How loud a phone's sound plays here, in percent of what it sends:
+    /// the slider under Phone sound on this PC, or the phone's volume keys.
+    #[serde(default = "default_phone_sound_volume")]
+    pub phone_sound_volume: u8,
     /// The battery level that counts as low, in percent (default 15).
     #[serde(default = "default_battery_low_threshold", alias = "battery_low_threshold")]
     pub battery_low_threshold: u8,
@@ -793,10 +835,13 @@ pub struct Settings {
     /// Use phones' USB debugging (adb) for USB features; off, never ask (#439).
     #[serde(default = "default_true", alias = "usb_debugging")]
     pub usb_debugging: bool,
+    /// Reach paired phones over Bluetooth when nothing else does (#313).
+    #[serde(default)]
+    pub bluetooth_link: bool,
     /// How many days notification history is kept: 1, 3, 7 or 30 (#442).
     #[serde(default = "default_history_days", alias = "notification_history_days")]
     pub notification_history_days: u32,
-    /// "sharper" or "smoother"; anything else is the balanced default. Text, so a
+    /// "sharper", "smoother" or "adaptive"; anything else is the balanced default. Text, so a
     /// value from a newer version can't stop this file from loading.
     #[serde(default, alias = "mirror_quality")]
     pub mirror_quality: String,
@@ -966,6 +1011,7 @@ impl Default for Settings {
             clipboard_history: true,
             suggest_clipboard_actions: true,
             auto_copy_otp: false,
+            mark_read_on_phone: false,
             pause_media_on_call: true,
             mute_while_watched: true,
             language: String::new(),
@@ -975,16 +1021,19 @@ impl Default for Settings {
             hide_mirror_toolbar: false,
             mirror_toolbar_bottom: false,
             mirror_toolbar_left: false,
+            mirror_toolbar_outside: false,
             quiet_when_locked: false,
             hold_when_locked: false,
             send_to_menu: true,
             auto_update: true,
             install_updates: true,
+            daily_count: true,
             update_channel: String::new(),
             battery_alerts: true,
             battery_full_threshold: default_battery_full_threshold(),
             battery_low_threshold: default_battery_low_threshold(),
             phone_sound_buffer_ms: default_sound_buffer_ms(),
+            phone_sound_volume: default_phone_sound_volume(),
             ui_scale: default_ui_scale(),
             keep_screen_off: Vec::new(),
             device_nicknames: std::collections::HashMap::new(),
@@ -1017,6 +1066,7 @@ impl Default for Settings {
             keep_popups_paused: false,
             popups_paused: false,
             usb_debugging: true,
+            bluetooth_link: false,
             notification_history_days: 1,
             mirror_quality: String::new(),
             mirror_fps: 60,
@@ -1095,7 +1145,7 @@ impl Settings {
     }
 
     pub fn apply_runtime(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         crate::win::tray::set_one_colour(self.tray_one_colour);
         set_clipboard_auto_copy_received_files(self.clipboard_auto_copy_received_files);
         set_open_shared_files(self.open_shared_files);
@@ -1103,6 +1153,7 @@ impl Settings {
         set_sync_passwords(self.sync_passwords);
         set_keep_popups_paused(self.keep_popups_paused);
         set_usb_debugging(self.usb_debugging);
+        crate::win::bluetooth_link::set_enabled(self.bluetooth_link);
         crate::state::set_history_days(self.notification_history_days);
         set_mirror_quality(&self.mirror_quality);
         set_mirror_fps(self.mirror_fps);
@@ -1122,6 +1173,7 @@ impl Settings {
         set_battery_full_threshold(self.battery_full_threshold);
         set_battery_low_threshold(self.battery_low_threshold);
         set_phone_sound_buffer_ms(self.phone_sound_buffer_ms);
+        set_phone_sound_volume(self.phone_sound_volume);
         set_keep_screen_off_phones(self.keep_screen_off.clone());
         set_device_nicknames(self.device_nicknames.clone());
         set_pinned_apps_all(self.pinned_apps.clone());
@@ -1348,6 +1400,7 @@ mod tests {
             clipboard_history: false,
             suggest_clipboard_actions: false,
             auto_copy_otp: true,
+            mark_read_on_phone: true,
             pause_media_on_call: false,
             mute_while_watched: false,
             language: "zh_CN".into(),
@@ -1357,16 +1410,19 @@ mod tests {
             hide_mirror_toolbar: true,
             mirror_toolbar_bottom: true,
             mirror_toolbar_left: true,
+            mirror_toolbar_outside: true,
             quiet_when_locked: true,
             hold_when_locked: true,
             send_to_menu: false,
             auto_update: false,
             install_updates: false,
+            daily_count: false,
             update_channel: "nightly".into(),
             battery_alerts: false,
             battery_full_threshold: 80,
             battery_low_threshold: 10,
             phone_sound_buffer_ms: 200,
+            phone_sound_volume: 60,
             ui_scale: 125,
             keep_screen_off: vec!["abc".to_owned()],
             device_nicknames: std::collections::HashMap::from([("abc".to_owned(), "Work phone".to_owned())]),
@@ -1402,6 +1458,7 @@ mod tests {
             keep_popups_paused: true,
             popups_paused: true,
             usb_debugging: false,
+            bluetooth_link: true,
             notification_history_days: 7,
             mirror_quality: "sharper".into(),
             mirror_fps: 120,

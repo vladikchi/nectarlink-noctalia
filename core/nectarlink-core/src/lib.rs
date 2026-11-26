@@ -7,6 +7,7 @@
 //! `docs/architecture/core-api.md` for the design.
 
 mod actions;
+pub mod bluetooth;
 mod call_audio;
 mod calls;
 pub mod clip_kind;
@@ -59,6 +60,8 @@ pub use actions::{PC_WAKE, PowerAction};
 pub const PC_HIBERNATE: &str = nectarlink_protocol::messages::pc_power::HIBERNATE;
 /// Offered by PCs a phone may shut down.
 pub const PC_SHUTDOWN: &str = nectarlink_protocol::messages::pc_power::SHUTDOWN;
+/// A PC can restart on a paired phone's request.
+pub const PC_RESTART: &str = nectarlink_protocol::messages::pc_power::RESTART;
 pub use calls::CallCommand;
 pub use clip_kind::{
     ClipKind, ClipSuggestion, classify_clip, maps_web_url, percent_encode, tracking_search_url,
@@ -70,9 +73,10 @@ pub use config::{Congestion, NodeConfig, NoopPlatform, Platform, TransportTuning
 pub use deck::{
     COMMANDS_TOGGLE as DECK_COMMANDS_TOGGLE, DECK_ACTIONS, DeckAction, DeckConfig, DeckLayout, DeckPage,
     DeckPageConfig, DeckPress, DeckState, DeckTile, DeckTileConfig, INPUT_TOGGLE as DECK_INPUT_TOGGLE,
-    MAX_DECK_ID_BYTES, MAX_DECK_LABEL_BYTES, MAX_DECK_PAGES, MAX_DECK_TILES_PER_PAGE, PC_AUDIO, deck_colors,
-    deck_icons, deck_kinds, format_shortcut, is_valid_app_path, is_valid_command, is_valid_deck_id,
-    is_valid_http_url, is_valid_shortcut, is_valid_snippet,
+    MAX_DECK_ID_BYTES, MAX_DECK_LABEL_BYTES, MAX_DECK_PAGES, MAX_DECK_TILES_PER_PAGE, MAX_MACRO_DELAY_MS,
+    MAX_MACRO_STEPS, MAX_MACRO_TOTAL_DELAY_MS, MacroStep, PC_AUDIO, PC_RADIOS, deck_colors, deck_icons,
+    deck_kinds, format_shortcut, is_valid_app_path, is_valid_command, is_valid_deck_id, is_valid_http_url,
+    is_valid_shortcut, is_valid_snippet,
 };
 pub use diag_ask::{PeerLog, PeerPart};
 pub use error::{Error, Result, Side};
@@ -107,11 +111,11 @@ pub use nectarlink_protocol::{
         CameraCaptureResultMeta, Contact, ContactNumber, DeviceInfo, DeviceKind, LivePoint, LiveSegment,
         MediaPlayer, MirrorAudioConfig, MirrorConfig, MirrorDisplay, MirrorInput, MirrorPower, MirrorResize,
         MirrorRotate, MirrorStart, Notification, NotificationAction, NotificationChatMessage,
-        NotificationConversation, NotificationLive, PcAudioSet, PcWakeInfo, PhoneApp, PhoneToggleSet,
-        PhoneToggleValue, PhoneToggles, PhotoAlbum, PhotoItem, PhotoNew as Photo, PhotoThumb, PointerAt,
-        PointerEdge, PointerMove, PointerScreen, PowerLevel, ScreenCorners, ScreenRect, ScreenShape,
-        SmsAttachment, SmsMessage, SmsPart, SmsThread, StorageChanged, StorageDelete, StorageEntries,
-        StorageEntry, StorageList, StorageMkdir, StorageRead, StorageReadMeta, StorageRename,
+        NotificationConversation, NotificationLive, PcAudioSet, PcRadioSet, PcWakeInfo, PhoneApp,
+        PhoneToggleSet, PhoneToggleValue, PhoneToggles, PhotoAlbum, PhotoItem, PhotoNew as Photo, PhotoThumb,
+        PointerAt, PointerEdge, PointerMove, PointerScreen, PowerLevel, ScreenCorners, ScreenRect,
+        ScreenShape, SmsAttachment, SmsMessage, SmsPart, SmsThread, StorageChanged, StorageDelete,
+        StorageEntries, StorageEntry, StorageList, StorageMkdir, StorageRead, StorageReadMeta, StorageRename,
         StorageWriteAccept, StorageWriteDone, StorageWriteOffer, TaskNotify, TouchAction, WatchFile,
         WebcamConfig, WebcamStart,
         calls::{
@@ -136,7 +140,7 @@ pub use nectarlink_protocol::{
             NOTICE_INPUT_BLOCKED as MIRROR_NOTICE_INPUT_BLOCKED,
             NOTICE_PC_CAPTURE_FAILED as MIRROR_NOTICE_PC_CAPTURE_FAILED, PCM as MIRROR_PCM,
             POINTER as MIRROR_POINTER, SCREEN as MIRROR_SCREEN, SOUND as MIRROR_SOUND, VIEW as MIRROR_VIEW,
-            VIRTUAL_DISPLAY as MIRROR_VIRTUAL_DISPLAY,
+            VIRTUAL_DISPLAY as MIRROR_VIRTUAL_DISPLAY, VOLUME as MIRROR_VOLUME,
         },
         mirror_keys, notify_limits, parse_mac,
         photos::{
@@ -146,8 +150,9 @@ pub use nectarlink_protocol::{
         },
         ringer_modes, screen_limits,
         sms::{
-            MAX_ATTACHMENT_BYTES as SMS_MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS as SMS_MAX_ATTACHMENTS,
-            READ as SMS_READ, SEND as SMS_SEND, SHOW as SMS_SHOW, SIMS as SMS_SIMS,
+            MARK_READ as SMS_MARK_READ, MAX_ATTACHMENT_BYTES as SMS_MAX_ATTACHMENT_BYTES,
+            MAX_ATTACHMENTS as SMS_MAX_ATTACHMENTS, READ as SMS_READ, SEND as SMS_SEND, SHOW as SMS_SHOW,
+            SIMS as SMS_SIMS,
         },
         storage::{MOUNT as STORAGE_MOUNT, READ as STORAGE_READ, WRITE as STORAGE_WRITE},
         task_notify, toggle_ids,
@@ -173,8 +178,8 @@ pub use palette::{
 };
 pub use play_on_phone::PlayOnPhone;
 pub use remote::{
-    ButtonAction, INPUT_GAMEPAD, INPUT_INJECT, KeyMod, MouseButton, PAD_DRIVER_MISSING, PadState,
-    RemoteInput, SlideAction, remote_keys,
+    ButtonAction, INPUT_GAMEPAD, INPUT_GESTURES, INPUT_INJECT, KeyMod, MouseButton, PAD_DRIVER_MISSING,
+    PadState, RemoteInput, SlideAction, TouchGesture, remote_keys,
 };
 pub use resync::Resync;
 pub use session::is_lan_ip;

@@ -18,7 +18,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import app.nectarlink.android.NectarlinkApplication
 import app.nectarlink.android.R
@@ -33,6 +35,7 @@ import app.nectarlink.android.ui.Preferences
 import app.nectarlink.android.ui.RingActivity
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -50,21 +53,18 @@ class ConnectionService : LifecycleService() {
     @Volatile private var screenWakeRegistered = false
     /** One pending screen return is enough. A burst must not queue a spin. */
     private val screenWake = Channel<Unit>(Channel.CONFLATED)
+    private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
-        createChannels(this)
-        app.nectarlink.android.files.TransferNotifications.createChannels(this)
-        app.nectarlink.android.media.PcMedia.createChannel(this)
-        app.nectarlink.android.links.LinkNotifications.createChannel(this)
-        app.nectarlink.android.notifications.TaskNotifications.createChannels(this)
-        app.nectarlink.android.webcam.WebcamService.createChannel(this)
-        app.nectarlink.android.webcam.WebcamRequests.createChannel(this)
+        createConnectionChannel(this)
         val core = (application as NectarlinkApplication).core
         if (!startInForeground(core.state.value)) {
             stopSelf()
             return
         }
+        foregroundStarted = true
+        createSecondaryChannels(this)
         multicastLock = getSystemService(WifiManager::class.java)
             ?.createMulticastLock("nectarlink-discovery")
             ?.apply { setReferenceCounted(false) }
@@ -82,6 +82,26 @@ class ConnectionService : LifecycleService() {
                             .notify(ONGOING_ID, ongoingNotification(status))
                     }
                 }
+        }
+        // USB only: with no PC on the cable there's nothing to keep running or to show. The
+        // PC starts this again when it connects (usb.rs). The wait covers the PC's first
+        // connection after it woke the app, and a cable that's briefly out.
+        lifecycleScope.launch {
+            core.state
+                .map { it.usbOnly && it.status is app.nectarlink.android.core.CoreStatus.Ready && it.devices.none { d -> d.online } }
+                .distinctUntilChanged()
+                .collectLatest { idle ->
+                    if (!idle) return@collectLatest
+                    delay(USB_IDLE_GRACE_MS)
+                    stopSelf()
+                    (application as NectarlinkApplication).onUsbIdle()
+                }
+        }
+        // USB only doesn't need Wi-Fi to stay awake for multicast.
+        lifecycleScope.launch {
+            core.state.map { it.usbOnly }.distinctUntilChanged().collect {
+                setDiscoveryLock(getSystemService(PowerManager::class.java)?.isInteractive != false)
+            }
         }
         // Updates while the app is in the background (they install by themselves when
         // allowed). AppUpdater checks at most once a day, so waking now and then is cheap.
@@ -144,10 +164,22 @@ class ConnectionService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         if (intent?.action == ACTION_STOP_SERVICE) {
             Preferences.setBackgroundServiceEnabled(this, false)
-            stopSelf()
+            stopSelf(startId)
             getSystemService(NotificationManager::class.java)?.cancel(ONGOING_ID)
             (application as? NectarlinkApplication)?.onBackgroundServiceDisabled()
             return START_NOT_STICKY
+        }
+        if (!foregroundStarted) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_USB_WAKE) {
+            // The PC started this through adb. Settings that want no service here say so.
+            if (!Preferences.isUsbOnlyEnabled(this) && !Preferences.isBackgroundServiceEnabled(this)) {
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            (application as NectarlinkApplication).core.start()
         }
         if (intent?.action == ACTION_STOP_RINGING) {
             (application as NectarlinkApplication).core.stopRinging()
@@ -173,7 +205,8 @@ class ConnectionService : LifecycleService() {
      * screen holds a lock of its own.
      */
     private fun setDiscoveryLock(on: Boolean) {
-        multicastLock?.runCatching { if (on) { if (!isHeld) acquire() } else if (isHeld) release() }
+        val hold = on && (application as? NectarlinkApplication)?.core?.state?.value?.usbOnly != true
+        multicastLock?.runCatching { if (hold) { if (!isHeld) acquire() } else if (isHeld) release() }
         (application as? NectarlinkApplication)?.core?.onScreenInteractiveChanged(on)
     }
 
@@ -238,14 +271,16 @@ class ConnectionService : LifecycleService() {
         val paired: Int,
         val noNetwork: Boolean,
         val pause: app.nectarlink.android.core.DialingPause?,
+        val usbOnly: Boolean,
     ) {
         companion object {
             fun of(state: CoreState) = Status(
                 state.devices.filter { it.online }.map { it.name },
                 state.devices.size,
                 // Not trying to reach PCs then (#397), so it shouldn't look like it is.
-                noNetwork = !state.hasNetwork && !state.awayMode,
+                noNetwork = !state.hasNetwork && !state.awayMode && !state.usbOnly,
                 pause = state.dialingPause.takeIf { !state.awayMode },
+                usbOnly = state.usbOnly,
             )
         }
     }
@@ -259,6 +294,7 @@ class ConnectionService : LifecycleService() {
                 status.connected.size,
             )
             status.paired == 0 -> getString(R.string.notification_not_paired)
+            status.usbOnly -> getString(R.string.notification_usb_only)
             status.noNetwork -> getString(R.string.notification_waiting_network)
             status.pause == app.nectarlink.android.core.DialingPause.GaveUp ->
                 getString(R.string.notification_stopped_looking)
@@ -326,6 +362,12 @@ class ConnectionService : LifecycleService() {
         this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
     )
 
+    internal enum class StartStrategy {
+        SKIP,
+        START_SERVICE,
+        START_FOREGROUND_SERVICE,
+    }
+
     companion object {
         private const val TAG = "Nectarlink"
         private const val UPDATE_WAKE_MS = 6L * 3600 * 1000
@@ -338,17 +380,64 @@ class ConnectionService : LifecycleService() {
         private const val CHANNEL_CONNECTION = "connection"
         private const val CHANNEL_RINGING = "ringing"
         private const val ACTION_STOP_RINGING = "app.nectarlink.action.STOP_RINGING"
+        /** Sent by a PC's adb (the shell holds the DUMP permission both components ask for), see usb.rs. */
+        internal const val ACTION_USB_WAKE = "app.nectarlink.action.USB_WAKE"
+        private const val USB_IDLE_GRACE_MS = 5_000L
         internal const val ACTION_STOP_SERVICE = "app.nectarlink.action.STOP_SERVICE"
 
-        /** Starts the service when allowed by Android's foreground-service rules. */
-        fun start(context: Context) {
-            if (!Preferences.isBackgroundServiceEnabled(context)) return
-            runCatching {
-                ContextCompat.startForegroundService(context, Intent(context, ConnectionService::class.java))
-            }.onFailure {
-                android.util.Log.w("ConnectionService", "can't start in background", it)
+        internal fun resolveStartStrategy(
+            backgroundServiceEnabled: Boolean,
+            usbOnlyEnabled: Boolean,
+            usbConnected: Boolean,
+            fromForeground: Boolean,
+        ): StartStrategy {
+            if (!backgroundServiceEnabled) return StartStrategy.SKIP
+            if (usbOnlyEnabled && !usbConnected) return StartStrategy.SKIP
+            return if (fromForeground) StartStrategy.START_SERVICE else StartStrategy.START_FOREGROUND_SERVICE
+        }
+
+        private fun isProcessInForeground(): Boolean = runCatching {
+            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        }.getOrDefault(false)
+
+        /**
+         * Starts the service.
+         *
+         * From the foreground ([fromForeground] true, or when the process lifecycle is
+         * already [Lifecycle.State.STARTED]), uses [Context.startService] so Android does
+         * not arm the `ForegroundServiceDidNotStartInTimeException` timeout; [onCreate]
+         * still promotes to foreground when allowed and exits cleanly via [stopSelf] if
+         * blocked by OEM or battery-saver rules. From the background, uses
+         * [ContextCompat.startForegroundService] and catches background-start restrictions.
+         */
+        @JvmOverloads
+        fun start(context: Context, fromForeground: Boolean = isProcessInForeground()) {
+            val strategy = resolveStartStrategy(
+                backgroundServiceEnabled = Preferences.isBackgroundServiceEnabled(context),
+                usbOnlyEnabled = Preferences.isUsbOnlyEnabled(context),
+                usbConnected = usbConnected(context),
+                fromForeground = fromForeground,
+            )
+            if (strategy == StartStrategy.SKIP) return
+            val intent = Intent(context, ConnectionService::class.java)
+            when (strategy) {
+                StartStrategy.SKIP -> return
+                StartStrategy.START_SERVICE -> runCatching {
+                    context.startService(intent)
+                }.onFailure {
+                    Log.w("ConnectionService", "can't start in foreground", it)
+                }
+                StartStrategy.START_FOREGROUND_SERVICE -> runCatching {
+                    ContextCompat.startForegroundService(context, intent)
+                }.onFailure {
+                    Log.w("ConnectionService", "can't start in background", it)
+                }
             }
         }
+
+        private fun usbConnected(context: Context): Boolean =
+            (context.applicationContext as? NectarlinkApplication)?.core?.state?.value
+                ?.devices?.any { it.online } == true
 
         fun stop(context: Context) {
             runCatching {
@@ -356,18 +445,28 @@ class ConnectionService : LifecycleService() {
             }
         }
 
-        private fun createChannels(context: Context) {
+        private fun createConnectionChannel(context: Context) {
             val manager = context.getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_CONNECTION, context.getString(R.string.channel_connection), NotificationManager.IMPORTANCE_LOW,
                 ).apply { setShowBadge(false) },
             )
+        }
+
+        private fun createSecondaryChannels(context: Context) {
+            val manager = context.getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_RINGING, context.getString(R.string.channel_ringing), NotificationManager.IMPORTANCE_HIGH,
                 ).apply { setSound(null, null) },
             )
+            app.nectarlink.android.files.TransferNotifications.createChannels(context)
+            app.nectarlink.android.media.PcMedia.createChannel(context)
+            app.nectarlink.android.links.LinkNotifications.createChannel(context)
+            app.nectarlink.android.notifications.TaskNotifications.createChannels(context)
+            app.nectarlink.android.webcam.WebcamService.createChannel(context)
+            app.nectarlink.android.webcam.WebcamRequests.createChannel(context)
         }
     }
 }

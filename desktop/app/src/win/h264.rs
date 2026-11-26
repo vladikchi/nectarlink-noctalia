@@ -298,6 +298,11 @@ impl Decoder {
         self.gpu.is_some()
     }
 
+    /// Whether a hardware decoder for `codec` can be created on any adapter.
+    pub fn supports_hardware(codec: &str) -> bool {
+        Self::create_hardware(codec, &[]).is_ok()
+    }
+
     fn create_hardware(codec: &str, excluded: &[u64]) -> windows::core::Result<Decoder> {
         ensure_mf_started()?;
         let mut last_error = windows::core::Error::from(E_FAIL);
@@ -436,6 +441,7 @@ impl Decoder {
     /// Decodes one access unit (Annex B); returns the pictures it completed.
     /// On a GPU failure, tries another adapter before software. The error is
     /// returned so the caller can request a keyframe for the replacement decoder.
+    #[cfg(test)]
     pub fn decode(&mut self, data: &[u8], time_us: u64) -> windows::core::Result<Vec<Picture>> {
         let frames = self.decode_frames(data, time_us)?;
         frames.iter().map(|frame| self.read_frame(frame)).collect()

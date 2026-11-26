@@ -109,6 +109,22 @@ class PcMedia(
     private val _summaries = MutableStateFlow<Map<String, Summary>>(emptyMap())
     val summaries: StateFlow<Map<String, Summary>> = _summaries
 
+    /** One of a PC's players, for the media center (#536). */
+    @androidx.compose.runtime.Immutable
+    data class Player(
+        val pc: String,
+        val pcName: String,
+        val player: MediaPlayer,
+        val artwork: Bitmap?,
+        /** `SystemClock.elapsedRealtime` when [player]'s position was right. */
+        val atElapsedMs: Long,
+    )
+
+    private val _all = MutableStateFlow<List<Player>>(emptyList())
+
+    /** Every PC's players, playing ones first (#536). */
+    val all: StateFlow<List<Player>> = _all
+
     private data class Snapshot(val pc: String, val name: String, val players: List<MediaPlayer>)
     private val updates = Channel<Snapshot>(Channel.UNLIMITED)
 
@@ -173,6 +189,18 @@ class PcMedia(
                     )
                 }
             }.toMap()
+            _all.value = players.flatMap { (id, all) ->
+                all.map { p ->
+                    Player(
+                        pc = id,
+                        pcName = names[id].orEmpty(),
+                        // Without the artwork bytes: decoded once above.
+                        player = p.copy(art = null),
+                        artwork = p.artKey?.let { art["$id/$it"]?.first },
+                        atElapsedMs = now,
+                    )
+                }
+            }.sortedByDescending { it.player.playing }
             render()
         }
     }
@@ -328,17 +356,31 @@ class PcMedia(
     private inner class PcVolume(val pc: String, private var level: PcLevel) :
         VolumeProvider(VOLUME_CONTROL_ABSOLUTE, VOLUME_STEPS, toSteps(level.volume)) {
 
+        /** When the volume keys or the volume panel last moved it. */
+        private var touchedAt = 0L
+
         fun show(level: PcLevel) {
             this.level = level
             currentVolume = toSteps(level.volume)
         }
 
         override fun onSetVolumeTo(volume: Int) {
-            main.post { set(volume.coerceIn(0, VOLUME_STEPS), null) }
+            main.post {
+                val to = volume.coerceIn(0, VOLUME_STEPS)
+                val now = SystemClock.elapsedRealtime()
+                if (isStrayJump(currentVolume, to, now - touchedAt)) {
+                    // Put the phone's volume panel back on the PC's real level.
+                    show(level)
+                    return@post
+                }
+                touchedAt = now
+                set(to, null)
+            }
         }
 
         override fun onAdjustVolume(direction: Int) {
             main.post {
+                touchedAt = SystemClock.elapsedRealtime()
                 when (direction) {
                     AudioManager.ADJUST_TOGGLE_MUTE -> set(null, !level.muted)
                     AudioManager.ADJUST_MUTE -> set(null, true)
@@ -454,6 +496,22 @@ class PcMedia(
 
         /** Steps of the PC's volume on the phone: each button press moves it 4%. */
         internal const val VOLUME_STEPS = 25
+
+        /** Steps a volume may rise in one go without the user just before (#643). */
+        internal const val MAX_JUMP = 6
+
+        /** How recent a volume key or panel drag makes a bigger rise the user's own. */
+        internal const val TOUCH_MS = 1_500L
+
+        /**
+         * Whether setting the PC's volume [from] steps [to] steps, [sinceTouchMs]
+         * after the volume keys or panel last moved it, is a stray jump to
+         * leave alone: a rise of more than [MAX_JUMP] steps out of nowhere.
+         * HyperOS sets full volume when an app opens, and that reached the
+         * PC as if the user had turned it up (#643). Lowering always goes through.
+         */
+        internal fun isStrayJump(from: Int, to: Int, sinceTouchMs: Long): Boolean =
+            to - from > MAX_JUMP && sinceTouchMs > TOUCH_MS
 
         /** A PC volume (`0..=100`) as the nearest step. */
         internal fun toSteps(volume: Int): Int = ((volume.coerceIn(0, 100) * VOLUME_STEPS + 50) / 100)

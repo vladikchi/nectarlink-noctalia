@@ -23,6 +23,7 @@ pub mod types {
     pub const UNLOCK_WRAPPED: &str = "unlock.wrapped";
     pub const UNLOCK_REQUEST: &str = "unlock.request";
     pub const UNLOCK_RELEASE: &str = "unlock.release";
+    pub const UNLOCK_FROM_PHONE: &str = "unlock.from-phone";
     pub const UNLOCK_FORGET: &str = "unlock.forget";
     pub const LINUX_UNLOCK_ENROLL: &str = "unlock.linux.v1.enroll";
     pub const LINUX_UNLOCK_ENROLLED: &str = "unlock.linux.v1.enrolled";
@@ -88,11 +89,13 @@ pub mod types {
     pub const SMS_PART: &str = "sms.part";
     pub const SMS_CHANGED: &str = "sms.changed";
     pub const SMS_SIMS: &str = "sms.sims";
+    pub const SMS_MARK_READ: &str = "sms.mark_read";
     pub const MIRROR_START: &str = "mirror.start";
     pub const MIRROR_STOP: &str = "mirror.stop";
     pub const MIRROR_POWER: &str = "mirror.power";
     pub const MIRROR_ROTATE: &str = "mirror.rotate";
     pub const MIRROR_SOUND: &str = "mirror.sound";
+    pub const MIRROR_VOLUME: &str = "mirror.volume";
     /// Phone → PC: play my sound (#398). The PC starts its phone sound as
     /// if its user had turned it on; answered `ok`.
     pub const MIRROR_LISTEN_ASK: &str = "mirror.listen.ask";
@@ -117,6 +120,7 @@ pub mod types {
     pub const DECK_STATE: &str = "deck.state";
     pub const DECK_PRESS: &str = "deck.press";
     pub const PC_AUDIO_SET: &str = "pc.audio.set";
+    pub const PC_RADIO_SET: &str = "pc.radio.set";
     pub const STORAGE_LIST: &str = "storage.list";
     pub const STORAGE_ENTRIES: &str = "storage.entries";
     pub const STORAGE_READ: &str = "storage.read";
@@ -1182,7 +1186,7 @@ impl MediaWatch {
 
 /// Body of `pc.power`: `lock`, `sleep`, `hibernate` (only to a PC that
 /// offers [`pc_power::HIBERNATE`]) or `shutdown` (only to one offering
-/// [`pc_power::SHUTDOWN`]).
+/// [`pc_power::SHUTDOWN`]) or `restart` (only to one offering [`pc_power::RESTART`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PcPower {
     pub action: String,
@@ -1194,6 +1198,8 @@ pub mod pc_power {
     pub const HIBERNATE: &str = "pc.power.hibernate";
     /// Offered by PCs a phone may shut down (D372).
     pub const SHUTDOWN: &str = "pc.power.shutdown";
+    /// Offered by PCs a phone may restart.
+    pub const RESTART: &str = "pc.power.restart";
 }
 
 /// The longest link sent, in bytes.
@@ -1422,6 +1428,10 @@ pub mod mirror {
     /// Offered by phones that share their sound on its own, without the
     /// screen (`MirrorStart::sound_only`).
     pub const SOUND: &str = "mirror.sound";
+    /// Offered by devices that keep the phone's sound on the PC at its own
+    /// volume and share it both ways (`mirror.volume`, #577): the PC's slider,
+    /// and the phone's volume keys while its sound plays on the PC.
+    pub const VOLUME: &str = "mirror.volume";
     pub const OP_AUDIO: &str = "audio";
     /// 16-bit little-endian PCM, channels interleaved.
     pub const PCM: &str = "pcm_s16le";
@@ -1557,6 +1567,20 @@ pub struct MirrorRotate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorSound {
     pub on: bool,
+}
+
+/// Body of `mirror.volume`: how loud the phone's sound plays on the PC,
+/// `0..=100`, set on either side (the PC's slider, the phone's volume keys).
+/// Not answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorVolume {
+    pub level: u8,
+}
+
+impl MirrorVolume {
+    pub fn is_valid(&self) -> bool {
+        self.level <= 100
+    }
 }
 
 /// Which mirroring a `mirror.stop`, `mirror.keyframe` or `mirror.input` is
@@ -2285,6 +2309,9 @@ pub mod sms {
     /// Offered by phones that list the SIMs they text from (`sms.sims`) and
     /// send on the one a PC picks (`sms.send`'s `sim`).
     pub const SIMS: &str = "sms.sims";
+    /// Offered by phones that mark a conversation's texts read in the phone's
+    /// own messages when a PC asks (`sms.mark_read`).
+    pub const MARK_READ: &str = "sms.mark_read";
     /// Most conversations or messages in one answer.
     pub const MAX_PAGE: u32 = 100;
     /// A text sent from a PC: at most this many bytes.
@@ -2502,6 +2529,19 @@ pub struct SmsPartData {
 impl std::fmt::Debug for SmsPartData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmsPartData").field("mime", &self.mime).field("bytes", &self.data.len()).finish()
+    }
+}
+
+/// Body of `sms.mark_read`: mark this conversation's received texts read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmsMarkRead {
+    pub thread: String,
+}
+
+impl SmsMarkRead {
+    /// A conversation is the phone's number for it: digits only.
+    pub fn is_valid(&self) -> bool {
+        (1..=18).contains(&self.thread.len()) && self.thread.bytes().all(|b| b.is_ascii_digit())
     }
 }
 
@@ -3708,6 +3748,33 @@ pub mod remote_keys {
     }
 }
 
+/// A touchpad gesture with more than two fingers, or a pinch, done the way
+/// the PC's own touchpad would (`input.gestures`, `docs/protocol/remote.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchGesture {
+    /// Three-finger tap.
+    Search,
+    /// Four-finger tap.
+    Notifications,
+    /// Three or four fingers up.
+    TaskView,
+    /// Three or four fingers down.
+    ShowDesktop,
+    /// Three fingers sideways: the app switcher opens and stays open until
+    /// [`TouchGesture::SwitcherDone`], moving one app each time.
+    SwitcherNext,
+    SwitcherPrevious,
+    /// The fingers lifted: the app picked in the switcher comes up.
+    SwitcherDone,
+    /// Four fingers sideways.
+    DesktopNext,
+    DesktopPrevious,
+    /// Two fingers spreading or closing, one step each.
+    ZoomIn,
+    ZoomOut,
+}
+
 /// An input event sent from a phone to a PC (`docs/protocol/remote.md`).
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -3745,6 +3812,8 @@ pub enum RemoteInput {
     /// The phone closed its game controller: the PC unplugs it.
     #[serde(rename = "pad_off")]
     PadOff,
+    /// A touchpad gesture. Only to PCs that offer `input.gestures`.
+    Gesture { gesture: TouchGesture },
 }
 
 /// Never prints typed text (protocol v0 §11).
@@ -3762,6 +3831,7 @@ impl std::fmt::Debug for RemoteInput {
             RemoteInput::Laser { on: true, x, y } => write!(f, "Laser({x}, {y})"),
             RemoteInput::Pad { pad } => write!(f, "Pad({pad:?})"),
             RemoteInput::PadOff => f.write_str("PadOff"),
+            RemoteInput::Gesture { gesture } => write!(f, "Gesture({gesture:?})"),
         }
     }
 }
@@ -3796,6 +3866,7 @@ impl RemoteInput {
             }
             RemoteInput::Pad { pad } => pad.is_valid(),
             RemoteInput::PadOff => true,
+            RemoteInput::Gesture { .. } => true,
         }
     }
 
@@ -3961,6 +4032,9 @@ pub mod deck {
     pub const ACTIONS: &str = "deck.actions";
     /// Offered by PCs that share their active audio output devices and accept `pc.audio.set`.
     pub const PC_AUDIO: &str = "pc.audio";
+    /// Offered by PCs that report their Wi-Fi and Bluetooth in `deck.state`
+    /// and turn them on or off for `pc.radio.set` (#636).
+    pub const PC_RADIOS: &str = "pc.radios";
     /// Maximum pages in a `DeckLayout`.
     pub const MAX_PAGES: usize = 8;
     /// Maximum tiles on a single `DeckPage`.
@@ -3971,6 +4045,8 @@ pub mod deck {
     pub const MAX_LABEL_BYTES: usize = 64;
     /// Maximum active audio output devices in a `DeckState`.
     pub const MAX_OUTPUT_DEVICES: usize = 32;
+    /// Maximum `toggle` tiles on at once in a `DeckState`: every tile of every page.
+    pub const MAX_TOGGLES_ON: usize = MAX_PAGES * MAX_TILES_PER_PAGE;
     /// Maximum bytes in an audio endpoint ID.
     pub const MAX_DEVICE_ID_BYTES: usize = 256;
     /// Maximum UTF-8 bytes in an audio endpoint friendly name.
@@ -3995,6 +4071,20 @@ pub mod deck_kinds {
     pub const TYPE_TEXT: &str = "type_text";
     pub const LAUNCH_APP: &str = "launch_app";
     pub const RUN_COMMAND: &str = "run_command";
+    /// Restarts the PC; phones ask first (#490).
+    pub const RESTART_PC: &str = "restart_pc";
+    /// Shuts the PC down; phones ask first (#490).
+    pub const SHUT_DOWN_PC: &str = "shut_down_pc";
+    /// Several actions in a row, with pauses between them (#490).
+    pub const MACRO: &str = "macro";
+    /// On and off in turn: one action turns it on, another off, and the
+    /// tile shows which it is (`DeckState::toggles_on`, #640).
+    pub const TOGGLE: &str = "toggle";
+
+    /// Kinds a phone asks about before pressing: they end what's running on the PC.
+    pub fn needs_confirmation(kind: &str) -> bool {
+        matches!(kind, RESTART_PC | SHUT_DOWN_PC)
+    }
 
     pub const ALL: &[&str] = &[
         MEDIA_PLAY_PAUSE,
@@ -4013,6 +4103,10 @@ pub mod deck_kinds {
         TYPE_TEXT,
         LAUNCH_APP,
         RUN_COMMAND,
+        RESTART_PC,
+        SHUT_DOWN_PC,
+        MACRO,
+        TOGGLE,
     ];
 
     /// Default icon for an action kind.
@@ -4035,6 +4129,10 @@ pub mod deck_kinds {
             TYPE_TEXT => TEXT,
             LAUNCH_APP => APP,
             RUN_COMMAND => TERMINAL,
+            RESTART_PC => RESTART,
+            SHUT_DOWN_PC => POWER,
+            MACRO => BOLT,
+            TOGGLE => super::deck_icons::TOGGLE,
             _ => SPARKLE,
         }
     }
@@ -4055,6 +4153,10 @@ pub mod deck_kinds {
             TYPE_TEXT => GREEN,
             LAUNCH_APP => TEAL,
             RUN_COMMAND => CORAL,
+            RESTART_PC => AMBER,
+            SHUT_DOWN_PC => RED,
+            MACRO => VIOLET,
+            TOGGLE => GREEN,
             _ => AMBER,
         }
     }
@@ -4078,6 +4180,10 @@ pub mod deck_kinds {
             TYPE_TEXT => "Type text",
             LAUNCH_APP => "Launch app",
             RUN_COMMAND => "Run command",
+            RESTART_PC => "Restart",
+            SHUT_DOWN_PC => "Shut down",
+            MACRO => "Macro",
+            TOGGLE => "On / off",
             _ => "Action",
         }
     }
@@ -4105,6 +4211,11 @@ pub mod deck_icons {
     pub const TERMINAL: &str = "terminal";
     pub const SPARKLE: &str = "sparkle";
     pub const STAR: &str = "star";
+    pub const POWER: &str = "power";
+    pub const RESTART: &str = "restart";
+    pub const BOLT: &str = "bolt";
+    /// A switch: for on/off tiles (#640).
+    pub const TOGGLE: &str = "toggle";
 
     pub const ALL: &[&str] = &[
         PLAY,
@@ -4127,6 +4238,10 @@ pub mod deck_icons {
         TERMINAL,
         SPARKLE,
         STAR,
+        POWER,
+        RESTART,
+        BOLT,
+        TOGGLE,
     ];
 }
 
@@ -4177,6 +4292,11 @@ pub struct DeckTile {
     pub icon: String,
     pub color: String,
     pub kind: String,
+    /// Pressing it runs a shell command on the PC, so it needs the
+    /// `commands` toggle like a `run_command` tile (a macro with a command
+    /// step, #490). Left out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_commands: bool,
 }
 
 /// Never prints the user label (protocol v0 §11).
@@ -4229,7 +4349,14 @@ impl DeckTile {
         } else {
             deck_kinds::default_color(&self.kind).into()
         };
-        Some(DeckTile { id: self.id, label, icon, color, kind: self.kind })
+        Some(DeckTile {
+            id: self.id,
+            label,
+            icon,
+            color,
+            kind: self.kind,
+            needs_commands: self.needs_commands,
+        })
     }
 }
 
@@ -4325,6 +4452,7 @@ impl DeckLayout {
             icon: deck_kinds::default_icon(kind).into(),
             color: deck_kinds::default_color(kind).into(),
             kind: kind.into(),
+            needs_commands: false,
         };
         DeckLayout {
             pages: vec![DeckPage {
@@ -4418,6 +4546,15 @@ pub struct DeckState {
     pub mic_muted: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_devices: Vec<AudioOutputDevice>,
+    /// The `toggle` tiles that are on, by ID (#640). Left out when none are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toggles_on: Vec<String>,
+    /// Whether the PC's Wi-Fi is on; left out when it has none or can't tell (#636).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi: Option<bool>,
+    /// Whether the PC's Bluetooth is on; left out when it has none or can't tell (#636).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluetooth: Option<bool>,
 }
 
 impl DeckState {
@@ -4425,6 +4562,8 @@ impl DeckState {
         self.volume <= 100
             && self.output_devices.len() <= deck::MAX_OUTPUT_DEVICES
             && self.output_devices.iter().all(AudioOutputDevice::is_valid)
+            && self.toggles_on.len() <= deck::MAX_TOGGLES_ON
+            && self.toggles_on.iter().all(|id| is_valid_deck_id(id))
     }
 
     pub fn sanitized(mut self) -> Option<Self> {
@@ -4435,7 +4574,14 @@ impl DeckState {
             .filter_map(AudioOutputDevice::sanitized)
             .take(deck::MAX_OUTPUT_DEVICES)
             .collect();
+        self.toggles_on.retain(|id| is_valid_deck_id(id));
+        self.toggles_on.truncate(deck::MAX_TOGGLES_ON);
         Some(self)
+    }
+
+    /// Whether the `toggle` tile `id` is on.
+    pub fn is_on(&self, id: &str) -> bool {
+        self.toggles_on.iter().any(|t| t == id)
     }
 
     /// Friendly name of the default audio output device, if reported.
@@ -4517,6 +4663,22 @@ impl PcAudioSet {
                 && !id.chars().any(char::is_control)
         });
         (self.volume.is_some() || self.muted.is_some() || self.output.is_some()) && vol_ok && output_ok
+    }
+}
+
+/// Body of `pc.radio.set`: turn the PC's Wi-Fi and/or Bluetooth on or off
+/// (`docs/protocol/deck.md` §2.6, #636).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcRadioSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluetooth: Option<bool>,
+}
+
+impl PcRadioSet {
+    pub fn is_valid(&self) -> bool {
+        self.wifi.is_some() || self.bluetooth.is_some()
     }
 }
 
@@ -4993,6 +5155,7 @@ pub mod unlock {
     pub const CAP_KEY: &str = "unlock.key";
     /// Offered by a PC that can unlock its locked session with a phone.
     pub const CAP_PC: &str = "unlock.pc";
+    pub const CAP_FROM_PHONE: &str = "unlock.pc.from-phone";
     /// The per-device toggle on both sides, off by default.
     pub const TOGGLE: &str = "unlock";
     /// Bytes in the key `K`.
@@ -5240,6 +5403,16 @@ pub enum LinuxUnlockForget {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn marking_read_names_a_conversation_by_its_number_alone() {
+        let mark = |thread: &str| SmsMarkRead { thread: thread.into() };
+        assert!(mark("128").is_valid());
+        assert!(mark("123456789012345678").is_valid());
+        for bad in ["", "12a", "-1", "1 OR 1=1", "1;reboot", "1234567890123456789", "١٢٣"] {
+            assert!(!mark(bad).is_valid(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn linux_unlock_enrollment_requires_a_non_root_account() {
         let request = LinuxUnlockEnroll {
             pc: DeviceId([1; 32]),
@@ -5300,6 +5473,15 @@ mod tests {
         assert!(hint("stable", "").is_none());
         assert!(hint("stable", "0.1.5; rm -rf /").is_none());
         assert!(hint("stable", &"9".repeat(65)).is_none());
+    }
+
+    #[test]
+    fn the_phones_sound_volume_is_a_percentage() {
+        assert!(MirrorVolume { level: 0 }.is_valid());
+        assert!(MirrorVolume { level: 100 }.is_valid());
+        assert!(!MirrorVolume { level: 101 }.is_valid());
+        let env = crate::Envelope::new(types::MIRROR_VOLUME, &MirrorVolume { level: 40 }).unwrap();
+        assert_eq!(env.body::<MirrorVolume>().unwrap(), MirrorVolume { level: 40 });
     }
 
     #[test]
@@ -6485,6 +6667,7 @@ mod tests {
             icon: "unknown_icon".into(),
             color: "unknown_color".into(),
             kind: deck_kinds::RUN_COMMAND.into(),
+            needs_commands: false,
         }
         .sanitized()
         .unwrap();
@@ -6514,6 +6697,9 @@ mod tests {
                     is_default: false,
                 },
             ],
+            toggles_on: vec!["mon".into()],
+            wifi: None,
+            bluetooth: None,
         };
         assert!(state.is_valid());
         assert_eq!(state.default_output_name(), Some("Speakers (Realtek Audio)"));
@@ -6908,6 +7094,16 @@ mod tests {
         let env_secret = Envelope::new(types::CLIP_SET, &secret).unwrap();
         let back_secret: ClipSet = Envelope::from_cbor(&env_secret.to_cbor()).unwrap().body().unwrap();
         assert!(back_secret.sensitive);
+    }
+
+    #[test]
+    fn touch_gestures_round_trip_by_name() {
+        let input = RemoteInput::Gesture { gesture: TouchGesture::SwitcherNext };
+        assert!(input.is_valid());
+        assert_eq!(format!("{input:?}"), "Gesture(SwitcherNext)");
+        let env = Envelope::new(types::REMOTE_INPUT, &input).unwrap();
+        let back: RemoteInput = Envelope::from_cbor(&env.to_cbor()).unwrap().body().unwrap();
+        assert_eq!(back, input);
     }
 
     #[test]

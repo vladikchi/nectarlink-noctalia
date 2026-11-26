@@ -162,6 +162,7 @@ impl UpgradeAction {
             UpgradeAction::EnablePath(ConnectionPath::Relay) => ("enablePath", "relay".into()),
             UpgradeAction::EnablePath(ConnectionPath::Lan) => ("enablePath", "lan".into()),
             UpgradeAction::EnablePath(ConnectionPath::Usb) => ("enablePath", "usb".into()),
+            UpgradeAction::EnablePath(ConnectionPath::Bluetooth) => ("enablePath", "bluetooth".into()),
             UpgradeAction::EnableDeviceToggle(toggle) => ("enableToggle", toggle.into()),
             UpgradeAction::UpdateApp(Role::Phone) => ("updateApp", "phone".into()),
             UpgradeAction::UpdateApp(Role::Desktop) => ("updateApp", "desktop".into()),
@@ -721,6 +722,16 @@ pub const FEATURES: &[FeatureDef] = &[
         partial: None,
     },
     FeatureDef {
+        id: "device.unlock_from_phone",
+        group: FeatureGroup::Device,
+        requires: &[
+            phone("unlock.key", UPDATE),
+            desktop("unlock.pc.from-phone", UPDATE),
+            DeviceToggle("unlock"),
+        ],
+        partial: None,
+    },
+    FeatureDef {
         id: "device.pc_actions",
         group: FeatureGroup::Device,
         requires: &[desktop("pc.power", UPDATE), DeviceToggle("pc_actions")],
@@ -736,6 +747,12 @@ pub const FEATURES: &[FeatureDef] = &[
         id: "device.pc_shutdown",
         group: FeatureGroup::Device,
         requires: &[desktop("pc.power.shutdown", UPDATE), DeviceToggle("pc_actions")],
+        partial: None,
+    },
+    FeatureDef {
+        id: "device.pc_restart",
+        group: FeatureGroup::Device,
+        requires: &[desktop(crate::PC_RESTART, UPDATE), DeviceToggle("pc_actions")],
         partial: None,
     },
     FeatureDef {
@@ -1111,6 +1128,12 @@ pub const FEATURES: &[FeatureDef] = &[
         id: "input.gamepad",
         group: FeatureGroup::Input,
         requires: &[desktop("input.gamepad", UPDATE)],
+        partial: None,
+    },
+    FeatureDef {
+        id: "input.gestures",
+        group: FeatureGroup::Input,
+        requires: &[desktop("input.gestures", UPDATE)],
         partial: None,
     },
     FeatureDef {

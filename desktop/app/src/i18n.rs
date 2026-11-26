@@ -21,6 +21,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("es", "Español"),
     ("ru", "Русский"),
     ("pl", "Polski"),
+    ("uk", "Українська"),
 ];
 
 /// [`LANGUAGES`] without the system's, as JSON for Settings: `[{ code, name }]`.
@@ -87,6 +88,11 @@ pub fn install(language: &str) {
     };
     let language = if chosen.is_empty() { system } else { chosen };
     tracing::info!(chosen, language, "app language");
+    // Qt's own text drawing doesn't snap to pixels the way Windows does,
+    // which shows most on small Chinese and Japanese characters (#460).
+    if cfg!(windows) && uses_native_text(language) {
+        crate::bridge::native::ffi::use_native_text_rendering();
+    }
     let Some(exe) = exe_dir() else { return };
     let dir = select_translation_dir(&exe);
     let installed = crate::bridge::native::ffi::install_translator(&dir.to_string_lossy(), language);
@@ -107,6 +113,7 @@ fn system_language(preferred: &[String]) -> &'static str {
             "es" => "es",
             "ja" => "ja",
             "pl" => "pl",
+            "uk" => "uk",
             "ru" => "ru",
             "tr" => "tr",
             "vi" => "vi",
@@ -184,9 +191,25 @@ pub fn session_title(kind: nectarlink_core::SessionKind) -> String {
     }
 }
 
+/// Languages written in Chinese or Japanese characters, which Windows' own
+/// text drawing shows more crisply than Qt's.
+fn uses_native_text(language: &str) -> bool {
+    language.starts_with("zh") || language.starts_with("ja")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chinese_and_japanese_use_the_system_text_drawing() {
+        for language in ["zh_CN", "zh_TW", "ja"] {
+            assert!(uses_native_text(language), "{language}");
+        }
+        for language in ["", "en", "de", "ru", "vi", "pt_BR"] {
+            assert!(!uses_native_text(language), "{language}");
+        }
+    }
 
     #[test]
     fn placeholders_fill_in_any_order() {
@@ -222,6 +245,7 @@ mod tests {
         assert_eq!(system_language(&list(&["vi-VN"])), "vi");
         assert_eq!(system_language(&list(&["pl-PL"])), "pl");
         assert_eq!(system_language(&list(&["pl"])), "pl");
+        assert_eq!(system_language(&list(&["uk-UA", "en-US"])), "uk");
         assert_eq!(system_language(&list(&["zh-Hans-CN"])), "zh_CN");
         assert_eq!(system_language(&list(&["zh-Hant-TW", "en"])), "en");
         assert_eq!(system_language(&list(&["pt-BR"])), "pt_BR");

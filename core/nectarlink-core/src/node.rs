@@ -187,6 +187,9 @@ pub(crate) struct Shared {
     /// The last capability matrix emitted per device, to emit only changes.
     matrices: Mutex<HashMap<DeviceId, CapabilityMatrix>>,
     pub(crate) away_mode: std::sync::atomic::AtomicBool,
+    /// Only USB connections are allowed: nothing is dialed, accepted,
+    /// announced or looked up over any network.
+    usb_only: std::sync::atomic::AtomicBool,
     /// Whether this device has a network a paired device could be on: Wi-Fi,
     /// Ethernet or a VPN (#397). True unless the platform says otherwise.
     local_network: std::sync::atomic::AtomicBool,
@@ -251,6 +254,10 @@ pub(crate) struct Shared {
     pub(crate) usb_bridge_ports: Arc<Mutex<HashMap<u16, DeviceId>>>,
     /// USB tunnels whose plaintext `UsbHello` arrived but whose QUIC identity is not yet verified.
     pub(crate) usb_pending: Mutex<HashMap<u16, PendingUsbTunnel>>,
+    /// Loopback UDP bridge ports that carry a Bluetooth link rather than a USB cable.
+    pub(crate) bt_bridge_ports: Arc<Mutex<std::collections::HashSet<u16>>>,
+    /// Bound loopback TCP port the phone's Bluetooth links are piped into (0 if not started).
+    pub(crate) bt_listener_port: std::sync::atomic::AtomicU16,
     /// Active USB tunnel peers mapped to their local UDP bridge address and cancellation token.
     pub(crate) usb_peers: Arc<Mutex<HashMap<DeviceId, (SocketAddr, CancellationToken)>>>,
     /// The adb serial, adb server, and local UDP bridge port each USB-tunnelled phone is on.
@@ -384,10 +391,8 @@ impl Shared {
     /// (#397). A cable to the PC still counts.
     pub(crate) fn nothing_to_dial(&self, peer: &DeviceId) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
-        !self.local_network.load(Relaxed)
-            && !self.away_mode.load(Relaxed)
-            && self.usb_peer_addr(peer).is_none()
-            && !self.usb_tunnel_inbound(peer)
+        let no_cable = self.usb_peer_addr(peer).is_none() && !self.usb_tunnel_inbound(peer);
+        (self.usb_only() || (!self.local_network.load(Relaxed) && !self.away_mode.load(Relaxed))) && no_cable
     }
 
     pub(crate) fn nudge_reconnect(&self) {
@@ -745,6 +750,15 @@ impl Shared {
         self.away_mode.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn usb_only(&self) -> bool {
+        self.usb_only.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether relays and internet lookups run: Away mode, unless only the cable is wanted.
+    pub(crate) fn internet_on(&self) -> bool {
+        self.away_mode() && !self.usb_only()
+    }
+
     pub(crate) fn is_allowed_peer_ip(&self, peer: &DeviceId, ip: std::net::IpAddr) -> bool {
         self.away_mode() || self.is_lan_peer_ip(peer, ip)
     }
@@ -782,6 +796,9 @@ impl Shared {
     }
 
     pub(crate) fn is_connection_allowed(&self, conn: &Connection) -> bool {
+        if self.usb_only() {
+            return self.is_usb_connection(conn);
+        }
         if self.away_mode() || self.is_usb_connection(conn) {
             return true;
         }
@@ -804,7 +821,7 @@ impl Shared {
     }
 
     pub(crate) async fn wait_connection_allowed(&self, conn: &Connection) -> bool {
-        if self.away_mode() || self.is_usb_connection(conn) {
+        if !self.usb_only() && (self.away_mode() || self.is_usb_connection(conn)) {
             return true;
         }
         // Up to 200 ms for a direct path, not just for the first path of any kind.
@@ -880,6 +897,15 @@ impl Shared {
         lock(&self.usb_peers).get(peer).map(|(addr, _)| *addr)
     }
 
+    pub(crate) fn is_bt_port(&self, port: u16) -> bool {
+        lock(&self.bt_bridge_ports).contains(&port)
+    }
+
+    /// Whether `peer` has a tunnel over a USB cable (not over Bluetooth).
+    pub(crate) fn has_cable(&self, peer: &DeviceId) -> bool {
+        self.usb_peer_addr(peer).is_some_and(|addr| !self.is_bt_port(addr.port()))
+    }
+
     pub(crate) fn usb_peer_or_pending_addr(&self, peer: &DeviceId) -> Option<(SocketAddr, bool)> {
         if let Some(addr) = self.usb_peer_addr(peer) {
             return Some((addr, false));
@@ -896,11 +922,13 @@ impl Shared {
 
     pub(crate) fn is_usb_connection(&self, conn: &Connection) -> bool {
         let peer = crate::device_id(&conn.remote_id());
-        if self.usb_peer_addr(&peer).is_some() {
+        if self.has_cable(&peer) {
             return true;
         }
         conn.paths().iter().any(|p| match p.remote_addr() {
-            iroh::TransportAddr::Ip(addr) => self.is_usb_addr_for(&peer, addr),
+            iroh::TransportAddr::Ip(addr) => {
+                self.is_usb_addr_for(&peer, addr) && !self.is_bt_port(addr.port())
+            }
             _ => false,
         })
     }
@@ -950,6 +978,10 @@ impl Shared {
         let peer = pending.peer;
         let bridge_addr = pending.bridge_addr;
         let bridge_port = bridge_addr.port();
+        if self.is_bt_port(bridge_port) && self.has_cable(&peer) {
+            pending.cancel.cancel();
+            return;
+        }
         if let Some(cb) = pending.on_verified.take() {
             cb();
         }
@@ -1073,6 +1105,7 @@ impl Shared {
     pub(crate) async fn on_usb_tunnel_disconnected(&self, peer: DeviceId, bridge_addr: SocketAddr) {
         let bridge_port = bridge_addr.port();
         lock(&self.usb_pending).remove(&bridge_port);
+        lock(&self.bt_bridge_ports).remove(&bridge_port);
         let removed = {
             let mut peers = lock(&self.usb_peers);
             if peers.get(&peer).is_some_and(|(addr, _)| *addr == bridge_addr) {
@@ -1107,7 +1140,7 @@ impl Shared {
         self.endpoint.network_change().await;
         if let Some(session) = self.session(&peer) {
             if session.uses_usb_bridge_port(bridge_port) {
-                session.close(CLOSE_NORMAL, b"usb disconnected");
+                session.close(CLOSE_NORMAL, b"tunnel disconnected");
             } else {
                 self.publish_online(&session);
             }
@@ -1131,14 +1164,15 @@ impl Shared {
 
     /// Feeds known addresses of a peer into address lookup.
     pub fn remember_addrs(&self, peer: &DeviceId, addrs: &[SocketAddr]) {
-        let allow_wan = self.away_mode();
+        let allow_wan = self.internet_on();
+        let usb_only = self.usb_only();
         let mut all: Vec<SocketAddr> = addrs
             .iter()
             .copied()
             .filter(|a| {
                 if self.is_usb_addr_for(peer, a) {
                     true
-                } else if a.ip().is_loopback() {
+                } else if usb_only || a.ip().is_loopback() {
                     false
                 } else {
                     allow_wan || self.is_lan_peer_ip(peer, a.ip())
@@ -1150,7 +1184,7 @@ impl Shared {
         {
             all.push(usb_addr);
         }
-        if all.is_empty() && allow_wan {
+        if all.is_empty() && (allow_wan || usb_only) {
             return;
         }
         if let Ok(key) = crate::public_key(peer) {
@@ -1187,13 +1221,14 @@ impl Shared {
             DeviceFacts::new(&local.device, local.capabilities().into_iter().collect(), local.power)
         };
         let remote = DeviceFacts::new(&record.info, record.caps, record.power);
-        let mut paths = vec![ConnectionPath::Lan];
+        let usb_only = self.usb_only();
+        let mut paths = if usb_only { Vec::new() } else { vec![ConnectionPath::Lan] };
         if self.usb_peer_addr(peer).is_some()
             || self.session(peer).is_some_and(|s| s.path() == ConnectionPath::Usb)
         {
             paths.push(ConnectionPath::Usb);
         }
-        if self.away_mode() {
+        if self.internet_on() {
             paths.push(ConnectionPath::Relay);
         }
         Ok(features::compute(
@@ -1597,6 +1632,9 @@ impl Shared {
         let mut addr = EndpointAddr::new(crate::public_key(&peer)?);
         if let Some(usb_addr) = self.usb_peer_addr(&peer) {
             addr = addr.with_ip_addr(usb_addr);
+        } else if self.usb_only() {
+            // No cable, and nothing else may be tried.
+            return Err(Error::Offline);
         }
         let conn = tokio::time::timeout(DIAL_TIMEOUT, self.endpoint.connect(addr, ALPN_SESSION))
             .await
@@ -1933,7 +1971,7 @@ impl Node {
             tracing::warn!(%err, "can't load relay settings; using defaults");
             RelaySettings::default()
         });
-        let relay_map = relay_settings.enabled_map(config.away_mode);
+        let relay_map = relay_settings.enabled_map(config.away_mode && !config.usb_only);
         #[cfg(not(target_os = "linux"))]
         let proxy = None;
         #[cfg(target_os = "linux")]
@@ -2023,6 +2061,7 @@ impl Node {
             dial_failures: Mutex::new(HashMap::new()),
             matrices: Mutex::new(HashMap::new()),
             away_mode: std::sync::atomic::AtomicBool::new(config.away_mode),
+            usb_only: std::sync::atomic::AtomicBool::new(config.usb_only),
             local_network: std::sync::atomic::AtomicBool::new(true),
             relay_settings: Mutex::new(relay_settings),
             relay_map,
@@ -2059,6 +2098,8 @@ impl Node {
             usb_bridge_ports: Arc::new(Mutex::new(HashMap::new())),
             usb_pending: Mutex::new(HashMap::new()),
             usb_peers: Arc::new(Mutex::new(HashMap::new())),
+            bt_bridge_ports: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            bt_listener_port: std::sync::atomic::AtomicU16::new(0),
             usb_serials: Mutex::new(HashMap::new()),
             usb_helpers: Mutex::new(HashMap::new()),
             usb_inbound: Mutex::new(std::collections::HashSet::new()),
@@ -2076,6 +2117,8 @@ impl Node {
 
         if config.lan_discovery {
             shared.lan_wanted.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if config.lan_discovery && !config.usb_only {
             // Right after sign-in the network may not be up yet, and mDNS can't
             // open its sockets: start without it and keep trying (#466).
             if let Err(e) = start_lan_discovery(&shared, &config.device.name) {
@@ -2083,7 +2126,7 @@ impl Node {
                 retry_lan_discovery(&shared);
             }
         }
-        if shared.localsend.enabled() {
+        if shared.localsend.enabled() && !config.usb_only {
             shared.localsend.start(&shared);
         }
 
@@ -2165,7 +2208,7 @@ impl Node {
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
             let _one_at_a_time = shared.away_switch.lock().await;
-            if apply_relays(&shared, shared.away_mode()).await {
+            if apply_relays(&shared, shared.internet_on()).await {
                 shared.endpoint.network_change().await;
                 shared.nudge_reconnect();
             }
@@ -2244,6 +2287,45 @@ impl Node {
         self.shared.refresh_all_capabilities();
     }
 
+    /// Whether only USB connections are allowed.
+    pub fn usb_only(&self) -> bool {
+        self.shared.usb_only()
+    }
+
+    /// Allows only connections through a USB cable, or all the others again.
+    /// On, the sessions on any other path close, and mDNS, relays and internet
+    /// lookups and LocalSend stop; off, they come back as Away mode, LAN
+    /// discovery and the LocalSend setting say.
+    pub fn set_usb_only(&self, enabled: bool) {
+        let was = self.shared.usb_only.swap(enabled, std::sync::atomic::Ordering::Relaxed);
+        if was == enabled {
+            return;
+        }
+        if enabled {
+            for session in self.shared.live_sessions() {
+                if !self.shared.is_connection_allowed(&session.conn) {
+                    tracing::info!(peer = %session.peer.short(), "closing session after turning on USB only");
+                    session.close(CLOSE_NORMAL, b"usb only");
+                }
+            }
+            // A LAN-only server and announcer, which the cable doesn't need.
+            self.shared.localsend.stop(&self.shared);
+        } else if self.shared.localsend.enabled() {
+            self.shared.localsend.start(&self.shared);
+        }
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            apply_internet_services(&shared).await;
+            if let Ok(peers) = shared.store.list_peers() {
+                for peer in peers {
+                    shared.remember_addrs(&peer.id, &peer.last_addrs);
+                }
+            }
+            shared.refresh_all_capabilities();
+            shared.nudge_reconnect();
+        });
+    }
+
     /// Stops all sessions and networking.
     pub async fn shutdown(&self) {
         self.shared.cancel.cancel();
@@ -2295,6 +2377,26 @@ impl Node {
     /// (`127.0.0.1:<port>`) and returns the phone's [`DeviceId`].
     pub async fn connect_usb_tunnel(&self, forwarded_tcp: SocketAddr) -> Result<DeviceId> {
         crate::usb::connect_usb_tunnel(&self.shared, forwarded_tcp).await
+    }
+
+    /// Phone: starts (once) the loopback listener the platform pipes each
+    /// incoming Bluetooth link into, and returns its port.
+    pub fn start_bluetooth_listener(&self) -> Option<u16> {
+        crate::bluetooth::start_phone_listener(&self.shared)
+    }
+
+    /// PC: runs the session over a Bluetooth link the platform opened to a
+    /// paired phone and exposes at `forwarded_tcp` (`127.0.0.1:<port>`).
+    /// Returns the phone's ID; ends with an error for an unpaired phone, one
+    /// that's already connected, or one on a cable.
+    pub async fn connect_bluetooth(&self, forwarded_tcp: SocketAddr) -> Result<DeviceId> {
+        crate::bluetooth::connect(&self.shared, forwarded_tcp).await
+    }
+
+    /// PC: the paired phones a Bluetooth link would help now, with their
+    /// names: offline, reconnecting on, and not on a cable.
+    pub fn bluetooth_wanted(&self) -> Vec<(DeviceId, String)> {
+        crate::bluetooth::wanted(&self.shared)
     }
 
     // ---- Pairing ----
@@ -2350,6 +2452,7 @@ impl Node {
         self.shared.endpoint.network_change().await;
         // A network that just came up may be what mDNS was waiting for (#466).
         if self.shared.lan_wanted.load(std::sync::atomic::Ordering::Relaxed)
+            && !self.shared.usb_only()
             && lock(&self.shared.lan_discovery).is_none()
         {
             let name = self.shared.local.read().unwrap_or_else(|e| e.into_inner()).device.name.clone();
@@ -2943,7 +3046,12 @@ impl Node {
 
     /// Turns LocalSend v2.1 compatibility on or off (persisted encrypted on disk).
     pub fn set_localsend_enabled(&self, enabled: bool) -> Result<()> {
-        self.shared.localsend.set_enabled(&self.shared, enabled)
+        self.shared.localsend.set_enabled(&self.shared, enabled)?;
+        if self.shared.usb_only() {
+            // Remembered for when the other paths are back.
+            self.shared.localsend.stop(&self.shared);
+        }
+        Ok(())
     }
 
     /// Whether this device's LocalSend HTTP/HTTPS server is actively bound and
@@ -3391,6 +3499,13 @@ impl Node {
         crate::mirror::rotate(&self.shared, &session, landscape).await
     }
 
+    /// Tells `peer` how loud the phone's sound plays on the PC (`0..=100`,
+    /// #577). Only to a device that offers `mirror.volume`.
+    pub async fn mirror_volume(&self, peer: DeviceId, level: u8) -> Result<()> {
+        let session = self.connected(&peer)?;
+        crate::mirror::volume(&self.shared, &session, level).await
+    }
+
     /// Sends a mirrored phone's sound to this PC, or leaves it on the phone.
     pub async fn mirror_sound(&self, peer: DeviceId, on: bool) -> Result<()> {
         let session = self.connected(&peer)?;
@@ -3723,6 +3838,13 @@ impl Node {
         crate::sms::sims(&self.shared, &session).await
     }
 
+    /// Asks a paired phone to mark a conversation's texts read in its own
+    /// messages. `Unsupported` from a phone that doesn't offer it.
+    pub async fn sms_mark_read(&self, peer: DeviceId, thread: String) -> Result<()> {
+        let session = self.connected(&peer)?;
+        crate::sms::mark_read(&self.shared, &session, thread).await
+    }
+
     /// Sends a text or MMS through a paired phone on the SIM `sim` (an id
     /// from [`sms_sims`](Self::sms_sims)), or on its default when `None`.
     pub async fn send_sms_on(
@@ -4040,6 +4162,12 @@ impl Node {
     ) -> Result<()> {
         let session = self.connected(&phone)?;
         crate::unlock::enroll(&self.shared, &session, user, user_name, &password).await
+    }
+
+    /// Phone side: asks the paired PC to start a fresh biometric prompt.
+    pub async fn unlock_from_phone(&self, pc: DeviceId) -> Result<()> {
+        let session = self.connected(&pc)?;
+        crate::unlock::request_from_phone(&self.shared, &session).await
     }
 
     /// PC side: asks `phone` to release `user`'s password for one unlock. The
@@ -4368,6 +4496,18 @@ impl Node {
     pub async fn set_pc_audio_output(&self, peer: DeviceId, output: String) -> Result<()> {
         let session = self.connected(&peer)?;
         crate::deck::set_pc_audio_output(&self.shared, &session, output).await
+    }
+
+    /// Asks a paired PC to turn its Wi-Fi and/or Bluetooth on or off
+    /// (`pc.radio.set`, #636).
+    pub async fn set_pc_radio(
+        &self,
+        peer: DeviceId,
+        wifi: Option<bool>,
+        bluetooth: Option<bool>,
+    ) -> Result<()> {
+        let session = self.connected(&peer)?;
+        crate::deck::set_pc_radio(&self.shared, &session, wifi, bluetooth).await
     }
 
     // ---- Phone storage (PC File Explorer) ----
@@ -5035,8 +5175,19 @@ async fn apply_relays(shared: &Shared, away: bool) -> bool {
 /// closes (`handle_net_report_report` holds on to it), which needs a restart.
 async fn apply_internet_services(shared: &Arc<Shared>) {
     let _one_at_a_time = shared.away_switch.lock().await;
-    let on = shared.away_mode();
+    let on = shared.internet_on();
     apply_relays(shared, on).await;
+    if shared.usb_only() {
+        stop_lan_discovery(shared);
+    } else if shared.lan_wanted.load(std::sync::atomic::Ordering::Relaxed)
+        && lock(&shared.lan_discovery).is_none()
+    {
+        let name = shared.local.read().unwrap_or_else(|e| e.into_inner()).device.name.clone();
+        if let Err(e) = start_lan_discovery(shared, &name) {
+            tracing::warn!(error = %e, "LAN discovery isn't available yet; trying again");
+            retry_lan_discovery(shared);
+        }
+    }
     let running = lock(&shared.lan_discovery).as_ref().map(|(_, fast)| *fast);
     let lookups = match running {
         // Swapping mDNS clears the lookups and puts back what Away mode allows.
@@ -5055,6 +5206,18 @@ async fn apply_internet_services(shared: &Arc<Shared>) {
     if on {
         shared.nudge_reconnect();
     }
+}
+
+/// Stops mDNS, leaving only the lookups that need no network. Nearby devices
+/// are forgotten: nothing keeps them fresh any more.
+fn stop_lan_discovery(shared: &Arc<Shared>) {
+    let Some((cancel, _)) = lock(&shared.lan_discovery).take() else { return };
+    cancel.cancel();
+    let gone: Vec<DeviceId> = lock(&shared.discovered).drain().map(|(id, _)| id).collect();
+    for id in gone {
+        shared.emit(NodeEvent::DiscoveryExpired(id));
+    }
+    shared.endpoint.set_user_data_for_address_lookup(None);
 }
 
 /// Publishes this device's addresses without the name that LAN discovery
@@ -5135,8 +5298,8 @@ fn retry_lan_discovery(shared: &Arc<Shared>) {
                 _ = tokio::time::sleep(wait) => {}
             }
             let Some(shared) = weak.upgrade() else { break };
-            if lock(&shared.lan_discovery).is_some() {
-                break; // A network change started it meanwhile.
+            if lock(&shared.lan_discovery).is_some() || shared.usb_only() {
+                break; // A network change started it meanwhile, or only the cable is wanted.
             }
             let name = shared.local.read().unwrap_or_else(|e| e.into_inner()).device.name.clone();
             match start_lan_discovery(&shared, &name) {
@@ -5189,7 +5352,7 @@ fn install_mdns(shared: &Arc<Shared>, fast: bool) -> Result<()> {
         old.cancel();
         lookups.clear();
         lookups.add(shared.memory.clone());
-        if shared.away_mode() {
+        if shared.internet_on() {
             add_internet_lookups(&shared.endpoint)?;
         }
         // A nearby list just opened: start it fresh rather than keep what the
@@ -5646,6 +5809,65 @@ mod away_tests {
         node.set_away_mode(false);
         settled(&node).await;
         assert_eq!(lookups(&node), 1);
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn usb_only_stops_internet_services_and_dialing_until_turned_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let node = node(&dir, true).await;
+        assert!(lookups(&node) > 1, "started with internet lookups");
+        let peer = DeviceId([9; 32]);
+        assert!(!node.shared.nothing_to_dial(&peer), "a network and Away mode: worth dialing");
+
+        node.set_usb_only(true);
+        settled(&node).await;
+        assert!(node.usb_only());
+        assert_eq!(lookups(&node), 1, "only the in-memory lookup is left");
+        assert!(node.shared.nothing_to_dial(&peer), "no cable: nothing to dial, whatever Away mode says");
+        assert!(node.away_mode(), "Away mode keeps its own setting");
+
+        node.set_usb_only(false);
+        settled(&node).await;
+        assert!(lookups(&node) > 1, "internet lookups are back");
+        assert!(!node.shared.nothing_to_dial(&peer));
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn usb_only_stops_mdns_that_is_already_running_and_turning_it_off_starts_it_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = NodeConfig::new(
+            dir.path().to_path_buf(),
+            DeviceInfo {
+                name: "Test".into(),
+                kind: DeviceKind::Phone,
+                os: "android".into(),
+                os_ver: "14".into(),
+                model: None,
+                accent: None,
+                screen: None,
+                install_id: None,
+            },
+            "0.0.0-test",
+        );
+        config.localsend_port = 0;
+        let node = Node::start(config, Arc::new(NoopPlatform)).await.unwrap();
+        let running = |node: &Node| lock(&node.shared.lan_discovery).is_some();
+        // mDNS can fail to start where there's no multicast (a sandbox); that
+        // can't say anything about the switch.
+        if !running(&node) {
+            node.shutdown().await;
+            return;
+        }
+
+        node.set_usb_only(true);
+        settled(&node).await;
+        assert!(!running(&node), "mDNS keeps announcing the device while USB only is on");
+
+        node.set_usb_only(false);
+        settled(&node).await;
+        assert!(running(&node), "mDNS is back once USB only is off");
         node.shutdown().await;
     }
 

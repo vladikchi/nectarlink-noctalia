@@ -16,6 +16,7 @@ NativeWindow {
     onPageChanged: {
         if (AppController.currentPage !== page) AppController.currentPage = page
         whatsNewLoader.hide()
+        AppController.setCallsOpen(page === "calls")
     }
     Connections {
         target: AppController
@@ -111,6 +112,17 @@ NativeWindow {
         ? DeviceList.deviceIdAt(currentDeviceIndex) : ""
     readonly property string currentDeviceName: DeviceList.count > 0 && DeviceList.revision >= 0
         ? DeviceList.deviceNameAt(currentDeviceIndex) : ""
+
+    // What's waiting on each device, and on all but the one shown.
+    readonly property var deviceBadges: { try { return JSON.parse(AppController.deviceBadges) } catch (e) { return ({}) } }
+    readonly property int otherDevicesBadge: {
+        let total = 0
+        for (const id in deviceBadges) {
+            if (id !== currentDeviceId)
+                total += deviceBadges[id]
+        }
+        return total
+    }
 
     minimumWidth: Theme.layout.minWindow[0]
     minimumHeight: Theme.layout.minWindow[1]
@@ -406,6 +418,8 @@ NativeWindow {
         }
     }
     Component.onCompleted: {
+        AppController.watchBadges(window.currentDeviceId)
+        AppController.setCallsOpen(window.page === "calls")
         followBackdrop()
         if (!window.activeFocusItem && window.contentItem)
             window.contentItem.forceActiveFocus()
@@ -570,9 +584,99 @@ NativeWindow {
         }
     }
 
+    // ---- Room for the rail and pages ----
+    // A tiling window manager (Hyprland, Sway) sizes tiled windows itself and
+    // can make this one smaller than its minimum. The rail and the pages then
+    // keep the minimum size here and scroll, instead of overlapping each
+    // other or running out of reach. Shift+wheel, a sideways swipe, or the bar
+    // along the bottom moves it sideways.
+    Flickable {
+        id: shell
+        anchors.fill: parent
+        contentWidth: Math.max(width, window.minimumWidth)
+        contentHeight: Math.max(height, window.minimumHeight)
+        readonly property bool overflows: contentWidth > width + 0.5 || contentHeight > height + 0.5
+        // Dragging would fight the pages' own scrolling; the wheel and the bar
+        // move it instead.
+        interactive: false
+        boundsBehavior: Flickable.StopAtBounds
+        clip: overflows
+
+        WheelHandler {
+            target: null
+            enabled: shell.overflows
+            onWheel: (event) => {
+                // Pages scroll first; what reaches here moves the room itself:
+                // sideways, or up and down once a short window's page is at its end.
+                const sideways = event.angleDelta.x !== 0 || event.pixelDelta.x !== 0
+                    || (event.modifiers & Qt.ShiftModifier)
+                if (sideways) {
+                    const d = event.pixelDelta.x !== 0 ? event.pixelDelta.x
+                        : event.pixelDelta.y !== 0 ? event.pixelDelta.y
+                        : (event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y) / 120 * 80
+                    const maxX = Math.max(0, shell.contentWidth - shell.width)
+                    shell.contentX = Math.max(0, Math.min(maxX, shell.contentX - d))
+                } else if (shell.contentHeight > shell.height + 0.5) {
+                    const d = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * 80
+                    const maxY = Math.max(0, shell.contentHeight - shell.height)
+                    shell.contentY = Math.max(0, Math.min(maxY, shell.contentY - d))
+                } else {
+                    event.accepted = false
+                }
+            }
+        }
+    }
+
+    // The sideways bar, shown only while the window is narrower than the rail
+    // and pages need.
+    Item {
+        id: shellBar
+        z: 50
+        visible: shell.contentWidth > shell.width + 0.5
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 12
+        readonly property real ratio: shell.width / shell.contentWidth
+        Rectangle {
+            id: shellThumb
+            height: shellBarArea.containsMouse || shellDrag.active ? 8 : 5
+            radius: height / 2
+            y: shellBar.height - height - 2
+            width: Math.max(40, shellBar.width * shellBar.ratio)
+            x: {
+                const maxX = shell.contentWidth - shell.width
+                return maxX > 0 ? (shellBar.width - width) * (shell.contentX / maxX) : 0
+            }
+            color: Theme.surfaceContentVariant
+            opacity: shellBarArea.containsMouse || shellDrag.active ? 0.75 : 0.5
+            DragHandler {
+                id: shellDrag
+                target: null
+                xAxis.enabled: true
+                yAxis.enabled: false
+                property real startX: 0
+                onActiveChanged: if (active) startX = shell.contentX
+                onTranslationChanged: {
+                    const free = shellBar.width - shellThumb.width
+                    if (free <= 0) return
+                    const maxX = shell.contentWidth - shell.width
+                    shell.contentX = Math.max(0, Math.min(maxX, startX + translation.x / free * maxX))
+                }
+            }
+        }
+        MouseArea {
+            id: shellBarArea
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+        }
+    }
+
     // ---- Navigation rail ----
     Rectangle {
         id: rail
+        parent: shell.contentItem
         visible: !window.welcome
         width: Theme.railWidth
         height: parent.height
@@ -595,6 +699,7 @@ NativeWindow {
             }
         }
         Column {
+            id: navColumn
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: mark.bottom
             anchors.topMargin: 31
@@ -613,6 +718,7 @@ NativeWindow {
             NavItem {
                 iconPath: Icons.messages
                 text: qsTr("Messages")
+                badge: AppController.unreadMessagesBadge
                 selected: window.page === "messages"
                 activeHover: rail.hoveredNav === "messages"
                 onHoveredChanged: {
@@ -624,6 +730,7 @@ NativeWindow {
             NavItem {
                 iconPath: Icons.call
                 text: qsTr("Calls")
+                badge: AppController.missedCallsBadge
                 selected: window.page === "calls"
                 activeHover: rail.hoveredNav === "calls"
                 onHoveredChanged: {
@@ -688,7 +795,90 @@ NativeWindow {
                 onClicked: window.page = "settings"
             }
         }
+        // The device the pages show: click to pick another.
+        FocusScope {
+            id: deviceChip
+            // Only where it fits under the pages: a short window has no room (the
+            // pages switch devices too).
+            visible: DeviceList.count > 0 && navColumn.y + navColumn.height + 8 + height + anchors.bottomMargin <= pairButton.y
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: pairButton.top
+            anchors.bottomMargin: 14
+            width: Theme.railWidth - 8
+            height: chipIcon.height + chipName.height + 8
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: window.otherDevicesBadge > 0
+                ? qsTr("Device: %1. Switch device, %n new on the others", "", window.otherDevicesBadge).arg(window.currentDeviceName)
+                : qsTr("Device: %1. Switch device").arg(window.currentDeviceName)
+            Accessible.onPressAction: deviceMenu.open()
+            Keys.onPressed: (event) => {
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                    deviceMenu.open()
+                    event.accepted = true
+                }
+            }
+            Rectangle {
+                id: chipIcon
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 40; height: 40
+                radius: width / 2
+                color: chipMouse.containsMouse || deviceMenu.opened ? Theme.secondaryContainer : Theme.surfaceContainerHigh
+                border.width: Theme.focusVisible(deviceChip) ? 2 : 1
+                border.color: Theme.focusVisible(deviceChip) ? Theme.primary : Theme.outlineVariant
+                Behavior on color { enabled: !Theme.reduceMotion; ColorAnimation { duration: Theme.fadeFast } }
+                // The row of the device shown gives its kind and whether it's online.
+                Repeater {
+                    model: DeviceList
+                    delegate: Item {
+                        required property int index
+                        required property string kind
+                        required property bool online
+                        visible: index === window.currentDeviceIndex
+                        anchors.fill: parent
+                        Icon {
+                            anchors.centerIn: parent
+                            path: kind === "tablet" || kind === "phone" ? Icons.phone : Icons.laptop
+                            color: Theme.surfaceContent
+                        }
+                        StatusDot {
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.rightMargin: -2
+                            anchors.bottomMargin: -2
+                            online: parent.online
+                        }
+                    }
+                }
+            }
+            // What's waiting on the other devices: a reason to click.
+            Badge {
+                x: chipIcon.x + chipIcon.width - width / 2 - 2
+                y: chipIcon.y - 4
+                count: window.otherDevicesBadge
+            }
+            Txt {
+                id: chipName
+                anchors.top: chipIcon.bottom
+                anchors.topMargin: 4
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: window.currentDeviceName
+                role: "caption"
+                muted: true
+                elide: Text.ElideRight
+            }
+            MouseArea {
+                id: chipMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Theme.controlCursor
+                onClicked: deviceMenu.open()
+            }
+        }
         IconButton {
+            id: pairButton
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 18
@@ -702,6 +892,7 @@ NativeWindow {
     // ---- Title bar and pages ----
     Item {
         id: main
+        parent: shell.contentItem
         visible: !window.welcome
         anchors.left: rail.right
         anchors.right: parent.right
@@ -1063,6 +1254,17 @@ NativeWindow {
     }
 
     // ---- Overlays ----
+    DeviceMenu {
+        id: deviceMenu
+        current: window.currentDeviceIndex
+        badges: window.deviceBadges
+        onPicked: (index) => AppController.currentDevice = index
+        onPairRequested: window.openPairing()
+    }
+    // The rail's badges count for the device shown; the Calls page showing
+    // is looking at its missed calls.
+    onCurrentDeviceIdChanged: AppController.watchBadges(window.currentDeviceId)
+    Component.onDestruction: AppController.setCallsOpen(false)
     Connections {
         target: Pairing
         function onStateChanged() {
@@ -1314,6 +1516,13 @@ NativeWindow {
         source: active ? "qrc:/qt/qml/app/nectarlink/qml/components/ReportSheet.qml" : ""
         onLoaded: item.open()
     }
+    Loader {
+        id: yourReportsLoader
+        anchors.fill: parent
+        active: false
+        source: active ? "qrc:/qt/qml/app/nectarlink/qml/components/YourReportsSheet.qml" : ""
+        onLoaded: item.open()
+    }
     Connections {
         target: Report
         function onRequested() {
@@ -1321,6 +1530,14 @@ NativeWindow {
                 reportLoader.item.open()
             else
                 reportLoader.active = true
+        }
+        function onConversationsRequested() {
+            if (reportLoader.active && reportLoader.item && reportLoader.item.opened)
+                reportLoader.item.close()
+            if (yourReportsLoader.active && yourReportsLoader.item)
+                yourReportsLoader.item.open()
+            else
+                yourReportsLoader.active = true
         }
     }
     Connections {

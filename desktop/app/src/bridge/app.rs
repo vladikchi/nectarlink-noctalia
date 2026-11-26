@@ -96,6 +96,8 @@ pub mod qobject {
         #[qproperty(f64, update_progress)]
         /// What the update is doing, for Settings ("" when idle).
         #[qproperty(QString, update_status)]
+        /// When the update feed last answered, Unix seconds (0: not yet).
+        #[qproperty(f64, update_checked_at)]
         /// Device ID and name of a phone asking to control this PC for the
         /// first time while `remote_input` is off ("" when none).
         #[qproperty(QString, remote_prompt_device_id)]
@@ -134,6 +136,13 @@ pub mod qobject {
         /// Bumped whenever the Home card's summary (unread messages, missed calls,
         /// latest photo) changes for the watched phone.
         #[qproperty(i32, home_summary_revision)]
+        /// What the rail's badges show for the phone shown: texts not read
+        /// here, and missed calls not looked at.
+        #[qproperty(i32, unread_messages_badge)]
+        #[qproperty(i32, missed_calls_badge)]
+        /// What's waiting on each device, texts and missed calls together:
+        /// `{ "<device ID>": count }`, left out when none.
+        #[qproperty(QString, device_badges)]
         /// Continuity Camera state (in-flight request and fallback paste prompt).
         #[qproperty(bool, continuity_camera_busy)]
         #[qproperty(QString, continuity_camera_status)]
@@ -386,6 +395,14 @@ pub mod qobject {
         /// Tells the event-driven Home summary which phone the Home page is showing (`""` when hidden).
         #[qinvokable]
         fn watch_home_summary(self: &AppController, device: &QString);
+        /// Counts the rail's badges for this phone ("" for none).
+        #[qinvokable]
+        #[cxx_name = "watchBadges"]
+        fn watch_badges(self: &AppController, device: &QString);
+        /// The Calls page is showing (or not).
+        #[qinvokable]
+        #[cxx_name = "setCallsOpen"]
+        fn set_calls_open(self: &AppController, open: bool);
         /// Glanceable Home summary for `device` as JSON.
         #[qinvokable]
         fn home_summary(self: &AppController, device: &QString) -> QString;
@@ -441,7 +458,7 @@ pub mod qobject {
         #[qsignal]
         fn toast(self: Pin<&mut AppController>, message: QString);
         /// How setting up unlock with phone ended: `done`, `wrong_password`,
-        /// `declined`, `phone_away`, `phone_cant`, `failed`, or `registered` /
+        /// `declined`, `phone_away`, `phone_cant`, `no_biometric`, `failed`, or `registered` /
         /// `register_failed` for the administrator step.
         #[qsignal]
         #[cxx_name = "unlockResult"]
@@ -508,6 +525,7 @@ pub struct AppControllerRust {
     update_busy: bool,
     update_progress: f64,
     update_status: QString,
+    update_checked_at: f64,
     remote_prompt_device_id: QString,
     remote_prompt_device_name: QString,
     pc_mirror_prompt_device_id: QString,
@@ -527,6 +545,9 @@ pub struct AppControllerRust {
     clipboard_history: QString,
     timeline_preview: QString,
     home_summary_revision: i32,
+    unread_messages_badge: i32,
+    missed_calls_badge: i32,
+    device_badges: QString,
     continuity_camera_busy: bool,
     continuity_camera_status: QString,
     continuity_camera_mode: QString,
@@ -706,6 +727,32 @@ pub fn request_activation() {
     }
 }
 
+/// Brings up the Messages page for `device` (from any thread). The
+/// conversation is opened by the caller.
+pub(crate) fn show_messages(device: DeviceId) {
+    if let Some(qt) = controller() {
+        let _ = qt.queue(move |mut object| {
+            if let Some(idx) = core_host::host().hub.read(|s| s.devices.iter().position(|d| d.id == device)) {
+                object.as_mut().set_current_device(idx as i32);
+            }
+            object.as_mut().set_current_page(QString::from("messages"));
+            object.activate_requested();
+        });
+    }
+}
+
+/// Sets the rail's badges (from any thread).
+pub(crate) fn show_badges(texts: u32, missed: u32, devices: &str) {
+    let devices = devices.to_owned();
+    if let Some(qt) = controller() {
+        let _ = qt.queue(move |mut object| {
+            object.as_mut().set_device_badges(QString::from(&devices));
+            object.as_mut().set_unread_messages_badge(texts as i32);
+            object.as_mut().set_missed_calls_badge(missed as i32);
+        });
+    }
+}
+
 /// Pauses or resumes pop-ups for phone notifications (from any thread).
 pub(crate) fn toggle_notifications_pause() {
     if let Some(qt) = controller() {
@@ -856,6 +903,7 @@ impl cxx_qt::Initialize for qobject::AppController {
             .release();
         self.as_mut().set_can_update(crate::updater::can_update());
         self.as_mut().set_can_install_unattended(crate::updater::can_install_unattended());
+        self.as_mut().set_update_checked_at(crate::updater::last_checked() as f64);
         // Nothing downloading yet (0 would show an empty bar).
         self.as_mut().set_update_progress(-1.0);
         self.as_mut().set_clipboard_history(QString::from(&crate::clipboard::history_json()));
@@ -898,10 +946,11 @@ impl cxx_qt::Initialize for qobject::AppController {
                 | Changes::QUEUE,
             Self::refresh,
         );
-        super::subscribe(qt.clone(), Changes::UPDATE, |object| {
+        super::subscribe(qt.clone(), Changes::UPDATE, |mut object| {
             // Its name for people: "0.1.5", or "Nightly 7 (Amber Clover)".
             let version = crate::updater::available().map(|u| u.title()).unwrap_or_default();
-            object.set_update_version(QString::from(&version));
+            object.as_mut().set_update_version(QString::from(&version));
+            object.as_mut().set_update_checked_at(crate::updater::last_checked() as f64);
         });
         super::subscribe(qt.clone(), Changes::CLIPBOARD, |mut object| {
             let json = crate::clipboard::history_json();
@@ -934,6 +983,8 @@ impl cxx_qt::Initialize for qobject::AppController {
         super::subscribe(qt.clone(), Changes::CONTINUITY, Self::refresh_continuity);
         super::subscribe(qt.clone(), Changes::PALETTE, Self::refresh_palette);
         super::subscribe(qt.clone(), Changes::LOCALSEND | Changes::STATUS, Self::refresh_localsend_state);
+        // Listen to retention-affecting changes, but only refresh while Settings is
+        // open (SettingsPage refreshes on demand when opened).
         super::subscribe(
             qt.clone(),
             Changes::DATA_RETENTION
@@ -943,7 +994,9 @@ impl cxx_qt::Initialize for qobject::AppController {
                 | Changes::MESSAGES
                 | Changes::PHOTOS,
             |object| {
-                spawn_data_retention_refresh(object.qt_thread());
+                if String::from(&object.current_page) == "settings" {
+                    spawn_data_retention_refresh(object.qt_thread());
+                }
             },
         );
 
@@ -1863,6 +1916,7 @@ impl qobject::AppController {
                     crate::win::unlock::Enrolled::Declined => "declined",
                     crate::win::unlock::Enrolled::PhoneAway => "phone_away",
                     crate::win::unlock::Enrolled::PhoneCant => "phone_cant",
+                    crate::win::unlock::Enrolled::NoBiometric => "no_biometric",
                     crate::win::unlock::Enrolled::Failed => "failed",
                 };
                 let _ = qt.queue(move |object| object.unlock_result(device, QString::from(result)));
@@ -1894,8 +1948,14 @@ impl qobject::AppController {
             (false, true) if !others_on => unlock::UNREGISTER_ARG,
             _ => return,
         };
+        let _ = unlock::take_failure();
         crate::win::vcam::run_elevated(arg, move |ok| {
             core_host::refresh_capabilities();
+            if !ok {
+                let reason = unlock::take_failure();
+                let reason = reason.as_deref().unwrap_or("declined, or no reason given");
+                tracing::warn!(arg, reason, "unlock with phone: the administrator step failed");
+            }
             if on {
                 let result = if ok { "registered" } else { "register_failed" };
                 let _ = qt.queue(move |object| object.unlock_result(device, QString::from(result)));
@@ -2071,6 +2131,14 @@ impl qobject::AppController {
         if let Err(e) = crate::storage::open_in_explorer(id) {
             show_message(e);
         }
+    }
+
+    pub fn watch_badges(&self, device: &QString) {
+        crate::badges::watch(super::parse_device(device));
+    }
+
+    pub fn set_calls_open(&self, open: bool) {
+        crate::badges::set_calls_open(open);
     }
 
     pub fn watch_home_summary(&self, device: &QString) {
@@ -2647,7 +2715,7 @@ fn load_guide_doc_content(raw_key: &str) -> (String, String) {
             tr!(
                 "Guide",
                 "Local by default\n\
-             Your phone and PC talk directly over your local network or USB cable. When Connect over mobile data is on, encrypted traffic can use a relay when away from home. Automatic update checks contact GitHub Releases and can be turned off in Settings › Connection & About › Check for updates.\n\n\
+             Your phone and PC talk directly over your local network or USB cable. When Connect over mobile data is on, encrypted traffic can use a relay when away from home. Automatic update checks contact GitHub Releases and can be turned off in Settings › Updates › Check for updates.\n\n\
              End-to-end encrypted\n\
              Every connection uses QUIC with TLS 1.3 and Ed25519 device certificates verified during pairing. Device keys are protected by Windows DPAPI and the Android Keystore.\n\n\
              Per-device sharing controls\n\

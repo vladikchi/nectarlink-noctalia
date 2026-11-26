@@ -18,10 +18,11 @@ never sends commands, file paths, or URLs.
 |---|---|---|
 | `deck.actions` | desktop | Shares its Deck layout (`deck.layout`) and live state (`deck.state`) and accepts `deck.press` requests (`input.deck`) |
 | `pc.audio` | desktop | Reports active audio output devices in `deck.state` and accepts `pc.audio.set` requests (`media.pc_audio`) |
+| `pc.radios` | desktop | Reports its Wi-Fi and Bluetooth in `deck.state` and accepts `pc.radio.set` requests (#636) |
 
 - **Per-device toggles on the PC:**
   - `remote_input` (**off by default**): required for all `deck.press` requests (and accepted alongside `pc_actions` for `pc.audio.set`). When a paired phone presses a tile or calls `remote.check` while `remote_input` is off, the PC refuses with `DENIED` and emits a one-time consent prompt (`RemoteInputRequested`) for that phone.
-  - `commands` (**off by default**): additionally required for tiles whose `kind` is `"run_command"`. Even when `remote_input` is on, pressing a `"run_command"` tile while `commands` is off for that phone is refused with `DENIED`.
+  - `commands` (**off by default**): additionally required for tiles whose `kind` is `"run_command"`, or that have `needs_commands`. Even when `remote_input` is on, pressing such a tile while `commands` is off for that phone is refused with `DENIED`.
 
 ## 2. Messages
 
@@ -60,8 +61,14 @@ DeckTile = {
   icon:  text,              // from the fixed icon set (§2.5)
   color: text,              // from the fixed color set (§2.5)
   kind:  text,              // action kind (§2.5); never contains paths, URLs, or commands
+  needs_commands: bool?,    // true when pressing it runs a shell command although its kind
+                            // isn't "run_command" (a "macro" with a command step); left out when false
 }
 ```
+
+A phone drops, one by one, tiles whose `kind` it doesn't know, and keeps the
+rest of the layout: kinds can be added without breaking older phones. Unknown
+fields are ignored.
 
 ### 2.2 `deck.state`
 
@@ -76,6 +83,9 @@ DeckState = {
   muted:           bool,                 // PC speaker is muted (`volume_*` tiles and phone audio bar)
   mic_muted?:      bool,                 // default PC microphone is muted (`mic_mute` tiles); omitted when no capture device exists
   output_devices?: [AudioOutputDevice],  // active PC playback endpoints (0..=32)
+  toggles_on?:     [text],               // IDs of the "toggle" tiles that are on (0..=192); omitted when none are
+  wifi?:           bool,                 // the PC's Wi-Fi is on; omitted when it has none or can't tell
+  bluetooth?:      bool,                 // the PC's Bluetooth is on; omitted when it has none or can't tell
 }
 
 AudioOutputDevice = {
@@ -98,7 +108,7 @@ DeckPress = {
 Errors:
 - `BAD_MESSAGE` when `tile` is empty, longer than 64 bytes, or contains disallowed characters.
 - `UNSUPPORTED` when the PC does not offer `deck.actions`.
-- `DENIED` when `remote_input` is off for the phone, or when the tile's `kind` is `"run_command"` and `commands` is off for the phone.
+- `DENIED` when `remote_input` is off for the phone, or when the tile's `kind` is `"run_command"` or it has `needs_commands`, and `commands` is off for the phone.
 - `NOT_FOUND` when no tile with ID `tile` exists in the PC's current Deck layout.
 - `INTERNAL` when the platform action fails on the PC.
 
@@ -155,5 +165,26 @@ Errors for `pc.audio.set`:
     - `"type_text"` (text snippet typed into the focused field)
     - `"launch_app"` (`.exe` or `.lnk` picked on the PC, launched via `ShellExecuteW` without arguments)
     - `"run_command"` (command written on the PC; requires the per-device `commands` toggle)
-- **Icons (`icon`):** `"play"`, `"pause"`, `"skip_next"`, `"skip_previous"`, `"volume_up"`, `"volume_down"`, `"volume_off"`, `"mic"`, `"mic_off"`, `"lock"`, `"desktop"`, `"switch_window"`, `"screenshot"`, `"shortcut"`, `"globe"`, `"text"`, `"app"`, `"terminal"`, `"sparkle"`, `"star"`.
+    - `"macro"` (1..=16 steps run in order, each one of the kinds above except `"macro"`, with a pause of up to 10 s after it and 30 s in all; the PC answers the press at once and runs the steps after; `needs_commands` when a step runs a command)
+    - `"toggle"` (on and off in turn, #640: one action turns it on, another turns it off, each one of the parameterized or plain kinds above except `"macro"`; a press runs the side for the tile's state and, when that ran, turns the tile over. The PC keeps which toggles are on across restarts and reports them in `deck.state` `toggles_on`, so a phone shows the tile lit while it's on; `needs_commands` when a side runs a command. A phone that doesn't know the kind drops the tile.)
+  - Power: `"restart_pc"`, `"shut_down_pc"`. A phone asks the user before it sends the press. Neither can be a macro step or a side of a toggle.
+- **Icons (`icon`):** `"play"`, `"pause"`, `"skip_next"`, `"skip_previous"`, `"volume_up"`, `"volume_down"`, `"volume_off"`, `"mic"`, `"mic_off"`, `"lock"`, `"desktop"`, `"switch_window"`, `"screenshot"`, `"shortcut"`, `"globe"`, `"text"`, `"app"`, `"terminal"`, `"sparkle"`, `"star"`, `"power"`, `"restart"`, `"bolt"`, `"toggle"`.
 - **Colors (`color`):** `"amber"`, `"coral"`, `"red"`, `"teal"`, `"green"`, `"blue"`, `"violet"`, `"slate"`.
+
+### 2.6 `pc.radio.set`
+
+Sent by a phone to a PC that offers `pc.radios` to turn its Wi-Fi and/or
+Bluetooth on or off (#636). Same permission as `pc.audio.set`: `pc_actions`
+or `remote_input` on for that phone, else `DENIED`.
+
+```
+PcRadioSet = {
+  wifi?:      bool,   // at least one of the two
+  bluetooth?: bool,
+}
+```
+
+The PC answers `ok` once the switch is made and sends `deck.state` with the
+new values; `INTERNAL` when the system refused (Windows' radio access, or
+NetworkManager's or BlueZ's policy on Linux). A phone asks before turning the
+PC's Wi-Fi off, since it may be how it reaches that PC.

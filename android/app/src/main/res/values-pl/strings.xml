@@ -36,6 +36,7 @@
     <string name="link_online_rtt">Połączono · %1$d ms</string>
     <string name="link_usb">Przez USB</string>
     <string name="link_usb_rtt">Przez USB · %1$d ms</string>
+    <string name="link_bluetooth">Przez Bluetooth</string>
     <string name="link_away">Połączono poza siecią lokalną</string>
     <string name="link_connecting">Łączenie…</string>
     <string name="link_offline_seen">Offline · ostatnio widziano %1$s</string>
@@ -51,6 +52,8 @@
 
     <!-- Settings -->
     <string name="settings_title">Ustawienia</string>
+    <string name="settings_search">Szukaj w ustawieniach</string>
+    <string name="settings_search_none">Żadne ustawienie nie pasuje.</string>
     <string name="settings_appearance">Wygląd</string>
     <string name="settings_theme">Motyw</string>
     <string name="settings_mode">Tryb</string>
@@ -126,6 +129,7 @@
     <string name="elevated_pair_text">W ustawieniach debugowania bezprzewodowego dotknij Sparuj urządzenie za pomocą kodu parowania, a następnie wpisz kod tutaj.</string>
     <string name="elevated_pair_action">Wpisz kod</string>
     <string name="elevated_pair_collapsed">Przeciągnij to powiadomienie w dół (na telefonach Xiaomi przytrzymaj je), a następnie dotknij Wpisz kod.</string>
+    <string name="elevated_pair_dnd">Tryb Nie przeszkadzać jest włączony, więc powiadomienie z kodem parowania może się nie pojawić. Wyłącz go do końca parowania.</string>
     <string name="elevated_pair_hint">6-cyfrowy kod parowania</string>
     <string name="elevated_pairing">Parowanie…</string>
     <string name="elevated_no_dialog">Kod parowania nie jest wyświetlany. W ustawieniach debugowania bezprzewodowego dotknij Sparuj urządzenie za pomocą kodu parowania, a następnie wpisz go tutaj.</string>
@@ -303,12 +307,18 @@
     <string name="update_current_version">Masz wersję NectarLink %1$s.</string>
     <string name="update_check_failed">Nie udało się sprawdzić aktualizacji. Sprawdź połączenie z internetem.</string>
     <string name="action_lock_pc">Zablokuj komputer</string>
+    <string name="action_unlock_pc">Odblokuj komputer</string>
+    <string name="pc_unlock_unavailable">Zablokuj komputer i spróbuj ponownie, gdy oba urządzenia będą połączone z tą samą siecią.</string>
     <string name="action_sleep_pc">Uśpij</string>
     <string name="action_hibernate_pc">Hibernuj</string>
     <string name="action_phone_sound_on_pc">Odtwarzaj dźwięk telefonu na komputerze</string>
     <string name="action_phone_sound_back">Odtwarzaj dźwięk znowu na telefonie</string>
     <string name="phone_sound_on_pc_off">%1$s nie odtwarza dźwięku z tego telefonu. Na komputerze włącz lustro ekranu dla tego telefonu w Ustawienia › Urządzenia.</string>
     <string name="action_shutdown_pc">Wyłącz</string>
+    <string name="action_restart_pc">Uruchom ponownie</string>
+    <string name="restart_pc_title">Uruchomić ponownie %1$s?</string>
+    <string name="restart_pc_text">Windows zamknie otwarte aplikacje i uruchomi się ponownie. Aplikacja z niezapisanymi zmianami może to zablokować.</string>
+    <string name="pc_restart_requested">Wysłano żądanie ponownego uruchomienia %1$s.</string>
     <string name="shutdown_pc_title">Wyłączyć %1$s?</string>
     <string name="shutdown_pc_text">Otwarte aplikacje zostaną zamknięte. Aplikacja z niezapisanymi zmianami może jednak zablokować wyłączenie.</string>
     <string name="action_wake_pc">Wybudź</string>
@@ -353,6 +363,7 @@
         <item quantity="other">Połączono z %1$d komputerami</item>
     </plurals>
     <string name="notification_waiting">Oczekiwanie na komputer</string>
+    <string name="notification_usb_only">Tylko USB: oczekiwanie na kabel</string>
     <string name="notification_waiting_network">Czekam na Wi-Fi, by połączyć się z komputerem</string>
     <string name="reconnect_known_only_title">Tylko w sieciach, w których znaleziono komputer</string>
     <string name="reconnect_known_only_body">Sam szuka komputerów tylko w sieciach Wi-Fi, w których już się z którymś połączył. W innych komputer nadal może połączyć się z telefonem.</string>
@@ -1468,8 +1479,13 @@
     <string name="home_section_system">System i zasilanie</string>
     <string name="settings_category_devices">Urządzenia</string>
     <string name="settings_category_features">Funkcje i dane</string>
+    <string name="settings_usb_only_title">Tylko USB</string>
+    <string name="settings_usb_only_body">Łącz z komputerami tylko przez kabel USB: bez Wi-Fi, danych komórkowych i wykrywania lokalnego</string>
+    <string name="usb_only_tile_label">Tylko USB</string>
     <string name="settings_theme_artwork_color">Kolor okładki multimediów</string>
     <string name="settings_mobile_data_body">Utrzymuj połączenie przez LTE/5G lub serwer pośredniczący poza zasięgiem Wi-Fi</string>
+    <string name="settings_bluetooth_link_title">Bluetooth, gdy nie ma sieci</string>
+    <string name="settings_bluetooth_link_body">Komputer sparowany z tym telefonem w ustawieniach Bluetooth pozostaje połączony bez Wi-Fi i danych komórkowych: powiadomienia, SMS-y, połączenia i schowek</string>
     <string name="settings_background_clipboard_title">Dostęp do schowka w tle</string>
     <string name="settings_guide_card_body">Poznaj wszystkie funkcje, sprawdź aktualne wymagania lub przejdź od razu do ich ustawień.</string>
     <string name="settings_walkthrough_body">Otwórz ponownie przewodnik konfiguracji uprawnień, parowania i poziomów zasilania.</string>
@@ -1612,7 +1628,6 @@
     <string name="channel_report_replies">Odpowiedzi na twoje zgłoszenia</string>
     <string name="report_reply_title">Jest odpowiedź na twoje zgłoszenie</string>
     <string name="report_closed_title">Twoje zgłoszenie zostało zamknięte</string>
-    <string name="report_notice_text">Zgłoszenie #%1$d. Stuknij, aby przeczytać na GitHubie.</string>
     <string name="crash_card_sent">Dzięki, raport o awarii został wysłany</string>
     <string name="crash_card_title">NectarLink niespodziewanie się zamknął</string>
     <string name="crash_card_failed">Nie udało się wysłać raportu o awarii. Użyj opcji Najpierw zobacz, aby wysłać go inaczej.</string>
@@ -1649,6 +1664,53 @@
     <string name="community_invite_text">Pytania, pomysły i wczesne wersje, razem z twórcami i użytkownikami NectarLink.</string>
     <string name="community_invite_join">Dołącz do Discorda</string>
     <string name="community_invite_later">Nie teraz</string>
+    <string name="settings_daily_count_title">Wysyłaj anonimowe dzienne zliczenie</string>
+    <string name="settings_daily_count_body">Raz dziennie: wersja aplikacji, platforma i model oraz ile razy każda funkcja zadziałała lub nie. Bez ID i niczego osobistego.</string>
+    <string name="deck_confirm_restart_title">Uruchomić ponownie %1$s?</string>
+    <string name="deck_confirm_shut_down_title">Wyłączyć %1$s?</string>
+    <string name="deck_confirm_power_text">Aplikacje z niezapisaną pracą wciąż mogą to zatrzymać.</string>
+    <string name="deck_confirm_restart">Uruchom ponownie</string>
+    <string name="deck_confirm_shut_down">Wyłącz</string>
+    <string name="deck_default_restart">Uruchom ponownie</string>
+    <string name="deck_default_shut_down">Wyłącz</string>
+    <string name="deck_default_macro">Makro</string>
+    <string name="report_answer_line">%1$s: %2$s</string>
+    <string name="report_notice_open_text">Zgłoszenie #%1$d. Dotknij, aby przeczytać.</string>
+    <string name="report_reply_action">Odpowiedz</string>
+    <string name="report_reply_hint">Twoja odpowiedź</string>
+    <string name="report_who_you">Ty</string>
+    <string name="report_who_other">Ktoś z tym samym problemem</string>
+    <string name="report_reply_not_sent">Twoja odpowiedź nie została wysłana</string>
+    <string name="report_reply_limited">To limit odpowiedzi na dziś. Spróbuj jutro.</string>
+    <string name="report_reply_refused">To zgłoszenie nie przyjmuje już odpowiedzi.</string>
+    <string name="report_reply_later">Nie udało się wysłać. Sprawdź połączenie i spróbuj ponownie.</string>
+    <string name="your_reports_title">Twoje zgłoszenia</string>
+    <string name="your_reports_check">Sprawdź odpowiedzi</string>
+    <string name="your_reports_intro">Zgłoszenia wysłane z NectarLink zostają tu przez 30 dni, razem z odpowiedziami. Możesz odpowiadać stąd bez konta GitHub. Odpowiedzi są publiczne na GitHubie, tak jak zgłoszenie.</string>
+    <string name="your_reports_none">Z tego telefonu nie wysłano jeszcze zgłoszeń.</string>
+    <string name="your_reports_waiting">Czeka na zgłoszenie</string>
+    <string name="your_reports_closed">Zgłoszenie #%1$d · zamknięte</string>
+    <string name="your_reports_number">Zgłoszenie #%1$d</string>
+    <string name="your_reports_sent">Wysłano %1$s</string>
+    <string name="your_reports_on_github">Na GitHubie</string>
+    <string name="your_reports_load_failed">Nie udało się wczytać odpowiedzi. Sprawdź połączenie i spróbuj ponownie.</string>
+    <string name="your_reports_no_answers">Jeszcze nie ma odpowiedzi. Dostaniesz powiadomienie, gdy się pojawi.</string>
+    <string name="your_reports_reply_on_github">To zgłoszenie wysłano, zanim można było odpowiadać z NectarLink, więc odpowiedz na GitHubie.</string>
+    <string name="your_reports_reply_sent">Wysłano. Jest już przy zgłoszeniu.</string>
+    <string name="your_reports_sending">Wysyłanie</string>
+    <string name="your_reports_send">Wyślij</string>
+    <string name="deck_on">Wł.</string>
+    <string name="deck_off">Wył.</string>
+    <string name="media_center_title">Teraz odtwarzane</string>
+    <string name="media_center_on_phone">tym telefonie</string>
+    <string name="media_center_page">%1$d z %2$d</string>
+    <string name="media_center_phone_volume">Głośność telefonu</string>
+    <string name="media_center_output">Wybierz, gdzie grać</string>
+    <string name="pc_radio_wifi">Wi-Fi</string>
+    <string name="pc_radio_bluetooth">Bluetooth</string>
+    <string name="pc_radio_wifi_off_title">Wyłączyć Wi-Fi komputera %1$s?</string>
+    <string name="pc_radio_wifi_off_text">Jeśli ten telefon łączy się z komputerem przez Wi-Fi, połączenie zostanie przerwane i trzeba będzie włączyć Wi-Fi na komputerze.</string>
+    <string name="pc_radio_wifi_off_confirm">Wyłącz</string>
 </resources>
 
 

@@ -1,7 +1,7 @@
 [package]
 name = "nectarlink-desktop"
 description = "NectarLink Desktop with Noctalia integration"
-version = "0.1.6-nightly.12+noctalia"
+version = "0.1.6-nightly.13+noctalia"
 edition.workspace = true
 # Above the workspace minimum: material-colors needs Rust 1.97.
 rust-version = "1.97"
@@ -67,6 +67,7 @@ windows = { workspace = true, features = [
     "Devices_Bluetooth_Advertisement",
     "Devices_Bluetooth_Rfcomm",
     "Devices_Enumeration",
+    "Devices_Radios",
     "Gaming_Input",
     "Graphics",
     "Graphics_Capture",

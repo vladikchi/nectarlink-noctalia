@@ -46,7 +46,7 @@ While a call is active on your phone, the call bar on your PC shows the live cal
 
 ### Browsing Call History
 
-The **Calls** page groups your phone's recent incoming, outgoing, and missed calls by day. Missed calls are highlighted in red and summarized on your PC's Home screen until viewed. A voicemail notification from your phone appears in the notification feed like any other notification.
+The **Calls** page groups your phone's recent incoming, outgoing, and missed calls by day. Missed calls are highlighted in red and summarized on your PC's Home screen until viewed. The **Calls** item in the left rail shows a badge with the number of missed calls you haven't looked at, and it goes away when you open the page. A voicemail notification from your phone appears in the notification feed like any other notification.
 
 ### Talking Through Your PC (Windows)
 
@@ -55,6 +55,8 @@ With `Elevated` on Android 13 or newer, the call in progress can move to your PC
 Use headphones if you can: on speakers, your PC's microphone also picks up the other person.
 
 Calls use Windows' default communications microphone. To pick another one, go to **Settings › Camera & Audio › Microphone for calls**; a change applies to a call that's already on the PC too.
+
+If Windows' default communications microphone is off or missing, NectarLink uses the default microphone instead. If NectarLink says Windows keeps it off the microphone, turn on **Settings › Privacy & security › Microphone › Let desktop apps access your microphone** in Windows.
 
 Whether your phone allows this is up to its maker: the phone's audio system must let apps reach the call (Android calls this call audio interception). It works on Google Pixel phones. NectarLink checks this when Elevated starts; on a phone that doesn't allow it, the PC shows no **On PC** button. Details are in [`docs/research/hfp.md`](../research/hfp.md).
 

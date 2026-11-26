@@ -30,6 +30,13 @@ Tap **Control PC** on the Android Home screen. The first time you open it, click
 - **Right-click**: Tap with two fingers, or tap the **Right** button.
 - **Middle-click**: Tap the **Middle** button.
 - **Scroll**: Drag two fingers up, down, left, or right.
+- **Zoom**: Spread or pinch two fingers.
+- **Task View** and **show the desktop**: Swipe three fingers up or down.
+- **Switch apps**: Swipe three fingers left or right and keep them down to go through the app switcher; lift them to open the app picked.
+- **Switch virtual desktops**: Swipe four fingers left or right.
+- **Search**: Tap with three fingers. **Notifications**: Tap with four fingers.
+
+  These work as on a Windows laptop's touchpad, and on Linux with the desktop's own keys. They need the PC on the newest NectarLink; macOS doesn't take them yet.
 - **Click and drag**: Double-tap and hold with one finger, then drag.
 
 #### Air Mouse Mode
@@ -90,6 +97,17 @@ With the phone on a stand beside your monitor, the PC's mouse can go over the ed
 
 While it's on the phone, Android's pointer acceleration is off (it's given back after), so the PC can follow the pointer. The PC's cursor waits in the middle of the screen it left.
 
+#### One mouse and keyboard for two PCs, over the screen edge
+
+The same works between two paired PCs, with no phone needed: your mouse goes over the edge of the screen onto the other PC, and the keyboard types there.
+
+1. On the PC whose mouse and keyboard you'll use (Windows), open **Settings › Devices**, pick the other PC, and set **Beside this PC** to **Left** or **Right**.
+2. Push the mouse past that edge. The first time, the other PC asks whether to allow it; you can also turn on **Remote mouse, keyboard & Deck** for this PC in its **Settings › Devices**.
+3. The mouse moves, clicks, drags and scrolls on the other PC's main screen. Keys go with your modifiers and keyboard layout: Shift+arrows, Ctrl+C and other shortcuts, Alt+F4, the function keys, and the Windows key on its own opens Start there. A mouse's back button is Alt+Left.
+4. Move the mouse back past the other PC's edge facing this one to return, or press **Ctrl+Alt+Esc**.
+
+The other PC can be on Windows or Linux; a Mac can't take another PC's mouse yet. One device at a time can be beside a PC, a phone or another PC. Keys are sent as they're pressed, not held, so it's for working across two PCs rather than for games.
+
 ### 3. `Deck`: Customizable Macro Pad and PC Audio Controller
 
 `Deck` turns your phone into a tactile, multi-page button grid and live audio controller for your PC:
@@ -100,8 +118,18 @@ While it's on the phone, Android's pointer acceleration is off (it's given back 
    - Live tiles update in real time to show whether PC media is **Playing** or **Paused**, the current speaker volume percentage, and whether your PC microphone is **Muted** or **Live**.
 2. **Customizing `Deck` on your PC**: Click **Deck** in the left navigation bar on your PC.
    - Drag and drop tiles to reorder them, add new pages, and customize each tile's label, icon, and color.
-   - Choose from built-in tile types: **Play / Pause**, **Previous**, **Next**, **Volume up / down / mute**, **Microphone mute**, **Lock PC**, **Show desktop**, **Switch window**, **Screenshot**, **Keyboard shortcut** (any custom hotkey combo), **Open web link**, **Type text snippet**, **Launch application** (`.exe` or `.lnk`), or **Run shell command**.
-   - **Security gate for shell commands**: Tiles that execute custom PC shell commands are blocked unless you also turn on **Run Deck shell commands** (`commands`, off by default) for that phone in PC **Settings › Devices**.
+   - Choose from built-in tile types: **Play / Pause**, **Previous**, **Next**, **Volume up / down / mute**, **Microphone mute**, **Lock PC**, **Show desktop**, **Switch window**, **Screenshot**, **Keyboard shortcut** (any custom hotkey combo), **Open web link**, **Type text snippet**, **Launch application** (`.exe` or `.lnk`), **Run shell command**, **Restart PC** or **Shut down PC**.
+   - **Macro (several actions)** runs up to 16 of those actions in a row, with a wait of up to 10 seconds after each (30 in all). Add steps, set what each one does, and move them up or down. A step that fails is skipped and the rest still run.
+   - **On / off (two actions in turn)** runs one action to turn something on and another to turn it off, in turn with each press, like turning monitors off and on or an idle inhibitor. The tile on the phone stays lit while it's on, and the PC remembers which are on after a restart. Each side is one of the plain actions above; a side with a shell command needs **Run Deck shell commands** too.
+   - **Restart PC** and **Shut down PC** ask on the phone before they do it, and apps with unsaved work can still stop them. They aren't on Mac yet, and they can't be macro steps.
+   - **Security gate for shell commands**: Tiles that execute custom PC shell commands, and macros with a shell command step, are blocked unless you also turn on **Run Deck shell commands** (`commands`, off by default) for that phone in PC **Settings › Devices**.
+
+### Now playing on the phone
+
+When more than one thing plays, or something plays on the phone itself, the phone's Home shows **Now playing**: every player on your PCs and on the phone, a page each to swipe through. Each has play and pause, previous and next, and the position in the track where the app allows seeking. A PC's player has that PC's volume and output; one on the phone has the phone's media volume and **Choose where it plays**, Android's own output switcher (its volume panel before Android 14). The phone's own players need notification access, as for showing them on the PC.
+### The PC's Wi-Fi and Bluetooth on the phone
+
+On a Windows or Linux PC that has them, the PC's card on the phone's Home and the bar at the top of **Deck** show whether its Wi-Fi and Bluetooth are on, and tapping one switches it. Turning the PC's Wi-Fi off asks first: if the phone reaches the PC over Wi-Fi, the two lose the connection until Wi-Fi is back on at the PC. It needs **PC actions** or **Remote input** on for that phone in PC **Settings › Devices**, like the PC's volume. On Linux, NetworkManager and BlueZ decide whether your user may switch them.
 
 ### 4. Phone Controls on PC Home
 

@@ -4,6 +4,11 @@
 use nectarlink_core::{ButtonAction, KeyMod, MouseButton, SlideAction, TouchAction};
 
 pub fn move_relative(_dx: f32, _dy: f32) {}
+/// Not on the Mac yet: it takes no input from another device (D432).
+pub fn main_screen_size() -> Option<(i32, i32)> {
+    None
+}
+pub fn move_to_main(_x: f32, _y: f32) {}
 #[allow(dead_code)]
 pub fn move_absolute(_x: f32, _y: f32) {}
 #[allow(dead_code)]
@@ -14,6 +19,9 @@ pub fn scroll(_dx: f32, _dy: f32) {}
 pub fn type_text(_text: &str) {}
 pub fn press_key(_key: &str, _mods: &[KeyMod]) {}
 pub fn slide(_action: SlideAction) {}
+/// Not offered on macOS (`input.gestures`), so never called.
+pub fn gesture(_gesture: nectarlink_core::TouchGesture) {}
+pub fn close_switcher() {}
 // This read-only CoreGraphics function accepts value arguments and has no
 // pointer or thread preconditions. It does not request Accessibility access.
 #[allow(unsafe_code)]

@@ -13,6 +13,7 @@ mod agents;
 mod app_links;
 mod app_shortcuts;
 mod automations;
+mod badges;
 mod battery;
 mod bridge;
 mod call_audio;
@@ -45,6 +46,7 @@ mod notifications;
 mod obs;
 mod palette;
 mod pc_audio_stream;
+mod pc_battery;
 mod pc_mirror;
 mod pc_notifications;
 mod pc_storage;
@@ -54,6 +56,7 @@ mod phone_sound;
 mod photo_backup;
 mod photos;
 mod play_on_phone;
+mod pointer_in;
 // The arithmetic builds and is tested everywhere; only Windows takes the mouse so far.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pointer_flow;
@@ -139,6 +142,11 @@ impl Platform for DesktopPlatform {
         #[cfg(not(windows))]
         win::clipboard::write_image(mime, bytes)
     }
+    #[cfg(windows)]
+    fn unlock_from_phone(&self, phone: nectarlink_core::DeviceId) -> bool {
+        win::unlock::request_from_phone(phone)
+    }
+
     fn power(&self, action: PowerAction) -> Result<(), String> {
         links::power(action)
     }
@@ -211,6 +219,9 @@ impl Platform for DesktopPlatform {
     fn call_audio_stop_requested(&self, peer: &nectarlink_core::DeviceId) {
         call_audio::end(*peer);
     }
+    fn mirror_volume_changed(&self, peer: &nectarlink_core::DeviceId, level: u8) {
+        phone_sound::volume_from_phone(*peer, level);
+    }
     fn phone_sound_asked(&self, peer: &nectarlink_core::DeviceId) {
         tracing::info!(peer = %peer.short(), "the phone asked to play its sound here");
         phone_sound::set_on(*peer, true);
@@ -256,6 +267,32 @@ impl Platform for DesktopPlatform {
     }
     fn set_pc_audio_output(&self, _peer: &nectarlink_core::DeviceId, id: &str) -> Result<(), String> {
         deck::handle_set_output(id)
+    }
+    fn set_pc_radio(
+        &self,
+        _peer: &nectarlink_core::DeviceId,
+        wifi: Option<bool>,
+        bluetooth: Option<bool>,
+    ) -> Result<(), String> {
+        deck::handle_set_radio(wifi, bluetooth)
+    }
+    // Another PC's mouse on this one (D432).
+    fn pointer_enter(
+        &self,
+        peer: &nectarlink_core::DeviceId,
+        edge: nectarlink_core::PointerEdge,
+        y: f32,
+    ) -> Result<nectarlink_core::PointerScreen, String> {
+        pointer_in::enter(peer, edge, y)
+    }
+    fn pointer_move(&self, peer: &nectarlink_core::DeviceId, moved: nectarlink_core::PointerMove) {
+        pointer_in::moved(peer, moved);
+    }
+    fn pointer_where(&self, peer: &nectarlink_core::DeviceId) -> Option<nectarlink_core::PointerAt> {
+        pointer_in::at(peer)
+    }
+    fn pointer_leave(&self, peer: &nectarlink_core::DeviceId) {
+        pointer_in::leave(peer);
     }
     fn storage_list(&self, path: &str) -> Result<Vec<StorageEntry>, StorageError> {
         pc_storage::storage_list(path)
@@ -485,6 +522,18 @@ fn parse_options_from<I: IntoIterator<Item = std::ffi::OsString>>(iter: I) -> Op
             }
         }
     }
+    // A phone number clicked in another app opens the dialer, as `--tel` does
+    // on Windows, instead of going to the phone as a link (#611).
+    #[cfg(target_os = "linux")]
+    if options.send_to.is_none()
+        && share_targets.is_empty()
+        && let [uri] = paths.as_slice()
+        && let Some(uri) = uri.to_str()
+        && uri.get(..4).is_some_and(|scheme| scheme.eq_ignore_ascii_case("tel:"))
+    {
+        let tel = launch::telephone_number(uri).ok_or(());
+        return Options { tel: Some(tel), data_dir: options.data_dir, ..Options::default() };
+    }
     if let Some((_, files)) = &mut options.send_to {
         *files = paths;
         // Sending doesn't need the window.
@@ -694,6 +743,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("nectarlink: unlock with phone: {e}");
+                win::unlock::note_failure(&e);
                 ExitCode::FAILURE
             }
         };
@@ -801,6 +851,7 @@ fn main() -> ExitCode {
     core_host::spawn(async {
         if let Some(node) = core_host::wait_for_node().await {
             win::ble_beacon::start(node.device_id());
+            win::bluetooth_link::start(node);
         }
     });
     core_host::host().hub.update(|s| {
@@ -824,6 +875,7 @@ fn main() -> ExitCode {
     clipboard::set_history_enabled(settings.clipboard_history);
     clipboard::set_suggest_actions(settings.suggest_clipboard_actions);
     notifications::set_auto_copy_otp(settings.auto_copy_otp);
+    messages::set_mark_read_on_phone(settings.mark_read_on_phone);
     // Paused pop-ups stay paused after a restart, if the user chose that (#442).
     notifications::set_paused(settings.keep_popups_paused && settings.popups_paused);
     notifications::set_sync_dnd(settings.sync_dnd);
@@ -863,6 +915,7 @@ fn main() -> ExitCode {
             tracing::warn!(error = %e, "can't save settings");
         }
     }
+    bridge::report::set_daily_count(settings.daily_count);
     // A test instance (own data folder) leaves the user's menu and sign-in
     // alone.
     if options.data_dir.is_none() {
@@ -1134,16 +1187,16 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            let uri_opts = parse_options_from(["tel:+15551234567"].into_iter().map(OsString::from));
-            assert!(uri_opts.minimized);
-            assert_eq!(
-                uri_opts.share,
-                Some(win::share_target::SharedPayload {
-                    files: Vec::new(),
-                    url: Some("tel:+15551234567".into()),
-                    text: None,
-                })
-            );
+            // A clicked phone number opens the dialer (#611).
+            let uri_opts = parse_options_from(["tel:+1-555-123-4567"].into_iter().map(OsString::from));
+            assert_eq!(uri_opts.tel, Some(Ok("+15551234567".into())));
+            assert_eq!(uri_opts.share, None);
+            let bad = parse_options_from(["TEL:555%ZZ"].into_iter().map(OsString::from));
+            assert_eq!(bad.tel, Some(Err(())));
+            // Other links still go to the phone.
+            let geo = parse_options_from(["geo:1,2"].into_iter().map(OsString::from));
+            assert_eq!(geo.tel, None);
+            assert!(geo.share.is_some());
         }
     }
 }

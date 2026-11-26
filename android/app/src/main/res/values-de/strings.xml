@@ -36,6 +36,7 @@
     <string name="link_online_rtt">Verbunden · %1$d ms</string>
     <string name="link_usb">Über USB</string>
     <string name="link_usb_rtt">Über USB · %1$d ms</string>
+    <string name="link_bluetooth">Über Bluetooth</string>
     <string name="link_away">Unterwegs verbunden</string>
     <string name="link_connecting">Wird verbunden…</string>
     <string name="link_offline_seen">Offline · zuletzt gesehen %1$s</string>
@@ -51,6 +52,8 @@
 
     <!-- Settings -->
     <string name="settings_title">Einstellungen</string>
+    <string name="settings_search">Einstellungen durchsuchen</string>
+    <string name="settings_search_none">Keine Einstellung passt dazu.</string>
     <string name="settings_appearance">Darstellung</string>
     <string name="settings_theme">Design</string>
     <string name="settings_mode">Modus</string>
@@ -123,7 +126,8 @@
     <string name="elevated_pair_title">NectarLink mit Kabellosem Debugging koppeln</string>
     <string name="elevated_pair_text">Tippe in „Kabelloses Debugging“ auf „Gerät mit Kopplungscode koppeln“ und gib den Code anschließend hier ein.</string>
     <string name="elevated_pair_action">Code eingeben</string>
-    <string name="elevated_pair_collapsed">Zieh diese Mitteilung nach unten und tippe auf „Code eingeben“.</string>
+    <string name="elevated_pair_collapsed">Zieh diese Mitteilung nach unten (auf Xiaomi-Handys lange drücken) und tippe auf „Code eingeben“.</string>
+    <string name="elevated_pair_dnd">„Bitte nicht stören“ ist an, daher wird die Benachrichtigung für den Kopplungscode vielleicht nicht angezeigt. Schalte es aus, bis die Kopplung fertig ist.</string>
     <string name="elevated_pair_hint">6-stelliger Kopplungscode</string>
     <string name="elevated_pairing">Koppeln…</string>
     <string name="elevated_no_dialog">Der Kopplungscode wird nicht angezeigt. Tippe in „Kabelloses Debugging“ auf „Gerät mit Kopplungscode koppeln“ und gib ihn dann hier ein.</string>
@@ -299,12 +303,18 @@
     <string name="update_current_version">Du verwendest NectarLink %1$s.</string>
     <string name="update_check_failed">Suche nach Updates fehlgeschlagen. Prüfe deine Internetverbindung.</string>
     <string name="action_lock_pc">PC sperren</string>
+    <string name="action_unlock_pc">PC entsperren</string>
+    <string name="pc_unlock_unavailable">Sperre den PC und versuche es erneut, wenn beide Geräte mit demselben Netzwerk verbunden sind.</string>
     <string name="action_sleep_pc">Energie sparen</string>
     <string name="action_hibernate_pc">Ruhezustand</string>
     <string name="action_phone_sound_on_pc">Smartphone-Ton auf dem PC abspielen</string>
     <string name="action_phone_sound_back">Ton wieder auf dem Smartphone abspielen</string>
     <string name="phone_sound_on_pc_off">%1$s spielt den Ton dieses Smartphones nicht ab. Schalte am PC unter Einstellungen › Geräte die Bildschirmspiegelung für dieses Smartphone ein.</string>
     <string name="action_shutdown_pc">Herunterfahren</string>
+    <string name="action_restart_pc">Neu starten</string>
+    <string name="restart_pc_title">%1$s neu starten?</string>
+    <string name="restart_pc_text">Windows schließt geöffnete Apps und startet neu. Eine App mit ungespeicherter Arbeit kann den Neustart verhindern.</string>
+    <string name="pc_restart_requested">Neustart für %1$s angefordert.</string>
     <string name="shutdown_pc_title">%1$s herunterfahren?</string>
     <string name="shutdown_pc_text">Geöffnete Apps werden geschlossen. Eine App mit ungespeicherter Arbeit kann es noch aufhalten.</string>
     <string name="action_wake_pc">Aufwecken</string>
@@ -347,6 +357,7 @@
         <item quantity="other">Mit %1$d PCs verbunden</item>
     </plurals>
     <string name="notification_waiting">Warte auf deinen PC</string>
+    <string name="notification_usb_only">Nur USB: warte auf ein Kabel</string>
     <string name="notification_waiting_network">Wartet auf WLAN, um deinen PC zu erreichen</string>
     <string name="reconnect_known_only_title">Nur in Netzwerken mit gefundenem PC</string>
     <string name="reconnect_known_only_body">Sucht nur in WLANs von selbst nach deinen PCs, in denen es schon einen erreicht hat. Anderswo kann ein PC das Handy trotzdem erreichen.</string>
@@ -1452,8 +1463,13 @@
     <string name="home_section_system">System &amp; Energie</string>
     <string name="settings_category_devices">Geräte</string>
     <string name="settings_category_features">Funktionen &amp; Daten</string>
+    <string name="settings_usb_only_title">Nur USB</string>
+    <string name="settings_usb_only_body">Nur über ein USB-Kabel mit PCs verbinden: kein WLAN, keine mobilen Daten, keine lokale Erkennung</string>
+    <string name="usb_only_tile_label">Nur USB</string>
     <string name="settings_theme_artwork_color">Farbe aus Mediencover</string>
     <string name="settings_mobile_data_body">Unterwegs ohne WLAN über LTE/5G oder Relay verbunden bleiben</string>
+    <string name="settings_bluetooth_link_title">Bluetooth, wenn kein Netzwerk da ist</string>
+    <string name="settings_bluetooth_link_body">Ein PC, der in den Bluetooth-Einstellungen mit diesem Handy gekoppelt ist, bleibt ohne WLAN oder mobile Daten verbunden, für Benachrichtigungen, SMS, Anrufe und die Zwischenablage</string>
     <string name="settings_background_clipboard_title">Hintergrundzugriff auf Zwischenablage</string>
     <string name="settings_guide_card_body">Durchsuche alle Funktionen, prüfe aktuelle Voraussetzungen oder springe direkt zu den Einstellungen.</string>
     <string name="settings_walkthrough_body">Öffne den Einrichtungsassistenten für Berechtigungen, Kopplung und Funktionsstufen erneut.</string>
@@ -1595,7 +1611,6 @@
     <string name="channel_report_replies">Antworten auf deine Berichte</string>
     <string name="report_reply_title">Es gibt eine Antwort auf deinen Bericht</string>
     <string name="report_closed_title">Dein Bericht wurde geschlossen</string>
-    <string name="report_notice_text">Bericht #%1$d. Tippe, um ihn auf GitHub zu lesen.</string>
     <string name="crash_card_sent">Danke, der Absturzbericht ist gesendet</string>
     <string name="crash_card_title">NectarLink wurde unerwartet beendet</string>
     <string name="crash_card_failed">Der Absturzbericht konnte nicht gesendet werden. Nutze „Erst ansehen“, um ihn anders zu senden.</string>
@@ -1632,4 +1647,51 @@
     <string name="community_invite_text">Fragen, Ideen und frühe Builds, mit den Leuten, die NectarLink machen und nutzen.</string>
     <string name="community_invite_join">Discord beitreten</string>
     <string name="community_invite_later">Nicht jetzt</string>
+    <string name="settings_daily_count_title">Anonyme tägliche Zählung senden</string>
+    <string name="settings_daily_count_body">Einmal am Tag: App-Version, Plattform und Modell und wie oft jede Funktion geklappt hat oder nicht. Keine ID, nichts Persönliches.</string>
+    <string name="deck_confirm_restart_title">%1$s neu starten?</string>
+    <string name="deck_confirm_shut_down_title">%1$s herunterfahren?</string>
+    <string name="deck_confirm_power_text">Apps darauf mit ungespeicherter Arbeit können es noch aufhalten.</string>
+    <string name="deck_confirm_restart">Neu starten</string>
+    <string name="deck_confirm_shut_down">Herunterfahren</string>
+    <string name="deck_default_restart">Neu starten</string>
+    <string name="deck_default_shut_down">Herunterfahren</string>
+    <string name="deck_default_macro">Makro</string>
+    <string name="report_answer_line">%1$s: %2$s</string>
+    <string name="report_notice_open_text">Bericht #%1$d. Tippe, um ihn zu lesen.</string>
+    <string name="report_reply_action">Antworten</string>
+    <string name="report_reply_hint">Deine Antwort</string>
+    <string name="report_who_you">Du</string>
+    <string name="report_who_other">Jemand mit demselben Problem</string>
+    <string name="report_reply_not_sent">Deine Antwort wurde nicht gesendet</string>
+    <string name="report_reply_limited">Das sind die meisten Antworten für heute. Versuche es morgen wieder.</string>
+    <string name="report_reply_refused">Dieser Bericht nimmt keine Antworten mehr an.</string>
+    <string name="report_reply_later">Es konnte nicht gesendet werden. Prüfe die Verbindung und versuche es erneut.</string>
+    <string name="your_reports_title">Deine Berichte</string>
+    <string name="your_reports_check">Nach Antworten sehen</string>
+    <string name="your_reports_intro">Aus NectarLink gesendete Berichte bleiben 30 Tage hier, mit den Antworten darauf. Du kannst hier ohne GitHub-Konto antworten. Antworten sind auf GitHub öffentlich, wie der Bericht.</string>
+    <string name="your_reports_none">Von diesem Telefon wurden noch keine Berichte gesendet.</string>
+    <string name="your_reports_waiting">Wartet auf Ablage</string>
+    <string name="your_reports_closed">Bericht #%1$d · geschlossen</string>
+    <string name="your_reports_number">Bericht #%1$d</string>
+    <string name="your_reports_sent">Gesendet am %1$s</string>
+    <string name="your_reports_on_github">Auf GitHub</string>
+    <string name="your_reports_load_failed">Die Antworten konnten nicht geladen werden. Prüfe die Verbindung und versuche es erneut.</string>
+    <string name="your_reports_no_answers">Noch keine Antworten. Du bekommst eine Benachrichtigung, sobald es eine gibt.</string>
+    <string name="your_reports_reply_on_github">Dieser Bericht wurde vor den Antworten aus NectarLink gesendet, antworte also auf GitHub.</string>
+    <string name="your_reports_reply_sent">Gesendet. Es steht jetzt beim Bericht.</string>
+    <string name="your_reports_sending">Wird gesendet</string>
+    <string name="your_reports_send">Senden</string>
+    <string name="deck_on">An</string>
+    <string name="deck_off">Aus</string>
+    <string name="media_center_title">Läuft gerade</string>
+    <string name="media_center_on_phone">diesem Handy</string>
+    <string name="media_center_page">%1$d von %2$d</string>
+    <string name="media_center_phone_volume">Handy-Lautstärke</string>
+    <string name="media_center_output">Wählen, wo es läuft</string>
+    <string name="pc_radio_wifi">WLAN</string>
+    <string name="pc_radio_bluetooth">Bluetooth</string>
+    <string name="pc_radio_wifi_off_title">WLAN von %1$s ausschalten?</string>
+    <string name="pc_radio_wifi_off_text">Wenn dieses Handy den PC über WLAN erreicht, bricht die Verbindung ab, und du musst das WLAN am PC wieder einschalten.</string>
+    <string name="pc_radio_wifi_off_confirm">Ausschalten</string>
 </resources>

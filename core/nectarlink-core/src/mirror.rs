@@ -26,9 +26,9 @@ use nectarlink_protocol::{
     DeviceId, Envelope, ErrorCode, PacketKind,
     messages::{
         MirrorAudioConfig, MirrorConfig, MirrorDisplay, MirrorDisplays, MirrorInput, MirrorNotice,
-        MirrorPower, MirrorResize, MirrorRotate, MirrorSession, MirrorSound, MirrorStart, PhoneApp,
-        PhoneApps, PointerAt, PointerEdge, PointerEnter, PointerMove, PointerScreen, StreamHeader, mirror,
-        types,
+        MirrorPower, MirrorResize, MirrorRotate, MirrorSession, MirrorSound, MirrorStart, MirrorVolume,
+        PhoneApp, PhoneApps, PointerAt, PointerEdge, PointerEnter, PointerMove, PointerScreen, StreamHeader,
+        mirror, types,
     },
     read_video_packet, video_packet_header, write_frame,
 };
@@ -219,11 +219,29 @@ pub(crate) async fn sound(shared: &Shared, session: &Session, on: bool) -> Resul
     session.send(Envelope::new(types::MIRROR_SOUND, &MirrorSound { on })?).await
 }
 
+/// Tells the other side how loud the phone's sound plays on the PC (#577):
+/// the PC's slider moved, or the phone's volume keys were pressed.
+pub(crate) async fn volume(shared: &Shared, session: &Session, level: u8) -> Result<()> {
+    let msg = MirrorVolume { level };
+    if !msg.is_valid() {
+        return Err(Error::Protocol("volume over 100".into()));
+    }
+    if !shared.toggle_on(&session.peer, TOGGLE) {
+        return Err(Error::Denied);
+    }
+    if !shared.we_offer(mirror::VOLUME) || !shared.offers(&session.peer, mirror::VOLUME)? {
+        return Err(Error::Unsupported);
+    }
+    session.send(Envelope::new(types::MIRROR_VOLUME, &msg)?).await
+}
+
 // ---- The PC's mouse on a phone (`pointer.*`, #107) ----
 
 /// Whether the phone on `session` takes the PC's mouse, and may.
 fn pointer_allowed(shared: &Shared, session: &Session) -> Result<()> {
-    if !shared.toggle_on(&session.peer, TOGGLE) {
+    // A PC's mouse on another PC (D432) is that PC's to allow (remote input);
+    // choosing the side here is this one's consent.
+    if !shared.is_desktop(&session.peer) && !shared.toggle_on(&session.peer, TOGGLE) {
         return Err(Error::Denied);
     }
     let offers = shared
@@ -621,6 +639,12 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
                 tokio::task::spawn_blocking(move || platform.mirror_sound_requested(&peer, on));
             }
         }
+        types::MIRROR_VOLUME => {
+            let volume: MirrorVolume = env.body()?;
+            if volume.is_valid() && shared.toggle_on(&peer, TOGGLE) && shared.we_offer(mirror::VOLUME) {
+                tokio::task::spawn_blocking(move || platform.mirror_volume_changed(&peer, volume.level));
+            }
+        }
         types::MIRROR_ROTATE => {
             let MirrorRotate { landscape } = env.body()?;
             if shared.toggle_on(&peer, TOGGLE) && shared.we_offer(mirror::CAPTURE) {
@@ -689,10 +713,8 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
         }
         types::POINTER_ENTER => {
             let enter: PointerEnter = env.body()?;
-            let reply = if !shared.toggle_on(&peer, TOGGLE) {
-                Envelope::error(ErrorCode::Denied, "mirroring is off for this device")
-            } else if !shared.we_offer(mirror::POINTER) {
-                Envelope::error(ErrorCode::Unsupported, "this device doesn't take the PC's mouse")
+            let reply = if let Err((code, why)) = pointer_taken(shared, &peer, true) {
+                Envelope::error(code, why)
             } else if !enter.is_valid() {
                 Envelope::error(ErrorCode::BadMessage, "invalid pointer.enter")
             } else {
@@ -713,14 +735,14 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
         }
         types::POINTER_MOVE => {
             let moved: PointerMove = env.body()?;
-            if shared.toggle_on(&peer, TOGGLE) && shared.we_offer(mirror::POINTER) && moved.is_valid() {
+            if pointer_taken(shared, &peer, false).is_ok() && moved.is_valid() {
                 // Awaited, so moves and clicks keep their order.
                 let _ = tokio::task::spawn_blocking(move || platform.pointer_move(&peer, moved)).await;
             }
         }
         types::POINTER_WHERE => {
-            let reply = if !shared.toggle_on(&peer, TOGGLE) || !shared.we_offer(mirror::POINTER) {
-                Envelope::error(ErrorCode::Unsupported, "this device doesn't take the PC's mouse")
+            let reply = if let Err((code, why)) = pointer_taken(shared, &peer, false) {
+                Envelope::error(code, why)
             } else {
                 match tokio::task::spawn_blocking(move || platform.pointer_where(&peer)).await.ok().flatten()
                 {
@@ -755,6 +777,33 @@ pub(crate) async fn handle(shared: &Arc<Shared>, session: &Arc<Session>, env: &E
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// Whether this device takes `peer`'s mouse: a phone with mirroring on for
+/// that PC (#107); a PC, another PC's only with remote input on for it, like
+/// a phone's touchpad, asking once when it's off (`ask`, D432).
+fn pointer_taken(
+    shared: &Shared,
+    peer: &DeviceId,
+    ask: bool,
+) -> std::result::Result<(), (ErrorCode, &'static str)> {
+    if !shared.we_offer(mirror::POINTER) {
+        return Err((ErrorCode::Unsupported, "this device doesn't take the PC's mouse"));
+    }
+    if shared.is_desktop(peer) && shared.we_offer(crate::remote::INPUT_INJECT) {
+        if ask {
+            return crate::remote::check_allowed(shared, peer);
+        }
+        return if shared.toggle_on(peer, crate::remote::TOGGLE) {
+            Ok(())
+        } else {
+            Err((ErrorCode::Denied, "remote input is turned off for this device"))
+        };
+    }
+    if !shared.toggle_on(peer, TOGGLE) {
+        return Err((ErrorCode::Denied, "mirroring is off for this device"));
+    }
+    Ok(())
 }
 
 /// Apps within the limits: at most [`mirror::MAX_APPS`], icons small and

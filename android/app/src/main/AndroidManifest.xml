@@ -66,6 +66,11 @@
     <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
     <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
     <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <!-- A PC paired over Bluetooth reaches the phone when nothing else does (#313). -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
@@ -272,6 +277,17 @@
             </intent-filter>
         </service>
 
+        <service
+            android:name=".service.UsbOnlyTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_usb"
+            android:label="@string/usb_only_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <!-- Mirroring notifications to PCs; the user grants access in Settings. -->
         <service
             android:name=".notifications.NotificationListener"
@@ -323,6 +339,11 @@
         <!-- The wireless debugging pairing code, typed into a notification. -->
         <receiver
             android:name=".elevated.PairingNotification$Receiver"
+            android:exported="false" />
+
+        <!-- A reply to a problem report, typed into its notification. -->
+        <receiver
+            android:name=".diag.ReportNotices$ReplyReceiver"
             android:exported="false" />
 
         <!-- Telecom binds it while there are calls (CALL_COMPANION_APP), apps'
@@ -415,10 +436,18 @@
             android:turnScreenOn="true"
             android:theme="@style/Theme.Nectarlink" />
 
+        <!-- Exported for a PC's adb to start it while the phone is plugged in with USB only on
+             (usb.rs); the DUMP permission is the shell's, so no other app can. -->
         <service
             android:name=".service.ConnectionService"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:foregroundServiceType="connectedDevice" />
+
+        <receiver
+            android:name=".service.UsbWakeReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
 
         <!-- A call's sound carried to a PC (docs/protocol/calls.md §2.6). -->
         <service

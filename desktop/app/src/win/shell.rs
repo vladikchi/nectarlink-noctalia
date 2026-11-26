@@ -3,6 +3,7 @@
 
 use windows::{
     Win32::{
+        Foundation::{LPARAM, WPARAM},
         System::{
             Power::{GetPwrCapabilities, SYSTEM_POWER_CAPABILITIES, SetSuspendState},
             Registry::{
@@ -11,7 +12,12 @@ use windows::{
             },
             Shutdown::LockWorkStation,
         },
-        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        UI::{
+            Shell::ShellExecuteW,
+            WindowsAndMessaging::{
+                HWND_BROADCAST, PostMessageW, SC_MONITORPOWER, SW_SHOWNORMAL, WM_SYSCOMMAND,
+            },
+        },
     },
     core::{HSTRING, w},
 };
@@ -160,13 +166,37 @@ pub fn lock() -> Result<(), String> {
 }
 
 /// Puts the PC to sleep (not hibernate; wake events stay allowed).
+///
+/// Most laptops now sleep the Modern Standby way, without S3, where
+/// `SetSuspendState` does nothing (#542). There, as with the power button,
+/// the screen goes off and Windows takes the PC into standby.
 pub fn sleep() -> Result<(), String> {
+    if modern_standby() {
+        return screen_off();
+    }
     // SAFETY: plain arguments.
     if unsafe { SetSuspendState(false, false, false) } {
         Ok(())
     } else {
-        Err("SetSuspendState failed".into())
+        tracing::warn!("SetSuspendState failed; turning the screen off instead");
+        screen_off()
     }
+}
+
+/// Whether the PC sleeps as Modern Standby (S0 low power idle) and has no S3.
+fn modern_standby() -> bool {
+    let mut caps = SYSTEM_POWER_CAPABILITIES::default();
+    // SAFETY: GetPwrCapabilities fills the struct it's given.
+    let read = unsafe { GetPwrCapabilities(&mut caps) };
+    read && caps.AoAc && !caps.SystemS3
+}
+
+/// Turns the screen off, which on a Modern Standby PC starts standby.
+fn screen_off() -> Result<(), String> {
+    // 2 is "off". Posted, not sent: a broadcast send waits on every window.
+    // SAFETY: a plain message post.
+    unsafe { PostMessageW(Some(HWND_BROADCAST), WM_SYSCOMMAND, WPARAM(SC_MONITORPOWER as usize), LPARAM(2)) }
+        .map_err(|e| e.to_string())
 }
 
 /// Hibernates the PC (#355).
@@ -178,12 +208,21 @@ pub fn hibernate() -> Result<(), String> {
 /// Shuts the PC down the way Start's Shut down does (D372). Not forced: an
 /// app with unsaved work can still stop it.
 pub fn shutdown() -> Result<(), String> {
+    request_shutdown("/s")
+}
+
+/// Restarts Windows without forcing apps to close.
+pub fn restart() -> Result<(), String> {
+    request_shutdown("/r")
+}
+
+fn request_shutdown(action: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let system =
         std::env::var_os("SystemRoot").map_or_else(|| "C:\\Windows".into(), std::path::PathBuf::from);
     std::process::Command::new(system.join("System32").join("shutdown.exe"))
-        .args(["/s", "/t", "0"])
+        .args([action, "/t", "0"])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())

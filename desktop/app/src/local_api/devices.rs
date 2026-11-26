@@ -17,6 +17,7 @@ pub(super) fn handle_get_devices() -> (u16, &'static str, Value) {
                             nectarlink_core::ConnectionPath::Lan => "lan",
                             nectarlink_core::ConnectionPath::Usb => "usb",
                             nectarlink_core::ConnectionPath::Relay => "relay",
+                            nectarlink_core::ConnectionPath::Bluetooth => "bluetooth",
                         },
                     ),
                     LinkState::Connecting => (false, "connecting"),

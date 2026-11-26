@@ -36,6 +36,7 @@
     <string name="link_online_rtt">接続済み · %1$d ms</string>
     <string name="link_usb">USB接続時</string>
     <string name="link_usb_rtt">USB接続時 · %1$d ms</string>
+    <string name="link_bluetooth">Bluetooth で接続</string>
     <string name="link_away">外出先で接続済み</string>
     <string name="link_connecting">接続中…</string>
     <string name="link_offline_seen">オフライン · 最終確認 %1$s</string>
@@ -51,6 +52,8 @@
 
     <!-- Settings -->
     <string name="settings_title">設定</string>
+    <string name="settings_search">設定を検索</string>
+    <string name="settings_search_none">一致する設定はありません。</string>
     <string name="settings_appearance">外観</string>
     <string name="settings_theme">テーマ</string>
     <string name="settings_mode">モード</string>
@@ -124,6 +127,7 @@
     <string name="elevated_pair_text">「ワイヤレス デバッグ」で「ペアリングコードでデバイスをペアリング」をタップし、ここにコードを入力してください。</string>
     <string name="elevated_pair_action">コードを入力</string>
     <string name="elevated_pair_collapsed">この通知を下にスワイプし（Xiaomi製スマートフォンの場合は長押し）、「コードを入力」をタップしてください。</string>
+    <string name="elevated_pair_dnd">サイレントモードがオンのため、ペア設定コードの通知が表示されないことがあります。ペア設定が終わるまでオフにしてください。</string>
     <string name="elevated_pair_hint">6桁のペアリングコード</string>
     <string name="elevated_pairing">ペアリング…</string>
     <string name="elevated_no_dialog">ペアリングコードが表示されていません。「ワイヤレス デバッグ」で「ペアリングコードでデバイスをペアリング」をタップし、ここに入力してください。</string>
@@ -298,12 +302,18 @@
     <string name="update_current_version">NectarLink %1$s を使用中です。</string>
     <string name="update_check_failed">アップデートを確認できませんでした。インターネット接続を確認してください。</string>
     <string name="action_lock_pc">PCをロック</string>
+    <string name="action_unlock_pc">PCのロックを解除</string>
+    <string name="pc_unlock_unavailable">PCをロックし、両方の端末が同じネットワークに接続されている状態でもう一度お試しください。</string>
     <string name="action_sleep_pc">スリープ</string>
     <string name="action_hibernate_pc">ハイバネート</string>
     <string name="action_phone_sound_on_pc">スマートフォンの音声をPCで再生</string>
     <string name="action_phone_sound_back">音声をスマートフォンに戻す</string>
     <string name="phone_sound_on_pc_off">%1$s はこのスマートフォンの音声を再生しません。PCの「設定」›「デバイス」で、このスマートフォンの「画面ミラーリング」をオンにしてください。</string>
     <string name="action_shutdown_pc">シャットダウン</string>
+    <string name="action_restart_pc">再起動</string>
+    <string name="restart_pc_title">%1$s を再起動しますか？</string>
+    <string name="restart_pc_text">Windows は開いているアプリを閉じて再起動します。未保存のデータがある場合は中止されることがあります。</string>
+    <string name="pc_restart_requested">%1$s に再起動を要求しました。</string>
     <string name="shutdown_pc_title">%1$s をシャットダウンしますか？</string>
     <string name="shutdown_pc_text">開いているアプリが閉じます。未保存のデータがある場合は中止されることがあります。</string>
     <string name="action_wake_pc">起動</string>
@@ -345,6 +355,7 @@
         <item quantity="other">%1$d台のPCに接続済み</item>
     </plurals>
     <string name="notification_waiting">PCを待機中</string>
+    <string name="notification_usb_only">USBのみ: ケーブルを待機中</string>
     <string name="notification_waiting_network">PC に接続するため Wi-Fi を待っています</string>
     <string name="reconnect_known_only_title">PC が見つかったネットワークのみ</string>
     <string name="reconnect_known_only_body">以前 PC に接続できた Wi-Fi でのみ、自動で PC を探します。それ以外のネットワークでも、PC からスマートフォンには接続できます。</string>
@@ -1444,8 +1455,13 @@
     <string name="home_section_system">システムと電源</string>
     <string name="settings_category_devices">デバイス</string>
     <string name="settings_category_features">機能とデータ</string>
+    <string name="settings_usb_only_title">USBのみ</string>
+    <string name="settings_usb_only_body">USBケーブルでのみPCに接続します。Wi-Fi、モバイルデータ、ローカル検出は使いません</string>
+    <string name="usb_only_tile_label">USBのみ</string>
     <string name="settings_theme_artwork_color">メディアアートワークの色</string>
     <string name="settings_mobile_data_body">Wi-Fi環境外でもLTE/5Gやリレーで接続を維持</string>
+    <string name="settings_bluetooth_link_title">ネットワークがないときは Bluetooth</string>
+    <string name="settings_bluetooth_link_body">Bluetooth 設定でこのスマートフォンとペアリングした PC は、Wi-Fi やモバイルデータがなくても通知、メッセージ、通話、クリップボードのために接続されたままになります</string>
     <string name="settings_background_clipboard_title">バックグラウンドでのクリップボードアクセス</string>
     <string name="settings_guide_card_body">すべての機能を閲覧したり、リアルタイムの要件を確認したり、あるいは直接操作画面へ進んだりできます。</string>
     <string name="settings_walkthrough_body">権限、ペアリング、パワーレベルに関するセットアップガイドを再表示します。</string>
@@ -1585,7 +1601,6 @@
     <string name="channel_report_replies">レポートへの返信</string>
     <string name="report_reply_title">レポートに返信があります</string>
     <string name="report_closed_title">レポートがクローズされました</string>
-    <string name="report_notice_text">レポート #%1$d。タップして GitHub で読む。</string>
     <string name="crash_card_sent">ありがとうございます。クラッシュレポートを送信しました</string>
     <string name="crash_card_title">NectarLink が予期せず終了しました</string>
     <string name="crash_card_failed">クラッシュレポートを送信できませんでした。「先に確認」から別の方法で送ってください。</string>
@@ -1622,6 +1637,53 @@
     <string name="community_invite_text">質問、アイデア、先行ビルド。NectarLink を作る人、使う人と一緒に。</string>
     <string name="community_invite_join">Discord に参加</string>
     <string name="community_invite_later">今はしない</string>
+    <string name="settings_daily_count_title">匿名の1日1回のカウントを送信</string>
+    <string name="settings_daily_count_body">1日1回、アプリのバージョン、プラットフォームと機種、各機能が成功・失敗した回数を送ります。IDや個人的な情報は含みません。</string>
+    <string name="deck_confirm_restart_title">%1$s を再起動しますか？</string>
+    <string name="deck_confirm_shut_down_title">%1$s をシャットダウンしますか？</string>
+    <string name="deck_confirm_power_text">保存していない作業があるアプリが止めることもあります。</string>
+    <string name="deck_confirm_restart">再起動</string>
+    <string name="deck_confirm_shut_down">シャットダウン</string>
+    <string name="deck_default_restart">再起動</string>
+    <string name="deck_default_shut_down">シャットダウン</string>
+    <string name="deck_default_macro">マクロ</string>
+    <string name="report_answer_line">%1$s: %2$s</string>
+    <string name="report_notice_open_text">レポート #%1$d。タップして読む。</string>
+    <string name="report_reply_action">返信</string>
+    <string name="report_reply_hint">返信内容</string>
+    <string name="report_who_you">あなた</string>
+    <string name="report_who_other">同じ問題がある人</string>
+    <string name="report_reply_not_sent">返信は送信されませんでした</string>
+    <string name="report_reply_limited">今日の返信の上限に達しました。明日もう一度お試しください。</string>
+    <string name="report_reply_refused">このレポートにはもう返信できません。</string>
+    <string name="report_reply_later">送信できませんでした。接続を確認して、もう一度お試しください。</string>
+    <string name="your_reports_title">送信したレポート</string>
+    <string name="your_reports_check">返信を確認</string>
+    <string name="your_reports_intro">NectarLink から送信したレポートは、返信と一緒に 30 日間ここに残ります。GitHub アカウントがなくてもここから返信できます。返信はレポートと同じく GitHub で公開されます。</string>
+    <string name="your_reports_none">このスマホからはまだレポートを送信していません。</string>
+    <string name="your_reports_waiting">登録待ち</string>
+    <string name="your_reports_closed">レポート #%1$d · クローズ済み</string>
+    <string name="your_reports_number">レポート #%1$d</string>
+    <string name="your_reports_sent">%1$s に送信</string>
+    <string name="your_reports_on_github">GitHub で見る</string>
+    <string name="your_reports_load_failed">返信を読み込めませんでした。接続を確認して、もう一度お試しください。</string>
+    <string name="your_reports_no_answers">まだ返信はありません。返信があると通知が届きます。</string>
+    <string name="your_reports_reply_on_github">このレポートは NectarLink から返信できるようになる前に送信されたため、GitHub で返信してください。</string>
+    <string name="your_reports_reply_sent">送信しました。レポートに追加されました。</string>
+    <string name="your_reports_sending">送信中</string>
+    <string name="your_reports_send">送信</string>
+    <string name="deck_on">オン</string>
+    <string name="deck_off">オフ</string>
+    <string name="media_center_title">再生中</string>
+    <string name="media_center_on_phone">このスマートフォン</string>
+    <string name="media_center_page">%2$d 件中 %1$d 件目</string>
+    <string name="media_center_phone_volume">スマートフォンの音量</string>
+    <string name="media_center_output">再生先を選ぶ</string>
+    <string name="pc_radio_wifi">Wi-Fi</string>
+    <string name="pc_radio_bluetooth">Bluetooth</string>
+    <string name="pc_radio_wifi_off_title">%1$s の Wi-Fi をオフにしますか?</string>
+    <string name="pc_radio_wifi_off_text">このスマートフォンが Wi-Fi で PC につながっている場合は接続が切れ、PC で Wi-Fi をオンに戻す必要があります。</string>
+    <string name="pc_radio_wifi_off_confirm">オフにする</string>
 </resources>
 
 

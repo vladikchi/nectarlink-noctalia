@@ -20,6 +20,8 @@ use nectarlink_core::{
 use crate::{core_host, links, state::Changes, win};
 
 const FILE_NAME: &str = "deck.json";
+/// How often Wi-Fi and Bluetooth are looked at for a change made on the PC.
+const RADIO_CHECK: Duration = Duration::from_secs(5);
 
 struct RuntimeState {
     config: DeckConfig,
@@ -45,6 +47,7 @@ fn sample_live_state() -> DeckState {
     let (volume, muted) = win::audio::speaker_state().unwrap_or((50, false));
     let mic_muted = win::audio::mic_muted();
     let playing = MEDIA_PLAYING.load(Ordering::Relaxed);
+    let (wifi, bluetooth) = win::radios::read();
     let mut output_devices = win::audio::output_devices();
     if crate::pc_audio_stream::is_enabled() {
         output_devices.push(nectarlink_core::AudioOutputDevice {
@@ -53,7 +56,7 @@ fn sample_live_state() -> DeckState {
             is_default: false,
         });
     }
-    DeckState { volume, muted, mic_muted, playing, output_devices }
+    DeckState { volume, muted, mic_muted, playing, output_devices, toggles_on: Vec::new(), wifi, bluetooth }
 }
 
 /// Immediately re-samples and broadcasts `deck.state` to connected phones when
@@ -95,6 +98,9 @@ pub fn init(data_dir: &Path) {
         mic_muted: Some(false),
         playing: false,
         output_devices: Vec::new(),
+        toggles_on: Vec::new(),
+        wifi: None,
+        bluetooth: None,
     };
     let wire_layout = config.to_wire_layout();
     {
@@ -110,6 +116,9 @@ pub fn init(data_dir: &Path) {
             mic_muted: Some(false),
             playing: false,
             output_devices: Vec::new(),
+            toggles_on: Vec::new(),
+            wifi: None,
+            bluetooth: None,
         });
         {
             let mut guard = lock(&DECK);
@@ -125,6 +134,18 @@ pub fn init(data_dir: &Path) {
         // Windows reports audio changes as they happen; the poll only
         // picks up edits to deck.json while the Deck page is open.
         win::audio::watch(|| core_host::spawn(refresh_live_state()));
+        // Wi-Fi and Bluetooth switched on the PC itself, now and then (#636).
+        core_host::spawn(async {
+            let mut every = tokio::time::interval(RADIO_CHECK);
+            loop {
+                every.tick().await;
+                let Ok(now) = tokio::task::spawn_blocking(win::radios::read).await else { continue };
+                let known = lock(&DECK).as_ref().map(|rt| (rt.state.wifi, rt.state.bluetooth));
+                if known.is_some_and(|known| known != now) {
+                    refresh_live_state().await;
+                }
+            }
+        });
         let mut interval = tokio::time::interval(Duration::from_millis(1500));
         loop {
             interval.tick().await;
@@ -166,17 +187,22 @@ fn reload_from_disk_if_modified() {
 
 /// Re-reads the PC's speaker and mic states and broadcasts `deck.state` if changed.
 pub async fn refresh_live_state() {
-    let Ok(next) = tokio::task::spawn_blocking(sample_live_state).await else {
+    let Ok(mut next) = tokio::task::spawn_blocking(sample_live_state).await else {
         return;
     };
     let changed = {
         let mut guard = lock(&DECK);
         match guard.as_mut() {
-            Some(rt) if rt.state != next => {
-                rt.state = next.clone();
-                true
+            Some(rt) => {
+                // Which toggle tiles are on comes from the Deck, not the system.
+                next.toggles_on = rt.config.toggles_on_list();
+                let changed = rt.state != next;
+                if changed {
+                    rt.state = next.clone();
+                }
+                changed
             }
-            _ => false,
+            None => false,
         }
     };
     if changed {
@@ -237,6 +263,7 @@ fn commit_config(mutate: impl FnOnce(&mut DeckConfig)) {
 }
 
 /// Called when a paired phone presses a Deck tile (`Platform::deck_press`).
+/// The core has checked the device's toggles for the tile already.
 pub fn handle_press(_peer: &DeviceId, tile_id: &str) -> Result<(), String> {
     execute_tile(tile_id)
 }
@@ -270,6 +297,16 @@ pub fn handle_set_audio(peer: &DeviceId, volume: Option<u8>, muted: Option<bool>
     Ok(())
 }
 
+/// Turns this PC's Wi-Fi and/or Bluetooth on or off for a phone
+/// (`pc.radio.set`, #636), then sends phones the state it's in.
+pub fn handle_set_radio(wifi: Option<bool>, bluetooth: Option<bool>) -> Result<(), String> {
+    win::radios::set(wifi, bluetooth)?;
+    core_host::spawn(async {
+        refresh_live_state().await;
+    });
+    Ok(())
+}
+
 /// Makes `id`, one of this PC's real output devices, the default output, for a
 /// phone (`pc.audio.set { output }`). The phone speaker isn't a device to switch to.
 pub fn handle_set_output(id: &str) -> Result<(), String> {
@@ -287,19 +324,43 @@ pub fn handle_set_output(id: &str) -> Result<(), String> {
 /// desktop Deck editor's "Test" button).
 pub fn execute_tile(tile_id: &str) -> Result<(), String> {
     reload_from_disk_if_modified();
-    let action = {
+    let (action, toggled) = {
         let guard = lock(&DECK);
         let rt = guard.as_ref().ok_or_else(|| "deck not initialized".to_owned())?;
-        rt.config
-            .tile(tile_id)
-            .map(|t| t.action.clone())
-            .ok_or_else(|| format!("unknown tile {tile_id:?}"))?
+        match rt.config.toggle_press(tile_id) {
+            Some((action, on_after)) => (action, Some(on_after)),
+            None => (
+                rt.config
+                    .tile(tile_id)
+                    .map(|t| t.action.clone())
+                    .ok_or_else(|| format!("unknown tile {tile_id:?}"))?,
+                None,
+            ),
+        }
     };
     let res = execute_action(&action);
+    // A toggle turns over only when its action ran (#640).
+    if let (Ok(()), Some(on)) = (&res, toggled) {
+        set_toggle(tile_id, on);
+    }
     core_host::spawn(async {
         refresh_live_state().await;
     });
     res
+}
+
+/// Notes whether the toggle tile `tile_id` is on, in deck.json too. The
+/// layout doesn't change, so phones get only the state.
+fn set_toggle(tile_id: &str, on: bool) {
+    let mut guard = lock(&DECK);
+    let Some(rt) = guard.as_mut() else { return };
+    rt.config.set_toggle(tile_id, on);
+    if let Some(path) = &rt.path {
+        if let Err(e) = rt.config.save(path) {
+            tracing::warn!(error = %e, "failed to save deck.json");
+        }
+        rt.last_mtime = file_mtime(path);
+    }
 }
 
 fn execute_action(action: &DeckAction) -> Result<(), String> {
@@ -367,6 +428,33 @@ fn execute_action(action: &DeckAction) -> Result<(), String> {
             } else {
                 win::shell::run_command(command)
             }
+        }
+        DeckAction::RestartPc => win::shell::restart(),
+        DeckAction::ShutDownPc => win::shell::shutdown(),
+        // Runs through its tile, which knows whether it's on (execute_tile).
+        DeckAction::Toggle { .. } => Err("a toggle runs from its tile".into()),
+        DeckAction::Macro { steps } => {
+            // In the background, so the phone hears back at once: its steps
+            // and pauses can take longer than a press waits (#490).
+            let steps = steps.clone();
+            std::thread::Builder::new()
+                .name("deck-macro".into())
+                .spawn(move || run_macro(&steps))
+                .map(|_| ())
+                .map_err(|e| format!("macro: {e}"))
+        }
+    }
+}
+
+/// Runs a macro's steps in order, pausing after each as set. A step that
+/// fails is logged and the rest still run, as with keys pressed by hand.
+fn run_macro(steps: &[nectarlink_core::deck::MacroStep]) {
+    for (i, step) in steps.iter().enumerate() {
+        if let Err(e) = execute_action(&step.action) {
+            tracing::info!(step = i, kind = step.action.kind(), error = %e, "a macro step didn't run");
+        }
+        if step.delay_ms > 0 && i + 1 < steps.len() {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(step.delay_ms)));
         }
     }
 }
@@ -528,6 +616,10 @@ pub fn build_action(
             }
             DeckAction::RunCommand { command: p.to_owned() }
         }
+        deck_kinds::RESTART_PC => DeckAction::RestartPc,
+        deck_kinds::SHUT_DOWN_PC => DeckAction::ShutDownPc,
+        deck_kinds::MACRO => DeckAction::Macro { steps: build_macro_steps(param)? },
+        deck_kinds::TOGGLE => build_toggle(param)?,
         _ => return Err(format!("Unknown action type {kind:?}.")),
     };
     if !action.is_valid() {
@@ -547,6 +639,75 @@ pub fn build_action(
         });
     }
     Ok(action)
+}
+
+/// One macro step as the Deck editor has it: the same fields as a tile's
+/// action, and the pause after it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EditorStep {
+    pub kind: String,
+    #[serde(default)]
+    pub param: String,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub win: bool,
+    #[serde(default)]
+    pub delay: u32,
+}
+
+/// A macro's steps from the editor's JSON list (#490), each checked as its
+/// own action, with the step's number in what's wrong.
+pub fn build_macro_steps(json: &str) -> Result<Vec<nectarlink_core::MacroStep>, String> {
+    let steps: Vec<EditorStep> =
+        serde_json::from_str(json).map_err(|_| tr!("Deck", "Add the macro's steps."))?;
+    if steps.is_empty() {
+        return Err(tr!("Deck", "Add the macro's steps."));
+    }
+    if steps.len() > nectarlink_core::MAX_MACRO_STEPS {
+        return Err(tr!("Deck", "A macro can have up to %1 steps.", nectarlink_core::MAX_MACRO_STEPS));
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    for (i, step) in steps.iter().enumerate() {
+        let action = build_action(&step.kind, &step.param, step.ctrl, step.alt, step.shift, step.win)
+            .map_err(|e| tr!("Deck", "Step %1: %2", i + 1, e))?;
+        if !action.fits_in_macro() {
+            return Err(tr!("Deck", "Step %1: restart, shut down and macros can't be steps.", i + 1));
+        }
+        if step.delay > nectarlink_core::MAX_MACRO_DELAY_MS {
+            return Err(tr!("Deck", "Step %1: wait at most 10 seconds.", i + 1));
+        }
+        out.push(nectarlink_core::MacroStep { action, delay_ms: step.delay });
+    }
+    if out.iter().map(|s| s.delay_ms).sum::<u32>() > nectarlink_core::MAX_MACRO_TOTAL_DELAY_MS {
+        return Err(tr!("Deck", "A macro can wait 30 seconds in all."));
+    }
+    Ok(out)
+}
+
+/// A toggle from the editor's JSON list of two actions, on then off (#640),
+/// each checked as its own action.
+pub fn build_toggle(json: &str) -> Result<DeckAction, String> {
+    let sides: Vec<EditorStep> = serde_json::from_str(json).unwrap_or_default();
+    let [on, off] = sides.as_slice() else {
+        return Err(tr!("Deck", "Choose what turning it on does, and what turning it off does."));
+    };
+    let side = |step: &EditorStep, what: String| {
+        let action = build_action(&step.kind, &step.param, step.ctrl, step.alt, step.shift, step.win)
+            .map_err(|e| tr!("Deck", "%1: %2", what.clone(), e))?;
+        if action.fits_in_macro() {
+            Ok(action)
+        } else {
+            Err(tr!("Deck", "%1: restart, shut down, macros and toggles can't be used here.", what))
+        }
+    };
+    let on = side(on, tr!("Deck", "Turning on"))?;
+    let off = side(off, tr!("Deck", "Turning off"))?;
+    Ok(DeckAction::Toggle { on: Box::new(on), off: Box::new(off) })
 }
 
 /// Adds or updates a tile on `page_id`. If `tile_id` is empty, creates a new tile.
@@ -651,6 +812,45 @@ mod tests {
 
         let cmd = build_action("run_command", "  echo hello  ", false, false, false, false).unwrap();
         assert_eq!(cmd, DeckAction::RunCommand { command: "echo hello".into() });
+    }
+
+    #[test]
+    fn builds_a_toggle_from_its_two_editor_entries() {
+        let json = r#"[{"kind":"run_command","param":"niri msg action power-on-monitors"},
+                       {"kind":"shortcut","param":"m","ctrl":true}]"#;
+        let toggle = build_action("toggle", json, false, false, false, false).unwrap();
+        assert_eq!(
+            toggle,
+            DeckAction::Toggle {
+                on: Box::new(DeckAction::RunCommand { command: "niri msg action power-on-monitors".into() }),
+                off: Box::new(DeckAction::Shortcut { key: "m".into(), mods: vec![KeyMod::Ctrl] }),
+            }
+        );
+        // Both chosen, and neither a toggle, macro or power action.
+        assert!(build_action("toggle", r#"[{"kind":"mic_mute"},null]"#, false, false, false, false).is_err());
+        assert!(build_action("toggle", r#"[{"kind":"mic_mute"}]"#, false, false, false, false).is_err());
+        assert!(
+            build_action(
+                "toggle",
+                r#"[{"kind":"shut_down_pc"},{"kind":"mic_mute"}]"#,
+                false,
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            build_action(
+                "toggle",
+                r#"[{"kind":"open_url","param":""},{"kind":"mic_mute"}]"#,
+                false,
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]

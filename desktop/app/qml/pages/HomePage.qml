@@ -237,6 +237,14 @@ Item {
             const rh = c.h * h
             if (rw <= 0.5 || rh <= 0.5) continue
             const topFlush = c.y <= 0.006
+            if (topFlush && rw < rh * 1.6) {
+                // A camera hole the phone reports as the box from the top edge
+                // down (some Honor and Huawei phones): a round camera in its
+                // middle, not a square tab hanging from the edge (#618).
+                const d = Math.min(rw, rh) * 0.8
+                parts.push(roundedRectSvg(rx + (rw - d) / 2, ry + (rh - d) / 2, d, d, d / 2, d / 2, d / 2, d / 2))
+                continue
+            }
             const r = topFlush ? Math.min(rw * 0.35, rh * 0.55) : Math.min(rw, rh) * 0.5
             parts.push(roundedRectSvg(rx, ry, rw, rh, topFlush ? 0 : r, topFlush ? 0 : r, r, r))
         }
@@ -757,6 +765,15 @@ Item {
                         readonly property real bezel: 3.5
                         readonly property real innerW: Math.max(10, width - bezel * 2)
                         readonly property real innerH: Math.max(20, height - bezel * 2)
+                        // Where the camera's middle is, for lining the status icons up
+                        // with it (#618): the first cutout at the top, else the dot.
+                        readonly property real cameraCenterY: {
+                            const s = home.screenData
+                            const c = s && s.cutouts && s.cutouts.length > 0 ? s.cutouts[0] : null
+                            if (c && c.y < 0.08 && c.h > 0)
+                                return bezel + (c.y + c.h / 2) * innerH
+                            return bezel + 6.5
+                        }
                         readonly property real defaultCorner: width * 0.14
                         readonly property real rTl: home.screenData && home.screenData.corners
                             ? Math.max(3, home.screenData.corners.tl * width) : defaultCorner
@@ -919,7 +936,7 @@ Item {
                         Item {
                             id: miniStatusBar
                             x: phoneArt.bezel + 5
-                            y: phoneArt.bezel + 3.5
+                            y: Math.max(phoneArt.bezel + 1.5, phoneArt.cameraCenterY - height / 2)
                             width: phoneArt.innerW - 10
                             height: 9
                             visible: home.online
@@ -1150,11 +1167,13 @@ Item {
                                 onClicked: AppController.runDoctor()
                                 iconPath: !home.online ? Icons.unlink
                                           : home.path === "usb" ? Icons.usb
+                                          : home.path === "bluetooth" ? Icons.bluetooth
                                           : home.path === "relay" ? Icons.globe
                                           : (home.wifiBars < 0 && home.cellBars >= 0 ? Icons.signal : Icons.wifi)
                                 text: home.online
                                       ? (home.path === "relay"
                                          ? (home.rttMs >= 1 ? qsTr("Away · %1 ms").arg(home.rttMs) : qsTr("Away"))
+                                         : home.path === "bluetooth" ? qsTr("Bluetooth: notifications, texts and calls")
                                          : (home.path === "usb"
                                             ? (home.rttMs >= 1 ? qsTr("USB · %1 ms").arg(home.rttMs) : qsTr("USB"))
                                             : (home.wifiBars >= 0
@@ -2092,6 +2111,62 @@ Item {
                         onToggled: (on) => MediaList.setPhoneSound(home.deviceId, on)
                     }
 
+                    // How loud it plays here, apart from the PC's own volume (#577).
+                    // The phone's volume keys move it too.
+                    Column {
+                        id: phoneSoundVolume
+                        readonly property int level: MediaList.revision >= 0 ? MediaList.phoneSoundVolume() : 100
+                        width: parent.width
+                        spacing: 4
+                        visible: (MediaList.revision >= 0 ? MediaList.phoneSoundState(home.deviceId) : "off") === "playing"
+
+                        Timer {
+                            id: phoneSoundVolumeSave
+                            interval: 600
+                            property int pending: 0
+                            onTriggered: MediaList.setPhoneSoundVolume(pending, true)
+                        }
+
+                        Item {
+                            width: parent.width
+                            height: 20
+                            Row {
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+                                Icon {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 15; height: 15
+                                    path: phoneSoundVolume.level === 0 ? Icons.soundOff : Icons.speaker
+                                    color: Theme.surfaceContent
+                                }
+                                Txt {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    role: "bodySmall"
+                                    text: qsTr("Phone sound volume")
+                                }
+                            }
+                            Txt {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                role: "caption"
+                                muted: true
+                                text: qsTr("%1%").arg(phoneSoundVolume.level)
+                            }
+                        }
+
+                        ValueSlider {
+                            width: parent.width
+                            value: phoneSoundVolume.level
+                            label: qsTr("Phone sound volume")
+                            valueText: qsTr("%1%").arg(phoneSoundVolume.level)
+                            onMoved: (next) => {
+                                MediaList.setPhoneSoundVolume(next, false)
+                                phoneSoundVolumeSave.pending = next
+                                phoneSoundVolumeSave.restart()
+                            }
+                        }
+                    }
+
                     LockChip {
                         visible: label.length > 0
                         feature: phoneControls.activeLockFeature
@@ -2631,6 +2706,38 @@ Item {
             width: parent.width
             spacing: 16
             Txt { width: parent.width; text: qsTr("%1 notifications").arg(appSheet.appName); role: "headline"; wrapMode: Text.WordWrap }
+            // The notification in full and selectable, to copy just part of it (#526).
+            Rectangle {
+                width: parent.width
+                height: Math.min(noteTextView.contentHeight + 20, 220)
+                visible: appSheet.noteText.length > 0
+                radius: Theme.radiusSm
+                color: Theme.surfaceContainerHigh
+                Flickable {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    contentHeight: noteTextView.contentHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    TextEdit {
+                        id: noteTextView
+                        width: parent.width
+                        text: appSheet.noteText
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.Wrap
+                        textFormat: TextEdit.PlainText
+                        font.family: Theme.fontUi
+                        font.pixelSize: 13
+                        color: Theme.surfaceContent
+                        selectionColor: Theme.primary
+                        selectedTextColor: Theme.primaryContent
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
+                        HoverHandler { cursorShape: Qt.IBeamCursor }
+                    }
+                }
+            }
             Flow {
                 width: parent.width
                 spacing: 8

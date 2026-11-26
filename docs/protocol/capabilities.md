@@ -49,6 +49,7 @@ capability is missing.
 | `sms.read` | Lists conversations and messages ([messages](sms.md)) | SMS permission |
 | `sms.send` | Sends texts when a PC asks ([messages](sms.md)) | SMS permission |
 | `sms.sims` | Lists the SIMs it texts from and sends on the one a PC picks ([messages](sms.md)) | SMS and phone permissions |
+| `sms.mark_read` | Marks a conversation's texts read in the phone's messages when a PC asks ([messages](sms.md)) | SMS permission, and notification access or Elevated |
 | `call.state` | Reports incoming and ongoing calls ([calls](calls.md)) | phone permission |
 | `call.control` | Answers, declines and silences calls when a PC asks ([calls](calls.md)) | phone permission |
 | `call.incall` | Mutes, holds and presses keys on the call in progress ([calls](calls.md)) | Elevated, Android 12+ |
@@ -103,6 +104,7 @@ capability is missing.
 | `storage.mount` | Mounts a paired phone's shared storage in File Explorer ([storage](storage.md)) | app update |
 | `input.inject` | Accepts pointer, keyboard and presentation input ([remote input](remote.md)) | app update |
 | `input.gamepad` | Plugs in a game controller for a phone's Gamepad ([remote input](remote.md) §3.1) | app update |
+| `input.gestures` | Does touchpad gestures from the phone: pinch, three and four fingers ([remote input](remote.md) §3.2) | app update |
 | `recorder` | Saves and converts voice recordings from a phone ([recorder](recorder.md)) | app update |
 | `deck.actions` | Shares its Deck layout and live tile state and runs Deck actions ([deck](deck.md)) | app update |
 | `pc.audio` | Reports active audio output devices in `deck.state` and accepts `pc.audio.set` volume/mute changes ([deck](deck.md)) | app update |

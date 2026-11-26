@@ -39,6 +39,11 @@ pub fn host() -> &'static CoreHost {
     HOST.get().expect("core host is started in main before Qt")
 }
 
+/// The running host, if it has been started (unit tests run without one).
+pub fn try_host() -> Option<&'static CoreHost> {
+    HOST.get()
+}
+
 /// The running host's data directory, if the host has been started.
 #[allow(dead_code)]
 pub fn try_data_dir() -> Option<&'static std::path::Path> {
@@ -128,6 +133,7 @@ pub fn compute_capabilities(
         nectarlink_core::MIRROR_VIEW.into(),
         nectarlink_core::MIRROR_LISTEN.into(),
         nectarlink_core::MIRROR_LISTEN_ASK.into(),
+        nectarlink_core::MIRROR_VOLUME.into(),
         nectarlink_core::MIC_LISTEN.into(),
         nectarlink_core::RECORDER.into(),
     ];
@@ -147,6 +153,12 @@ pub fn compute_capabilities(
         caps.push(nectarlink_core::STORAGE_WRITE.into());
         caps.push(nectarlink_core::DECK_ACTIONS.into());
         caps.push(nectarlink_core::PC_AUDIO.into());
+        // Wi-Fi and Bluetooth for phones, where there are any (#636).
+        if crate::win::radios::available() {
+            caps.push(nectarlink_core::PC_RADIOS.into());
+        }
+        // Another PC's mouse, over the edge of its screen (D432).
+        caps.push(nectarlink_core::MIRROR_POINTER.into());
         caps.push(nectarlink_core::PC_SHUTDOWN.into());
         // Only while hibernation is on: Windows can turn it off (#355).
         if crate::win::shell::can_hibernate() {
@@ -154,6 +166,7 @@ pub fn compute_capabilities(
         }
         #[cfg(windows)]
         {
+            caps.push(nectarlink_core::PC_RESTART.into());
             caps.push(nectarlink_core::WEBCAM_VIRTUAL.into());
             if crate::webcam::supports_hevc() {
                 caps.push(nectarlink_core::WEBCAM_HEVC.into());
@@ -219,6 +232,7 @@ pub fn compute_capabilities(
         if crate::gamepad::is_supported() {
             caps.push(nectarlink_core::INPUT_GAMEPAD.into());
         }
+        caps.push(nectarlink_core::INPUT_GESTURES.into());
     }
     if crate::win::vcam::is_registered() {
         caps.push(nectarlink_core::WEBCAM_ADDON_VCAM.into());
@@ -227,6 +241,7 @@ pub fn compute_capabilities(
     #[cfg(windows)]
     if crate::win::unlock::is_registered() {
         caps.push(nectarlink_core::unlock::PC.into());
+        caps.push(nectarlink_core::unlock::FROM_PHONE.into());
         crate::win::unlock::serve();
     }
     #[cfg(target_os = "linux")]
@@ -270,6 +285,8 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
     };
     let first = config();
     let initial_caps = first.capabilities.clone();
+    #[cfg(windows)]
+    let hevc_probe = tokio::task::spawn_blocking(crate::webcam::probe_hevc);
     let mut started = Node::start(first, platform.clone()).await;
     for wait in START_RETRIES {
         match &started {
@@ -294,10 +311,13 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
         }
     };
     let post_start_caps = compute_capabilities(Some(&node));
+    #[cfg(windows)]
+    let post_start_has_hevc = post_start_caps.iter().any(|c| c == nectarlink_core::WEBCAM_HEVC);
     if post_start_caps != initial_caps {
         node.update_power(nectarlink_core::PowerLevel::Basic, post_start_caps).await;
     }
     node.set_wake_info(wake.info.clone()).await;
+    crate::pc_battery::spawn(node.clone());
     // Subscribe before reading the initial state so no event is missed.
     let mut events = node.events();
     let devices = paired_snapshot(&node);
@@ -325,6 +345,17 @@ async fn run(data_dir: PathBuf, platform: Arc<dyn Platform>) {
         max_entries: nectarlink_core::DEFAULT_TIMELINE_MAX_ENTRIES,
     });
     let _ = host.node.set(node);
+    // Existing phone enrollment can only be read after the node is published.
+    #[cfg(windows)]
+    crate::win::unlock::serve();
+    #[cfg(windows)]
+    if !post_start_has_hevc {
+        spawn(async move {
+            if matches!(hevc_probe.await, Ok(true)) {
+                refresh_capabilities();
+            }
+        });
+    }
     host.hub.update(|s| {
         let mut changes = devices.map_or(Changes::NONE, |devices| s.set_devices(devices));
         for m in matrices {
@@ -465,6 +496,7 @@ fn dispatch(host: &CoreHost, event: &nectarlink_core::NodeEvent) {
     crate::continuity_camera::on_event(event);
     crate::calls::on_event(event);
     crate::messages::on_event(event);
+    crate::badges::on_event(event);
     crate::mirror::on_event(event);
     crate::pc_mirror::on_event(event);
     crate::remote::on_event(event);

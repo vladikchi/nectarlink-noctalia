@@ -17,6 +17,11 @@ pub mod ffi {
         /// The latest picture of a video stream (32-bit BGRX rows), for
         /// `VideoView`s showing it. Any thread.
         fn video_frame(stream: &str, width: u32, height: u32, bgrx: &[u8]);
+        /// The latest GPU-shared picture of a video stream (Windows D3D11
+        /// RGBA8 NT handle + keyed mutex). Returns `false` if GPU presentation
+        /// is unavailable so the caller can fall back to `video_frame`.
+        #[allow(dead_code)]
+        fn video_gpu_frame(stream: &str, width: u32, height: u32, epoch: u64, handle: usize) -> bool;
         /// The stream ended: its views go blank. Any thread.
         fn video_clear(stream: &str);
 
@@ -33,6 +38,10 @@ pub mod ffi {
         /// Draws the app at `percent` of its normal size. Before the app object is
         /// made. `QT_SCALE_FACTOR` set by hand wins.
         fn set_ui_scale(percent: i32);
+        /// Draws text with the system's own renderer (hinted to whole pixels)
+        /// instead of Qt's: crisper for small Chinese and Japanese (#460).
+        /// Before any window is made.
+        fn use_native_text_rendering();
         /// How many QML warnings and errors there were since
         /// `prepare_qt_for_ui_check`.
         fn qml_problem_count() -> i32;
@@ -103,6 +112,11 @@ pub mod ffi {
 
         #[allow(dead_code)]
         fn linux_tray_set_tooltip(tooltip: &str);
+
+        /// The theme icon `icon_name` when `one_colour` (the color one,
+        /// `icon_path`, if the theme doesn't have it), else the color one.
+        #[allow(dead_code)]
+        fn linux_tray_set_one_colour(one_colour: bool, icon_name: &str, icon_path: &str);
 
         #[allow(dead_code)]
         fn linux_tray_set_pause_label(label: &str);

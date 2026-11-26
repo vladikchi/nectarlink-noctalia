@@ -34,7 +34,7 @@ cargo build --release --locked --package nectarlink-desktop
 
 ## Phone and plugin setup
 
-On your phone, install the [official NectarLink Nightly 12 APK](https://github.com/thtbee/nectarlink/releases/tag/v0.1.6-nightly.12). This fork does not ship a modified Android app.
+Use the official upstream APK matching your desktop build: [Nightly 13](https://github.com/thtbee/nectarlink/releases/tag/v0.1.6-nightly.13) for this source branch, or [Nightly 12](https://github.com/thtbee/nectarlink/releases/tag/v0.1.6-nightly.12) for the published Nightly 12 build. This fork does not ship a modified Android app.
 
 1. Start NectarLink Desktop and pair your phone.
 2. Under **Settings → Connection & About**, enable **Local automation API**. If you want the plugin to read notifications and messages, also enable **Notifications and messages**.
@@ -48,4 +48,4 @@ On your phone, install the [official NectarLink Nightly 12 APK](https://github.c
 
 ## Source and licenses
 
-Based on upstream [NectarLink `v0.1.6-nightly.12`](https://github.com/thtbee/nectarlink/tree/v0.1.6-nightly.12). The `android/` source tree is unchanged from that tag. See [the upstream project](https://github.com/thtbee/nectarlink) and [component licenses](LICENSE).
+Based on upstream [NectarLink `v0.1.6-nightly.13`](https://github.com/thtbee/nectarlink/tree/v0.1.6-nightly.13). The `android/` source tree is unchanged from that tag. See [the upstream project](https://github.com/thtbee/nectarlink) and [component licenses](LICENSE).

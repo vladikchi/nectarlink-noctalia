@@ -27,6 +27,16 @@ Item {
     property bool selectMode: false
     property int lastClickedIndex: -1
 
+    // Box select (#587): a drag paints a box over the grid and selects what it
+    // covers, on top of what was selected already. Points are in the grid's
+    // content coordinates, so the box stays put while the grid scrolls.
+    property bool banding: false
+    property point bandFrom: Qt.point(0, 0)
+    property point bandTo: Qt.point(0, 0)
+    // Where the pointer is, in the grid's own coordinates (for scrolling at the edges).
+    property point bandPointer: Qt.point(0, 0)
+    property var bandBase: ({})
+
     // In-app viewer index (-1 when closed).
     property int viewerIndex: -1
     // The photo the viewer shows: its row moves when the grid's columns change
@@ -48,6 +58,7 @@ Item {
             if (page.lastClickedId.length > 0)
                 page.lastClickedIndex = Photos.rowOf(page.lastClickedId)
         }
+        function onMoreChanged() { grid.maybeLoadOlder() }
     }
     onViewerIndexChanged: if (viewerIndex < 0) viewerId = ""
     readonly property var viewedItem: {
@@ -213,6 +224,47 @@ Item {
         selectedMap = next
         selectedIds = Object.keys(next)
         selectMode = true
+    }
+
+    function startBand(from) {
+        bandBase = Object.assign({}, selectedMap)
+        bandFrom = from
+        bandTo = from
+        banding = true
+        selectMode = true
+    }
+
+    function moveBand(pointer) {
+        bandPointer = pointer
+        bandTo = grid.mapToItem(grid.contentItem, pointer.x, pointer.y)
+        bandSelect()
+    }
+
+    function bandSelect() {
+        const columns = grid.columns
+        const w = grid.cellWidth
+        const h = grid.cellHeight
+        if (columns <= 0 || w <= 0 || h <= 0) return
+        const c1 = Math.max(0, Math.floor(Math.min(bandFrom.x, bandTo.x) / w))
+        const c2 = Math.min(columns - 1, Math.floor(Math.max(bandFrom.x, bandTo.x) / w))
+        const r1 = Math.max(0, Math.floor(Math.min(bandFrom.y, bandTo.y) / h))
+        const r2 = Math.floor(Math.max(bandFrom.y, bandTo.y) / h)
+        const next = Object.assign({}, bandBase)
+        for (let r = r1; r <= r2 && r * columns < Photos.count; r++) {
+            for (let c = c1; c <= c2; c++) {
+                const i = r * columns + c
+                if (i >= Photos.count) break
+                const id = Photos.idAt(i)
+                if (id.length > 0) next[id] = true
+            }
+        }
+        selectedMap = next
+        selectedIds = Object.keys(next)
+    }
+
+    function endBand() {
+        banding = false
+        bandBase = ({})
     }
 
     function clearSelection() {
@@ -787,10 +839,20 @@ Item {
                 onColumnsChanged: Photos.setColumns(columns)
                 Component.onCompleted: Photos.setColumns(columns)
 
-                onAtYEndChanged: {
-                    if (atYEnd && Photos.more && count > 0)
+                function maybeLoadOlder() {
+                    if (!Photos.more || Photos.loadingOlder || count <= 0 || Photos.status !== "ready" || height <= 0)
+                        return
+                    const nearBottom = atYEnd
+                        || contentHeight <= height
+                        || contentY + height >= originY + contentHeight + bottomMargin - cellHeight * 2
+                    if (nearBottom)
                         Photos.loadOlder()
                 }
+
+                onAtYEndChanged: maybeLoadOlder()
+                onContentYChanged: maybeLoadOlder()
+                onContentHeightChanged: maybeLoadOlder()
+                onHeightChanged: maybeLoadOlder()
 
                 // Current top-visible item's day label, shown in the sticky day banner.
                 readonly property int topVisibleRow: Math.max(
@@ -816,6 +878,40 @@ Item {
                         anchors.centerIn: parent
                         visible: Photos.loadingOlder
                     }
+                }
+            }
+
+            // The box being dragged out (#587), drawn in the grid's content so it scrolls with it.
+            Rectangle {
+                parent: grid.contentItem
+                z: 5
+                visible: page.banding
+                x: Math.min(page.bandFrom.x, page.bandTo.x)
+                y: Math.min(page.bandFrom.y, page.bandTo.y)
+                width: Math.abs(page.bandTo.x - page.bandFrom.x)
+                height: Math.abs(page.bandTo.y - page.bandFrom.y)
+                radius: 4
+                color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.14)
+                border.width: 1
+                border.color: Theme.primary
+            }
+
+            // Scrolls while the box is dragged to the top or bottom edge.
+            Timer {
+                interval: 16
+                repeat: true
+                running: page.banding
+                onTriggered: {
+                    const edge = 48
+                    const y = page.bandPointer.y
+                    let step = 0
+                    if (y < grid.topMargin + edge) step = -Math.min(edge, grid.topMargin + edge - y) / 2
+                    else if (y > grid.height - edge) step = Math.min(edge, y - (grid.height - edge)) / 2
+                    if (step === 0) return
+                    const top = grid.originY - grid.topMargin
+                    const bottom = Math.max(top, grid.originY + grid.contentHeight + grid.bottomMargin - grid.height)
+                    grid.contentY = Math.max(top, Math.min(bottom, grid.contentY + step))
+                    page.moveBand(page.bandPointer)
                 }
             }
 
@@ -1028,12 +1124,83 @@ Item {
 
         // Main photo/video stage.
         Item {
+            id: stage
             anchors.top: viewerBar.bottom
             anchors.bottom: parent.bottom
             width: parent.width
+            clip: true
+            readonly property bool zoomable: page.viewedItem !== null && !page.viewedItem.isVideo
+
+            // Zoom (#587): the wheel zooms around the pointer, a double click
+            // goes between fitting the window and 2.5x, and dragging moves a
+            // zoomed photo. The full photo is the texture, so it stays sharp.
+            WheelHandler {
+                target: null
+                enabled: stage.zoomable
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                onWheel: (event) => {
+                    const steps = event.angleDelta.y / 120
+                    if (steps !== 0)
+                        stageImage.zoomAt(stageImage.zoom * Math.pow(1.25, steps), event.x - stageImage.x, event.y - stageImage.y)
+                }
+            }
+            DragHandler {
+                target: null
+                enabled: stage.zoomable && stageImage.zoom > 1
+                property real fromX: 0
+                property real fromY: 0
+                onActiveChanged: if (active) { fromX = stageImage.panX; fromY = stageImage.panY }
+                onTranslationChanged: {
+                    stageImage.panX = fromX + translation.x
+                    stageImage.panY = fromY + translation.y
+                    stageImage.clampPan()
+                }
+            }
+            TapHandler {
+                enabled: stage.zoomable
+                onDoubleTapped: (eventPoint) => stageImage.zoomAt(stageImage.zoom > 1 ? 1 : 2.5,
+                    eventPoint.position.x - stageImage.x, eventPoint.position.y - stageImage.y)
+            }
 
             Image {
                 id: stageImage
+                autoTransform: true
+                property real zoom: 1
+                property real panX: 0
+                property real panY: 0
+                // Each photo opens fitted.
+                readonly property string forId: page.viewerId
+                onForIdChanged: { zoom = 1; panX = 0; panY = 0 }
+                function clampPan() {
+                    const mx = Math.max(0, (paintedWidth * zoom - width) / 2)
+                    const my = Math.max(0, (paintedHeight * zoom - height) / 2)
+                    panX = Math.max(-mx, Math.min(mx, panX))
+                    panY = Math.max(-my, Math.min(my, panY))
+                }
+                // Zooms to `next`, keeping the point at (x, y) where it is.
+                function zoomAt(next, x, y) {
+                    const z = Math.max(1, Math.min(8, next))
+                    const cx = width / 2
+                    const cy = height / 2
+                    panX = x - cx - (x - cx - panX) * (z / zoom)
+                    panY = y - cy - (y - cy - panY) * (z / zoom)
+                    zoom = z
+                    clampPan()
+                }
+                transform: [
+                    Scale {
+                        origin.x: stageImage.width / 2
+                        origin.y: stageImage.height / 2
+                        xScale: stageImage.zoom
+                        yScale: stageImage.zoom
+                    },
+                    Translate { x: stageImage.panX; y: stageImage.panY }
+                ]
+                // The full photo couldn't be shown here (HEIC, which Qt can't
+                // read, #559): the preview stays, and Open in Photos shows it.
+                property bool fullFailed: false
+                readonly property string fullUrl: page.viewedItem && page.viewedItem.fullUrl ? page.viewedItem.fullUrl : ""
+                onFullUrlChanged: fullFailed = false
                 anchors.fill: parent
                 anchors.margins: 32
                 asynchronous: true
@@ -1042,9 +1209,30 @@ Item {
                 mipmap: true
                 source: {
                     if (!page.viewedItem) return ""
-                    if (page.viewedItem.fullUrl && page.viewedItem.fullUrl.length > 0)
-                        return page.viewedItem.fullUrl
+                    if (fullUrl.length > 0 && !fullFailed)
+                        return fullUrl
                     return page.viewedItem.thumb || ""
+                }
+                onStatusChanged: if (status === Image.Error && fullUrl.length > 0 && source == fullUrl) fullFailed = true
+            }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 20
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: stageImage.fullFailed
+                width: Math.min(parent.width - 48, cannotShow.implicitWidth + 28)
+                height: cannotShow.implicitHeight + 16
+                radius: Theme.radiusMd
+                color: Theme.surfaceContainerHigh
+                Txt {
+                    id: cannotShow
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, parent.width - 28)
+                    role: "bodySmall"
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    text: qsTr("This photo's format can't be shown here at full size. Open in Photos shows it.")
                 }
             }
 
@@ -1201,6 +1389,7 @@ Item {
                     }
                     Image {
                         id: coverImg
+                        autoTransform: true
                         anchors.fill: parent
                         asynchronous: true
                         fillMode: Image.PreserveAspectCrop
@@ -1321,6 +1510,7 @@ Item {
 
             Image {
                 id: thumbImg
+                autoTransform: true
                 anchors.fill: parent
                 anchors.margins: tile.selected ? 3 : 0
                 asynchronous: true
@@ -1445,19 +1635,37 @@ Item {
                 anchors.fill: parent
                 property point pressPos: Qt.point(0, 0)
                 property bool dragStarted: false
+                // A drag from here paints a box (#587) rather than dragging the photo out:
+                // while selecting, from a photo not selected yet, or with Ctrl or Shift held.
+                property bool boxes: false
                 onPressed: (ev) => {
                     pressPos = Qt.point(ev.x, ev.y)
                     dragStarted = false
+                    const held = (ev.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) !== 0
+                    boxes = held || (!tile.selected && (page.selectMode || page.selectedCount > 0))
+                    // A mouse drags; a finger still scrolls the grid.
+                    preventStealing = ev.source === Qt.MouseEventNotSynthesized
                     if (!tile.isVideo && tile.fullUrl.length === 0)
                         Photos.ensureFull(tile.itemId)
                 }
                 onPositionChanged: (ev) => {
-                    if (pressed && !dragStarted
+                    if (page.banding) {
+                        page.moveBand(mapToItem(grid, ev.x, ev.y))
+                    } else if (pressed && !dragStarted
                         && Math.hypot(ev.x - pressPos.x, ev.y - pressPos.y) > Qt.styleHints.startDragDistance) {
                         dragStarted = true
-                        Photos.startDrag(tile.itemId)
+                        if (boxes) {
+                            page.startBand(mapToItem(grid.contentItem, pressPos.x, pressPos.y))
+                            page.moveBand(mapToItem(grid, ev.x, ev.y))
+                        } else {
+                            Photos.startDrag(tile.itemId)
+                        }
                     }
                 }
+                onReleased: if (page.banding) page.endBand()
+                onCanceled: if (page.banding) page.endBand()
+                // Scrolled far enough to be dropped while painting a box: stop there.
+                Component.onDestruction: if (pressed && page.banding) page.endBand()
                 onClicked: (ev) => {
                     if (dragStarted)
                         return

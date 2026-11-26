@@ -62,8 +62,11 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import app.nectarlink.android.NectarlinkApplication
 import app.nectarlink.android.R
 import app.nectarlink.android.core.Core
@@ -161,15 +164,21 @@ class MainActivity : ComponentActivity() {
             handleDeckIntent(intent)
             handleRecordIntent(intent)
             handleWebcamIntent(intent)
+            handleReportsIntent(intent)
         }
 
         setContent {
             val appearance by preferences.appearance.collectAsStateWithLifecycle()
             val state by core.state.collectAsStateWithLifecycle()
+            val lifecycleOwner = LocalLifecycleOwner.current
             // Stay reachable in the background while a PC is paired.
-            LaunchedEffect(state.devices.isNotEmpty(), state.status is CoreStatus.Ready) {
+            LaunchedEffect(lifecycleOwner, state.devices.isNotEmpty(), state.status is CoreStatus.Ready) {
                 if (state.devices.isNotEmpty()) {
-                    ConnectionService.start(this@MainActivity)
+                    lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                            ConnectionService.start(this@MainActivity, fromForeground = true)
+                        }
+                    }
                 } else if (state.status is CoreStatus.Ready) {
                     ConnectionService.stop(this@MainActivity)
                 }
@@ -274,6 +283,14 @@ class MainActivity : ComponentActivity() {
         handleDeckIntent(intent)
         handleRecordIntent(intent)
         handleWebcamIntent(intent)
+        handleReportsIntent(intent)
+    }
+
+    /** A notification about a sent report: Your reports opens at it. */
+    private fun handleReportsIntent(intent: Intent?) {
+        val rid = intent?.getStringExtra(app.nectarlink.android.diag.ReportNotices.EXTRA_OPEN_REPORTS) ?: return
+        intent.removeExtra(app.nectarlink.android.diag.ReportNotices.EXTRA_OPEN_REPORTS)
+        app.nectarlink.android.diag.ReportNotices.requestOpen(rid)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -366,6 +383,7 @@ private sealed interface ScreenRoute {
     data object Walkthrough : ScreenRoute
     data object FeaturesGuide : ScreenRoute
     data object Report : ScreenRoute
+    data class YourReports(val focus: String) : ScreenRoute
     data object Pairing : ScreenRoute
     data class Webcam(val pcId: String) : ScreenRoute
     data class Recorder(val pcId: String) : ScreenRoute
@@ -402,6 +420,15 @@ private fun App(
     var activeFirstRunWalkthrough by rememberSaveable { mutableStateOf(false) }
     var featuresGuideOpen by rememberSaveable { mutableStateOf(false) }
     var reportOpen by rememberSaveable { mutableStateOf(false) }
+    // Your reports, at a report ("" for the list); null while closed.
+    var yourReports by rememberSaveable { mutableStateOf<String?>(null) }
+    val reportsAsked by app.nectarlink.android.diag.ReportNotices.open.collectAsStateWithLifecycle()
+    LaunchedEffect(reportsAsked) {
+        reportsAsked?.let {
+            yourReports = it
+            app.nectarlink.android.diag.ReportNotices.opened()
+        }
+    }
     var crashCard by remember { mutableStateOf<app.nectarlink.core.CrashCard?>(null) }
     var crashSend by remember { mutableStateOf(app.nectarlink.android.ui.settings.CrashSend.Idle) }
     var crashFixedIn by remember { mutableStateOf<String?>(null) }
@@ -566,6 +593,7 @@ private fun App(
         state.status is CoreStatus.Failed -> ScreenRoute.Failed(state.status.message)
         showWalkthrough -> ScreenRoute.Walkthrough
         featuresGuideOpen -> ScreenRoute.FeaturesGuide
+        yourReports != null -> ScreenRoute.YourReports(yourReports.orEmpty())
         reportOpen -> ScreenRoute.Report
         pairing || state.pairing != PairingState.Idle -> ScreenRoute.Pairing
         webcamDevice != null -> ScreenRoute.Webcam(webcamDevice.id)
@@ -733,6 +761,16 @@ private fun App(
                         onAsk = core::reportAsk,
                         reportLogs = core.reportLogs,
                         onBack = { reportOpen = false },
+                        onYourReports = { yourReports = "" },
+                        modifier = Modifier.fillMaxSize().padding(padding),
+                    )
+                }
+            }
+            is ScreenRoute.YourReports -> {
+                Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+                    app.nectarlink.android.ui.settings.YourReportsScreen(
+                        focusRid = route.focus.ifEmpty { null },
+                        onBack = { yourReports = null },
                         modifier = Modifier.fillMaxSize().padding(padding),
                     )
                 }
@@ -964,8 +1002,10 @@ private fun App(
                                     onPairNew = { pairing = true },
                                     onRefresh = core::refresh,
                                     onPower = core::pcPower,
+                                    onUnlock = core::unlockPc,
                                     onHibernate = core::pcHibernate,
                                     onShutdown = core::pcShutdown,
+                                    onRestart = core::pcRestart,
                                     onPhoneSoundOnPc = core::askPcForPhoneSound,
                                     onWake = core::wake,
                                     onSetReconnect = core::setReconnect,
@@ -1021,6 +1061,7 @@ private fun App(
                                     onClearTimeline = core::clearTimeline,
                                     onResendTimelineEntry = core::resendTimelineEntry,
                                     onSetPcAudio = core::setPcAudio,
+                                    onSetPcRadio = core::setPcRadio,
                                     onStopKeyboardFromPc = core::stopKeyboardFromPc,
                                     onListPcFiles = core::listPcFiles,
                                     onDownloadPcFile = core::downloadPcFile,
@@ -1062,7 +1103,7 @@ private fun App(
                                     onTurnOnBackgroundService = {
                                         preferences.updateBackgroundServiceEnabled(true)
                                         core.start()
-                                        ConnectionService.start(context)
+                                        ConnectionService.start(context, fromForeground = true)
                                     },
                                     onDismissWhatsNewGuide = {
                                         preferences.updateWalkthrough { it.dismissWhatsNewGuide() }
@@ -1124,7 +1165,7 @@ private fun App(
                                         preferences.updateBackgroundServiceEnabled(enabled)
                                         if (enabled) {
                                             core.start()
-                                            ConnectionService.start(context)
+                                            ConnectionService.start(context, fromForeground = true)
                                         } else {
                                             ConnectionService.stop(context)
                                         }
@@ -1137,6 +1178,8 @@ private fun App(
                                     onClearEverything = core::clearEverything,
                                     onToggleLocalSend = core::setLocalSendEnabled,
                                     onToggleAwayMode = core::setAwayMode,
+                                    onToggleUsbOnly = core::setUsbOnly,
+                                    onToggleBluetoothLink = core::setBluetoothLink,
                                     onOpenRelaySettings = { relaySettingsOpen = true },
                                     onOpenWalkthrough = {
                                         preferences.updateWalkthrough { it.goToStep(WalkthroughStep.Welcome) }

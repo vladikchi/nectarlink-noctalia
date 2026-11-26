@@ -114,8 +114,8 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     fun setPcSoundBufferMs(ms: Int) {
         pcSpeakerPlayer.bufferMs = ms
     }
-    /** What plays on this phone, for PCs (needs notification access). */
-    private val phoneMedia = PhoneMedia(this.context) { players ->
+    /** What plays on this phone, for PCs (needs notification access), and for the media center (#536). */
+    val phoneMedia = PhoneMedia(this.context) { players ->
         syncActiveMediaColor()
         enqueueNotificationOp { it.mediaChanged(players) }
     }
@@ -178,6 +178,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     private val storage = PhoneStorage(this.context) { path ->
         enqueueNotificationOp { it.storageChanged(path) }
     }
+    private val bluetoothLink = app.nectarlink.android.bluetooth.BluetoothLink(this.context)
     private val toggles = PhoneToggles(
         this.context,
         onChanged = { state ->
@@ -456,17 +457,19 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
             // Today's count, and a report that couldn't be sent before; off the start path.
             currentRunScope.launch(Dispatchers.IO) { runCatching { app.nectarlink.android.diag.Reports.followUp(context) } }
             val initialAwayMode = app.nectarlink.android.ui.Preferences.isAwayModeEnabled(context)
+            val initialUsbOnly = app.nectarlink.android.ui.Preferences.isUsbOnlyEnabled(context)
             val options = NodeOptions(
                 dataDir = context.noBackupFilesDir.resolve("core").absolutePath,
                 device = deviceInfo(context),
                 appVersion = BuildConfig.VERSION_NAME,
                 power = PowerLevel.BASIC,
                 awayMode = initialAwayMode,
+                usbOnly = initialUsbOnly,
                 downloadsDir = context.cacheDir.resolve("received").absolutePath,
                 usbPort = 53319u.toUShort(),
             )
             val started = try {
-                NectarlinkNode.start(options, platform, KeystoreKeyProtector(), this@Core)
+                NectarlinkNode.start(options, GuardedPlatform(context, platform), KeystoreKeyProtector(), this@Core)
             } catch (e: NectarlinkException) {
                 Log.e(TAG, "core failed to start", e)
                 _state.update { it.copy(status = CoreStatus.Failed(e.message ?: e.javaClass.simpleName)) }
@@ -511,6 +514,8 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
                     timelineRetentionDays = retention?.maxDays ?: 90u,
                     localsendEnabled = lsEnabled,
                     awayMode = initialAwayMode,
+                    usbOnly = initialUsbOnly,
+                    bluetoothLink = app.nectarlink.android.ui.Preferences.isBluetoothLinkEnabled(context),
                     localsendPeers = lsPeers,
                 )
             }
@@ -525,6 +530,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
                 it.copy(status = CoreStatus.Ready(started.deviceId()))
             }
             NotificationListener.instance?.refreshActive()
+            startBluetoothLink(started)
             refreshDataRetention()
             app.nectarlink.android.clipboard.DirectShareTargets.sync(context, _state.value.devices)
             app.nectarlink.android.widget.Widgets.refreshAll(context, _state.value)
@@ -696,6 +702,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
                 runJob = null
                 runScope = null
 
+                bluetoothLink.stop()
                 activeNode?.let { shutdownAndCloseNode(it) }
                 _state.value.devices.forEach { pcMedia.update(it.id, "", emptyList()) }
                 runCatching { Elevated.stop() }
@@ -882,7 +889,16 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     /** Voice recordings stored on this phone and their delivery status to PCs. */
     val recordings = RecordingsStore(this.context)
 
+    // An exception here would reach the core as a panic: caught and recorded instead.
     override fun onEvent(event: Event) {
+        try {
+            handle(event)
+        } catch (e: Exception) {
+            app.nectarlink.android.diag.Crashes.caught(context, "Core.onEvent", e)
+        }
+    }
+
+    private fun handle(event: Event) {
         if (event is Event.Transfer) {
             val transfer = event.transfer
             val isRunningProgress = transfer.status is TransferStatus.Running &&
@@ -1665,7 +1681,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
         }
         runCatching { node?.setLocalNetwork(local && reconnect.allows(id)) }
         val pause = when {
-            !local -> null
+            !local || _state.value.usbOnly -> null
             reconnect.gaveUp -> DialingPause.GaveUp
             reconnect.unknownNetwork(id) -> DialingPause.UnknownNetwork
             else -> null
@@ -1678,7 +1694,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     private fun reviewDialing() {
         val state = _state.value
         val anyOnline = state.devices.any { it.online }
-        val trying = state.hasNetwork && state.dialingPause == null && !state.awayMode &&
+        val trying = state.hasNetwork && state.dialingPause == null && !state.awayMode && !state.usbOnly &&
             state.devices.any { !it.isAndroid && it.reconnect }
         val now = android.os.SystemClock.elapsedRealtime()
         val gaveUpBefore = reconnect.gaveUp
@@ -1758,6 +1774,41 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
         onDialing { reviewDialing() }
     }
 
+    /** Reaches PCs only through a USB cable (the Quick Settings tile and Settings both switch this). */
+    fun setUsbOnly(enabled: Boolean) {
+        app.nectarlink.android.ui.Preferences.setUsbOnlyEnabled(context, enabled)
+        _state.update { it.copy(usbOnly = enabled) }
+        if (!enabled) {
+            // Back to the usual: running, and in the foreground while a PC is paired.
+            start()
+            if (_state.value.devices.isNotEmpty()) ConnectionService.start(context)
+        }
+        scope.launch(Dispatchers.IO) {
+            startJob?.join()
+            runCatching { node?.setUsbOnly(enabled) }
+            updateLocalSendMulticast(_state.value.localsendEnabled)
+        }
+        onDialing { applyDialing() }
+    }
+
+    /** Lets PCs reach this phone over Bluetooth when nothing else does, or stops it (#313). */
+    fun setBluetoothLink(enabled: Boolean) {
+        app.nectarlink.android.ui.Preferences.setBluetoothLinkEnabled(context, enabled)
+        _state.update { it.copy(bluetoothLink = enabled) }
+        scope.launch(Dispatchers.IO) {
+            startJob?.join()
+            val running = node
+            if (enabled && running != null) startBluetoothLink(running) else bluetoothLink.stop()
+        }
+    }
+
+    private fun startBluetoothLink(node: NectarlinkNode) {
+        if (!app.nectarlink.android.ui.Preferences.isBluetoothLinkEnabled(context)) return
+        if (!app.nectarlink.android.bluetooth.BluetoothLink.hasPermission(context)) return
+        val port = runCatching { node.startBluetoothListener() }.getOrNull() ?: return
+        bluetoothLink.start(port.toInt())
+    }
+
     internal fun onScreenInteractiveChanged(interactive: Boolean) {
         updateLocalSendMulticast(_state.value.localsendEnabled, interactive)
     }
@@ -1766,7 +1817,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
         enabled: Boolean,
         interactive: Boolean = context.getSystemService(android.os.PowerManager::class.java)?.isInteractive != false,
     ) {
-        val shouldHold = enabled && interactive && isRunning
+        val shouldHold = enabled && interactive && isRunning && !_state.value.usbOnly
         localsendMulticast?.runCatching { if (shouldHold) { if (!isHeld) acquire() } else if (isHeld) release() }
     }
 
@@ -1855,6 +1906,14 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
      * Automatically sends non-sensitive text copied in the background while Elevated mode is running.
      * Skips clips NectarLink itself wrote from a PC (`PhoneClipboard.isRecentEcho`).
      */
+    /** Tells [pcId] how loud to play this phone's sound (#577): the volume keys. */
+    fun mirrorVolume(pcId: String, level: Int) {
+        scope.launch(Dispatchers.IO) {
+            runCatching { node?.mirrorVolume(pcId, level.coerceIn(0, 100).toUByte()) }
+                .onFailure { Log.w(TAG, "can't tell the PC the sound volume", it) }
+        }
+    }
+
     /** Elevated's taps are refused: tells the PC that sent the last ones what to turn on. */
     fun onElevatedInputBlocked() {
         val (pcId, session) = PhonePlatform.lastMirrorInput ?: return
@@ -2304,6 +2363,9 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
             (if (PhoneSms.canRead(context)) listOf("sms.read") else emptyList()) +
             (if (PhoneSms.canSend(context)) listOf("sms.send") else emptyList()) +
             (if (PhoneSms.canSend(context) && PhoneSms.canListSims(context)) listOf("sms.sims") else emptyList()) +
+            // Marking texts read goes through the messaging app's own notification button (notification access), and the Elevated helper
+            // also writes the phone's messages: Android lets only the default SMS app (or the shell) change them, and the app keeps its own state.
+            (if (PhoneSms.canRead(context) && (Elevated.helperRunning || NotificationListener.hasAccess(context))) listOf("sms.mark_read") else emptyList()) +
             PhoneStorage.capabilities(context) +
             // Unlock a Windows or Linux PC with a strong biometric.
             (if (app.nectarlink.android.unlock.UnlockKeys.supported(context)) {
@@ -2319,9 +2381,13 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
                 emptyList()
             }) +
             (if (Elevated.hasCapability(NectarlinkServiceContract.CAP_CLIPBOARD_SYNC)) listOf("clip.read.auto") else emptyList()) +
-            // Apps in windows of their own run on displays the Elevated helper makes.
+            // Apps in windows of their own run on displays the Elevated helper makes,
+            // and only where Android runs apps on other displays: some phones
+            // (Android Go ones among them) leave that out and open the app on the
+            // phone's own screen instead (#635).
             (if (Elevated.hasCapability(NectarlinkServiceContract.CAP_APP_VIRTUAL_DISPLAY) &&
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    context.packageManager.hasSystemFeature(PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS)) {
                 listOf("mirror.virtual_display")
             } else {
                 emptyList()
@@ -2344,7 +2410,7 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
             // The same sound on its own, without the screen.
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
                     Elevated.hasCapability(NectarlinkServiceContract.CAP_DEVICE_AUDIO)) {
-                listOf("mirror.sound")
+                listOf("mirror.sound", "mirror.volume")
             } else {
                 emptyList()
             }) +
@@ -2502,6 +2568,21 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     /** Tells paired PCs that `version` is out on `channel`, so they needn't wait for their next check. */
     fun announceUpdate(channel: String, version: String) = command { it.announceUpdate(channel, version) }
 
+    fun unlockPc(id: String) {
+        scope.launch {
+            startJob?.join()
+            val node = node ?: return@launch
+            try {
+                node.unlockFromPhone(id)
+            } catch (e: NectarlinkException) {
+                _messages.tryEmit(
+                    if (e is NectarlinkException.Denied) context.getString(R.string.pc_unlock_unavailable)
+                    else describe(e)
+                )
+            }
+        }
+    }
+
     /** Locks a PC, or puts it to sleep; says how it went. */
     fun pcPower(id: String, sleep: Boolean) {
         scope.launch {
@@ -2543,6 +2624,22 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
             val message = try {
                 node.pcShutdown(id)
                 context.getString(R.string.pc_shutting_down, name)
+            } catch (e: NectarlinkException) {
+                if (e is NectarlinkException.Denied) context.getString(R.string.pc_actions_off, name) else describe(e)
+            }
+            _messages.tryEmit(message)
+        }
+    }
+
+    /** Asks a supported PC to restart. */
+    fun pcRestart(id: String) {
+        scope.launch {
+            startJob?.join()
+            val node = node ?: return@launch
+            val name = _state.value.nameOf(id).orEmpty()
+            val message = try {
+                node.pcRestart(id)
+                context.getString(R.string.pc_restart_requested, name)
             } catch (e: NectarlinkException) {
                 if (e is NectarlinkException.Denied) context.getString(R.string.pc_actions_off, name) else describe(e)
             }
@@ -2730,6 +2827,10 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
     /** Presses a named key or shortcut with optional modifiers on a PC. */
     fun remoteKey(id: String, key: String, mods: List<String> = emptyList(), onStatus: ((RemoteAccess) -> Unit)? = null) =
         remoteCommand(onStatus) { it.remoteKey(id, key, mods) }
+
+    /** Sends a touchpad gesture (`"task_view"`, `"switcher_next"`...) to a PC that offers `input.gestures`. */
+    fun remoteGesture(id: String, gesture: String, onStatus: ((RemoteAccess) -> Unit)? = null) =
+        remoteCommand(onStatus) { it.remoteGesture(id, gesture) }
 
     /** Sends a presentation slide command (`"next"`, `"previous"`, `"start"`, `"stop"`, `"black"`). */
     fun remoteSlide(id: String, action: String, onStatus: ((RemoteAccess) -> Unit)? = null) =
@@ -2943,6 +3044,32 @@ class Core(context: Context, private val scope: CoroutineScope) : EventListener 
         enqueueRemoteOp { node ->
             try {
                 node.setPcAudio(id, wireVol, muted)
+            } catch (e: NectarlinkException) {
+                if (e is NectarlinkException.Denied) {
+                    val name = _state.value.nameOf(id).orEmpty()
+                    _messages.tryEmit(context.getString(R.string.remote_denied_title, name))
+                } else if (e !is NectarlinkException.Offline) {
+                    _messages.tryEmit(describe(e))
+                }
+            }
+        }
+    }
+
+    /** Turns the PC's Wi-Fi and/or Bluetooth on or off (`pc.radio.set`, #636). */
+    fun setPcRadio(id: String, wifi: Boolean? = null, bluetooth: Boolean? = null) {
+        // Shown at once; the PC's next state confirms it or puts it back.
+        _state.update { s ->
+            val current = s.device(id)?.deckState ?: return@update s
+            s.reduce(
+                Event.DeckState(
+                    id = id,
+                    state = current.copy(wifi = wifi ?: current.wifi, bluetooth = bluetooth ?: current.bluetooth),
+                ),
+            )
+        }
+        enqueueRemoteOp { node ->
+            try {
+                node.setPcRadio(id, wifi, bluetooth)
             } catch (e: NectarlinkException) {
                 if (e is NectarlinkException.Denied) {
                     val name = _state.value.nameOf(id).orEmpty()
